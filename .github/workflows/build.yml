@@ -178,23 +178,32 @@ jobs:
           releaseBody: |
             ## 📦 SnapCraft v__VERSION__
 
-            ### 🍎 macOS
-            Ad-hoc signed. On first launch: right-click → Open, or go to
-            **System Settings › Privacy & Security › Open Anyway**.
+            ### 🍎 macOS (Apple Silicon)
+            Ad-hoc signed, packaged as both `.dmg` and `SnapCraft-macos.zip`.
+            - **DMG**: open it, drag SnapCraft to Applications.
+            - **ZIP**: unzip, move `SnapCraft.app` into `/Applications`.
+            If Gatekeeper blocks launch, run:
+            `sudo xattr -dr com.apple.quarantine /Applications/SnapCraft.app`
+            (or right-click → Open). On first screenshot, grant **Screen Recording**
+            in System Settings › Privacy & Security.
 
             ### 🪟 Windows
             Run the `.msi` installer or the NSIS `.exe`. Unsigned build, so
             SmartScreen may warn — choose "More info → Run anyway" for testing.
 
             ### 🐧 Linux
-            ```bash
-            sudo dpkg -i snapcraft_*_amd64.deb
-            # or
-            chmod +x snapcraft_*_amd64.AppImage && ./snapcraft_*_amd64.AppImage
-            ```
+            Not built in CI (Windows + macOS only, per project scope).
           releaseDraft: true
           prerelease: ${{ !startsWith(github.ref, 'refs/tags/v') }}
           args: --target ${{ matrix.target }}
+
+      # ---- Package macOS for easy install/test (zip .app + keep dmg) ----
+      - name: Zip .app (macOS)
+        if: startsWith(matrix.platform, 'macOS')
+        run: |
+          ditto -c -k --sequesterRsrc --keepParent \
+            "src-tauri/target/${{ matrix.target }}/release/bundle/macos/SnapCraft.app" \
+            "SnapCraft-macos.zip"
 
       # ---- Upload build artifacts ----
       - name: Upload artifacts (macOS)
@@ -202,7 +211,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
-          path: src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg
+          path: |
+            SnapCraft-macos.zip
+            src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg
 
       - name: Upload artifacts (Windows)
         if: matrix.platform == 'Windows'
