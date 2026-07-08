@@ -1,3 +1,4 @@
+#[cfg(target_os = "macos")]
 use std::process::Command;
 use tauri::AppHandle;
 use crate::store;
@@ -60,7 +61,7 @@ pub async fn copy_to_clipboard(_app: AppHandle, image_data: String) -> Result<()
             .set_image(arboard::ImageData {
                 width: w,
                 height: h,
-                bytes: rgba,
+                bytes: rgba.into(),
             })
             .map_err(|e| format!("复制到剪贴板失败: {}", e))?;
         Ok(())
