@@ -81,16 +81,55 @@ fn capture_to_data_url(args: &[&str]) -> Result<String, String> {
     Err("截图已取消".into())
 }
 
+/// 按 1-based index 取对应显示器的全局几何（逻辑点），用于 `-R` 截屏。
+/// index 对应 `list_displays` 返回的 `DisplayInfo.id`（即 `CGGetActiveDisplayList` 顺序）。
+#[cfg(target_os = "macos")]
+fn display_bounds_rect(idx: u32) -> Option<(i32, i32, u32, u32)> {
+    const MAX: u32 = 32;
+    let mut displays: [u32; MAX as usize] = [0; MAX as usize];
+    let mut count: u32 = 0;
+    unsafe {
+        CGGetActiveDisplayList(MAX, displays.as_mut_ptr(), &mut count);
+    }
+    let i = (idx as usize).checked_sub(1)?;
+    if i >= count as usize {
+        return None;
+    }
+    let d = displays[i];
+    let b = unsafe { CGDisplayBounds(d) };
+    Some((
+        b.origin.x as i32,
+        b.origin.y as i32,
+        b.size.width as u32,
+        b.size.height as u32,
+    ))
+}
+
 #[tauri::command]
 pub async fn capture_screen(_app: AppHandle, display_id: Option<u32>) -> Result<String, String> {
     #[cfg(target_os = "macos")]
     {
-        // 等待窗口隐藏完成，避免截到自身窗口（macOS 隐藏存在极短过渡）
-        std::thread::sleep(std::time::Duration::from_millis(200));
+        // 双保险：强制把 SnapCraft 自身窗口设为不可见，避免截图瞬间工具界面仍在最前
+        // （尤其窗口最大化时表现为整屏黑屏）。前端已 win.hide()，这里再兜底一次。
+        let _ = Command::new("osascript")
+            .args([
+                "-e",
+                "tell application \"System Events\" to set visible of (first process whose name is \"SnapCraft\") to false",
+            ])
+            .output();
+        // 截图前等待自身窗口隐藏完成（macOS 隐藏有动画延迟）。窗口未完全隐掉就被截，
+        // 会截到工具界面本身——尤其窗口最大化时表现为整屏黑屏。
+        std::thread::sleep(std::time::Duration::from_millis(500));
         let mut parts: Vec<String> = vec!["-x".into()];
-        if let Some(d) = display_id {
-            parts.push("-D".into());
-            parts.push(d.to_string());
+        if let Some(idx) = display_id {
+            // 用 `-R` 截选中显示器的全局几何区域，彻底绕开 `screencapture -D` 的
+            // 1-based 序号歧义（该序号与 `CGGetActiveDisplayList` 枚举顺序不一致，
+            // 非主屏序号还会被 screencapture 静默回退成主屏，导致「只能截主屏」）。
+            if let Some((x, y, w, h)) = display_bounds_rect(idx) {
+                parts.push("-R".into());
+                parts.push(format!("{},{},{},{}", x, y, w, h));
+            }
+            // idx 越界取不到 bounds 时回退 `-x` 主屏全屏
         }
         let refs: Vec<&str> = parts.iter().map(|s| s.as_str()).collect();
         capture_to_data_url(&refs)
