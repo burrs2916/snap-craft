@@ -28,6 +28,7 @@ pub struct DisplayInfo {
 }
 
 /// macOS 原生截图（全屏/区域/窗口），返回 PNG 的 data URL
+#[cfg(target_os = "macos")]
 fn capture_to_data_url(args: &[&str]) -> Result<String, String> {
     if !cfg!(target_os = "macos") {
         return Err("当前平台暂仅支持 macOS 原生截图".into());
