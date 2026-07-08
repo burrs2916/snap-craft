@@ -211,7 +211,10 @@ extern "C" {
     ) -> i32;
     fn CGDisplayBounds(display: u32) -> CGRect;
     fn CGMainDisplayID() -> u32;
-    fn CGDisplayScaleFactor(display: u32) -> f64;
+    // CGDisplayScaleFactor 在 macOS 10.7 后废弃并已从新 SDK 移除（链接报 undefined symbol），
+    // 改用 CGDisplayPixelsWide/High（物理像素）除以 CGDisplayBounds（逻辑点）反推 scale。
+    fn CGDisplayPixelsWide(display: u32) -> usize;
+    fn CGDisplayPixelsHigh(display: u32) -> usize;
 }
 
 #[cfg(target_os = "macos")]
@@ -252,7 +255,14 @@ pub fn list_displays() -> Vec<DisplayInfo> {
         for i in 0..count as usize {
             let d = displays[i];
             let b = unsafe { CGDisplayBounds(d) };
-            let scale = unsafe { CGDisplayScaleFactor(d) };
+            // scale = 物理像素 / 逻辑点（Retina 2x → 2.0；普通屏 → 1.0），两轴取平均更稳健
+            let px_w = unsafe { CGDisplayPixelsWide(d) } as f64;
+            let px_h = unsafe { CGDisplayPixelsHigh(d) } as f64;
+            let scale = if b.size.width > 0.0 && b.size.height > 0.0 {
+                ((px_w / b.size.width) + (px_h / b.size.height)) / 2.0
+            } else {
+                1.0
+            };
             out.push(DisplayInfo {
                 // screencapture -D 用 1 基序号（1=主屏，其余按 CGGetActiveDisplayList 顺序）
                 id: (i as u32) + 1,
