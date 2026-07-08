@@ -18,16 +18,24 @@ interface HistoryEntry {
   height: number;
 }
 
-// macOS 显示器信息（list_displays 返回，全局逻辑点坐标）
+// macOS 显示器信息（list_displays 返回：逻辑点坐标 + 真实物理像素 + 缩放比）
 interface DisplayInfo {
   id: number;
   is_main: boolean;
   x: number;
   y: number;
-  width: number;
-  height: number;
-  scale: number;
+  width: number; // 逻辑点宽（系统设置里「看起来」的分辨率）
+  height: number; // 逻辑点高
+  scale: number; // 缩放比 = 物理像素 / 逻辑点
+  physical_width: number; // 真实物理像素宽（截图实际抓到的像素数）
+  physical_height: number; // 真实物理像素高
 }
+
+// 把缩放比格式化成「2×」/「1.5×」这类易读标签
+const fmtScale = (s: number): string => {
+  const r = Math.round(s * 100) / 100;
+  return (Number.isInteger(r) ? `${r}` : r.toFixed(2)) + '×';
+};
 
 // 多屏选择器：点选具体显示器后由 pickDisplay 执行截取
 const DisplayPicker = ({
@@ -57,7 +65,8 @@ const DisplayPicker = ({
         <div className="permission-icon">🖥️</div>
         <div className="permission-title">选择要截取的显示器</div>
         <div className="permission-text">
-          你的 Mac 外接了 {displays.length} 块显示器，点选其中一块即可只截取该屏。
+          你的 Mac 外接了 {displays.length} 块显示器。每张卡片标注了「真实物理像素 ·
+          缩放比」，点选后将以该屏的原生分辨率截图。
         </div>
         <div
           className="display-picker-grid"
@@ -75,9 +84,15 @@ const DisplayPicker = ({
                 height: `${(d.height / uh) * 100}%`,
               }}
             >
-              <div className="display-pick-name">{d.is_main ? '主屏' : `显示器 ${i + 1}`}</div>
+              <div className="display-pick-name">
+                {d.is_main ? '主屏' : `显示器 ${i + 1}`}
+                <span className="display-pick-scale">{fmtScale(d.scale)}</span>
+              </div>
               <div className="display-pick-res">
-                {d.width} × {d.height}
+                {d.physical_width} × {d.physical_height}
+              </div>
+              <div className="display-pick-sub">
+                逻辑 {d.width} × {d.height}
               </div>
             </button>
           ))}

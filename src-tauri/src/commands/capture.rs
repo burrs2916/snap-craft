@@ -5,7 +5,8 @@ use tauri::AppHandle;
 use tauri::Manager;
 use crate::store;
 
-/// 区域截图时前端传来的矩形（设备像素，相对主显示器左上角）
+/// 区域截图时前端透明覆盖层传来的矩形（全局 Quartz 逻辑点坐标，原点主屏左上、y 向下，
+/// 含所有显示器；可能为负数，如位于主屏左侧的副屏）。与 CGWindowListCreateImage 同坐标系。
 #[derive(serde::Deserialize)]
 #[allow(dead_code)]
 pub struct CaptureRect {
@@ -15,16 +16,23 @@ pub struct CaptureRect {
     pub height: u32,
 }
 
-/// macOS 显示器信息（全局坐标 + 是否主屏 + scale）
+/// macOS 显示器信息（全局坐标 + 是否主屏 + scale + 真实物理像素）
 #[derive(serde::Serialize)]
 pub struct DisplayInfo {
     pub id: u32,
+    /// 逻辑点宽（系统设置里「看起来」的分辨率，用于 UI 布局与坐标换算）
+    pub width: u32,
+    /// 逻辑点高
+    pub height: u32,
+    /// 缩放比 = 物理像素 / 逻辑点（Retina 2x → 2.0；普通屏 → 1.0；自定义缩放如 1.5x）
+    pub scale: f64,
+    /// 真实物理像素宽（截图实际抓到的像素数，CGDisplayPixelsWide）
+    pub physical_width: u32,
+    /// 真实物理像素高
+    pub physical_height: u32,
     pub is_main: bool,
     pub x: i32,
     pub y: i32,
-    pub width: u32,
-    pub height: u32,
-    pub scale: f64,
 }
 
 /// macOS 原生截图（全屏/区域/窗口），返回 PNG 的 data URL
@@ -349,11 +357,13 @@ pub fn list_displays() -> Vec<DisplayInfo> {
         for i in 0..count as usize {
             let d = displays[i];
             let b = unsafe { CGDisplayBounds(d) };
-            // scale = 物理像素 / 逻辑点（Retina 2x → 2.0；普通屏 → 1.0），两轴取平均更稳健
-            let px_w = unsafe { CGDisplayPixelsWide(d) } as f64;
-            let px_h = unsafe { CGDisplayPixelsHigh(d) } as f64;
+            // 真实物理像素（截图实际抓到的分辨率）
+            let px_w = unsafe { CGDisplayPixelsWide(d) } as u32;
+            let px_h = unsafe { CGDisplayPixelsHigh(d) } as u32;
+            // scale = 物理像素 / 逻辑点（Retina 2x → 2.0；普通屏 → 1.0；自定义缩放如 1.5x），
+            // 两轴取平均更稳健
             let scale = if b.size.width > 0.0 && b.size.height > 0.0 {
-                ((px_w / b.size.width) + (px_h / b.size.height)) / 2.0
+                ((px_w as f64 / b.size.width) + (px_h as f64 / b.size.height)) / 2.0
             } else {
                 1.0
             };
@@ -361,12 +371,14 @@ pub fn list_displays() -> Vec<DisplayInfo> {
                 // 1 基序号（1=主屏），与 capture_screen 的 display_id 对应：
                 // 即 enumerate_displays()[id-1]，用于 CGDisplayCreateImage 精确抓该屏
                 id: (i as u32) + 1,
-                is_main: d == main,
-                x: b.origin.x as i32,
-                y: b.origin.y as i32,
                 width: b.size.width as u32,
                 height: b.size.height as u32,
                 scale,
+                physical_width: px_w,
+                physical_height: px_h,
+                is_main: d == main,
+                x: b.origin.x as i32,
+                y: b.origin.y as i32,
             });
         }
         out
