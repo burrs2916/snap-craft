@@ -1,7 +1,6 @@
 #[cfg(target_os = "macos")]
 use std::process::Command;
 use tauri::AppHandle;
-#[cfg(not(target_os = "macos"))]
 use tauri::Manager;
 use crate::store;
 
@@ -151,7 +150,14 @@ pub async fn capture_screen(_app: AppHandle, display_id: Option<u32>) -> Result<
     #[cfg(not(target_os = "macos"))]
     {
         let _ = display_id;
-        xcap_capture::capture_xcap_screen()
+        #[cfg(windows)]
+        {
+            win_capture::capture_screen()
+        }
+        #[cfg(not(windows))]
+        {
+            Err("当前平台不支持全屏截图".into())
+        }
     }
 }
 
@@ -201,7 +207,15 @@ pub async fn capture_region(_app: AppHandle, rect: Option<CaptureRect>) -> Resul
             let _ = w.hide();
         }
         std::thread::sleep(std::time::Duration::from_millis(200));
-        xcap_capture::capture_xcap_region(rect)
+        #[cfg(windows)]
+        {
+            win_capture::capture_region(rect)
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = rect;
+            Err("当前平台不支持区域截图".into())
+        }
     }
 }
 
@@ -218,15 +232,26 @@ pub async fn capture_window(_app: AppHandle) -> Result<String, String> {
     }
     #[cfg(not(target_os = "macos"))]
     {
-        xcap_capture::capture_xcap_window()
+        #[cfg(windows)]
+        {
+            win_capture::capture_window()
+        }
+        #[cfg(not(windows))]
+        {
+            Err("当前平台不支持窗口截图".into())
+        }
     }
 }
 
-// ===== Windows / Linux：使用 xcap 原生截屏 =====
-#[cfg(not(target_os = "macos"))]
-mod xcap_capture {
+// ===== Windows：原生截屏 =====
+// 屏幕/区域继续用 xcap（其底层即 Windows 原生 BitBlt，已支持多屏）；
+// 窗口截图升级为原生 PrintWindow —— 可截取「隐藏 / 被遮挡」窗口的真实内容
+// （这是 Windows 独有、macOS 做不到的优势），失败时回退 xcap。
+#[cfg(windows)]
+mod win_capture {
     use super::*;
     use image::RgbaImage;
+    use std::ffi::c_void;
     use xcap::{Monitor, Window};
 
     fn save_and_encode(image: RgbaImage) -> Result<String, String> {
@@ -238,39 +263,192 @@ mod xcap_capture {
         store::file_to_data_url(&path)
     }
 
-    pub fn capture_xcap_screen() -> Result<String, String> {
+    // 屏幕截图：xcap 抓主显示器（原生 BitBlt）
+    pub fn capture_screen() -> Result<String, String> {
         let monitor = Monitor::from_point(0, 0)
             .map_err(|e| format!("获取主显示器失败: {}", e))?;
-        let image = monitor
-            .capture_image()
-            .map_err(|e| format!("全屏截屏失败: {}", e))?;
-        save_and_encode(image)
+        save_and_encode(
+            monitor
+                .capture_image()
+                .map_err(|e| format!("全屏截屏失败: {}", e))?,
+        )
     }
 
-    pub fn capture_xcap_region(rect: Option<CaptureRect>) -> Result<String, String> {
+    // 区域截图：xcap 按全局坐标抓（原生 BitBlt）
+    pub fn capture_region(rect: Option<CaptureRect>) -> Result<String, String> {
         let rect = rect.ok_or("区域截屏需要先选择区域")?;
         let monitor = Monitor::from_point(0, 0)
             .map_err(|e| format!("获取主显示器失败: {}", e))?;
-        // xcap 的 capture_region 要求 u32 坐标；区域坐标在 Windows 上相对主显示器左上角，
-        // 理论非负，这里对极端负值做安全夹断避免越界 panic。
+        // 区域坐标在 Windows 上相对主显示器左上角，理论非负；极端负值夹断避免越界。
         let x: u32 = if rect.x < 0 { 0 } else { rect.x as u32 };
         let y: u32 = if rect.y < 0 { 0 } else { rect.y as u32 };
-        let image = monitor
-            .capture_region(x, y, rect.width, rect.height)
-            .map_err(|e| format!("区域截屏失败: {}", e))?;
-        save_and_encode(image)
+        save_and_encode(
+            monitor
+                .capture_region(x, y, rect.width, rect.height)
+                .map_err(|e| format!("区域截屏失败: {}", e))?,
+        )
     }
 
-    pub fn capture_xcap_window() -> Result<String, String> {
-        let windows = Window::all().map_err(|e| format!("枚举窗口失败: {}", e))?;
-        let window = windows
-            .into_iter()
-            .find(|w| !w.is_minimized().unwrap_or(true))
-            .ok_or("未找到可截图的窗口")?;
-        let image = window
-            .capture_image()
-            .map_err(|e| format!("窗口截屏失败: {}", e))?;
-        save_and_encode(image)
+    // 窗口截图：优先 PrintWindow，失败回退 xcap
+    pub fn capture_window() -> Result<String, String> {
+        match capture_window_print() {
+            Ok(d) => Ok(d),
+            Err(e) => match Window::all()
+                .map_err(|err| format!("枚举窗口失败: {}", err))
+                .and_then(|ws| {
+                    ws.into_iter()
+                        .find(|w| !w.is_minimized().unwrap_or(true))
+                        .ok_or_else(|| "未找到可截图的窗口".to_string())
+                        .and_then(|w| {
+                            w.capture_image().map_err(|err| format!("窗口截屏失败: {}", err))
+                        })
+                }) {
+                Ok(img) => save_and_encode(img),
+                Err(_) => Err(e),
+            },
+        }
+    }
+
+    // ---- 原生 PrintWindow 实现 ----
+    type HWND = *mut c_void;
+    type HDC = *mut c_void;
+    type HBITMAP = *mut c_void;
+    type BOOL = i32;
+
+    #[repr(C)]
+    struct RECT {
+        left: i32,
+        top: i32,
+        right: i32,
+        bottom: i32,
+    }
+
+    #[repr(C)]
+    struct RGBQUAD {
+        b: u8,
+        g: u8,
+        r: u8,
+        a: u8,
+    }
+
+    #[repr(C)]
+    struct BITMAPINFOHEADER {
+        biSize: u32,
+        biWidth: i32,
+        biHeight: i32,
+        biPlanes: u16,
+        biBitCount: u16,
+        biCompression: u32,
+        biSizeImage: u32,
+        biXPelsPerMeter: i32,
+        biYPelsPerMeter: i32,
+        biClrUsed: u32,
+        biClrImportant: u32,
+    }
+
+    #[repr(C)]
+    struct BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER,
+        bmiColors: [RGBQUAD; 1],
+    }
+
+    extern "system" {
+        fn GetDC(hWnd: HWND) -> HDC;
+        fn ReleaseDC(hWnd: HWND, hDC: HDC) -> i32;
+        fn CreateCompatibleDC(hDC: HDC) -> HDC;
+        fn DeleteDC(hDC: HDC) -> i32;
+        fn CreateCompatibleBitmap(hDC: HDC, cx: i32, cy: i32) -> HBITMAP;
+        fn DeleteObject(hObject: HBITMAP) -> i32;
+        fn SelectObject(hDC: HDC, hObject: HBITMAP) -> HBITMAP;
+        fn PrintWindow(hwnd: HWND, hdcBlt: HDC, nFlags: u32) -> BOOL;
+        fn GetForegroundWindow() -> HWND;
+        fn GetWindowRect(hWnd: HWND, lpRect: *mut RECT) -> BOOL;
+        fn GetDIBits(
+            hdc: HDC,
+            hbmp: HBITMAP,
+            uStartScan: u32,
+            cScanLines: u32,
+            lpvBits: *mut c_void,
+            lpbi: *mut BITMAPINFO,
+            uUsage: u32,
+        ) -> i32;
+    }
+
+    fn capture_window_print() -> Result<String, String> {
+        let hwnd = unsafe { GetForegroundWindow() };
+        if hwnd.is_null() {
+            return Err("未找到前台窗口".into());
+        }
+        let mut rect = RECT {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        };
+        if unsafe { GetWindowRect(hwnd, &mut rect) } == 0 {
+            return Err("无法获取窗口尺寸".into());
+        }
+        let w = rect.right - rect.left;
+        let h = rect.bottom - rect.top;
+        if w <= 0 || h <= 0 {
+            return Err("窗口尺寸无效".into());
+        }
+
+        let hdc_screen = unsafe { GetDC(std::ptr::null_mut()) };
+        if hdc_screen.is_null() {
+            return Err("无法获取屏幕 DC".into());
+        }
+        let hdc_mem = unsafe { CreateCompatibleDC(hdc_screen) };
+        let hbmp = unsafe { CreateCompatibleBitmap(hdc_screen, w, h) };
+        let old = unsafe { SelectObject(hdc_mem, hbmp) };
+
+        let printed = unsafe { PrintWindow(hwnd, hdc_mem, 0) };
+        let result = if printed == 0 {
+            Err("PrintWindow 失败".into())
+        } else {
+            let mut bmi: BITMAPINFO = unsafe { std::mem::zeroed() };
+            bmi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
+            bmi.bmiHeader.biWidth = w;
+            bmi.bmiHeader.biHeight = -h; // 负高度 → 顶层向下（top-down）排列，免去手动翻转
+            bmi.bmiHeader.biPlanes = 1;
+            bmi.bmiHeader.biBitCount = 32;
+            bmi.bmiHeader.biCompression = 0; // BI_RGB
+            let mut buf: Vec<u8> = vec![0u8; (w as usize) * (h as usize) * 4];
+            let got = unsafe {
+                GetDIBits(
+                    hdc_mem,
+                    hbmp,
+                    0,
+                    h as u32,
+                    buf.as_mut_ptr() as *mut c_void,
+                    &mut bmi,
+                    0, // DIB_RGB_COLORS
+                )
+            };
+            if got == 0 {
+                Err("读取窗口像素失败".into())
+            } else {
+                // GDI 像素为 BGRA，转成 RGBA 并强制不透明（避免 PrintWindow 的透明 alpha）
+                let mut rgba: Vec<u8> = Vec::with_capacity(buf.len());
+                for chunk in buf.chunks_exact(4) {
+                    rgba.extend_from_slice(&[chunk[2], chunk[1], chunk[0], 255]);
+                }
+                save_and_encode(
+                    image::RgbaImage::from_raw(w as u32, h as u32, rgba)
+                        .ok_or_else(|| "构造图像失败".to_string())?,
+                )
+            }
+        };
+
+        unsafe {
+            if !old.is_null() {
+                SelectObject(hdc_mem, old);
+            }
+            DeleteObject(hbmp);
+            DeleteDC(hdc_mem);
+            ReleaseDC(std::ptr::null_mut(), hdc_screen);
+        }
+        result
     }
 }
 
@@ -429,6 +607,69 @@ pub fn open_screen_recording_settings() -> Result<(), String> {
     #[cfg(not(target_os = "macos"))]
     {
         Err("仅 macOS 需要此操作".into())
+    }
+}
+
+// ===== 窗口自排除（self-exclusion）：让工具自身不出现在截屏里 =====
+// macOS 用 NSWindow.sharingType = .none（原生正解，零时序、无需等待 hide 动画）；
+// Windows 用 SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE)。
+// 前端在每个窗口建好后调用一次 apply_window_stealth(label) 即可，彻底根治「工具被截进画面」。
+#[tauri::command]
+pub fn apply_window_stealth(app: tauri::AppHandle, label: String) -> Result<(), String> {
+    let window = app
+        .get_webview_window(&label)
+        .ok_or_else(|| format!("窗口 {} 不存在", label))?;
+
+    #[cfg(target_os = "macos")]
+    {
+        let ns_win = window
+            .ns_window()
+            .map_err(|e| format!("获取 NSWindow 失败: {}", e))?;
+        set_nswindow_sharing_none(ns_win as *mut std::ffi::c_void);
+    }
+
+    #[cfg(windows)]
+    {
+        let hwnd = window
+            .hwnd()
+            .map_err(|e| format!("获取 HWND 失败: {}", e))?;
+        set_hwnd_exclude_from_capture(hwnd as *mut std::ffi::c_void);
+    }
+
+    #[cfg(not(any(target_os = "macos", windows)))]
+    {
+        let _ = window;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn set_nswindow_sharing_none(ns_win: *mut std::ffi::c_void) {
+    // 直接走 Objective-C runtime，避免引入 objc2 依赖带来的版本耦合。
+    // NSWindowSharingType 是 NSUInteger 的 typedef；None = 0。
+    extern "C" {
+        fn sel_registerName(name: *const std::os::raw::c_char) -> *const std::ffi::c_void;
+        fn objc_msgSend(obj: *mut std::ffi::c_void, sel: *const std::ffi::c_void, arg: u64);
+    }
+    let cname = match std::ffi::CString::new("setSharingType:") {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    let sel = unsafe { sel_registerName(cname.as_ptr()) };
+    if sel.is_null() {
+        return;
+    }
+    unsafe { objc_msgSend(ns_win, sel, 0u64) };
+}
+
+#[cfg(windows)]
+fn set_hwnd_exclude_from_capture(hwnd: *mut std::ffi::c_void) {
+    extern "system" {
+        fn SetWindowDisplayAffinity(hWnd: *mut std::ffi::c_void, dwAffinity: u32) -> i32;
+    }
+    const WDA_EXCLUDEFROMCAPTURE: u32 = 0x11;
+    unsafe {
+        SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE);
     }
 }
 

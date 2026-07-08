@@ -78,6 +78,7 @@ pub fn run() {
             get_platform,
             commands::capture::check_screen_capture_access,
             commands::capture::open_screen_recording_settings,
+            commands::capture::apply_window_stealth,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

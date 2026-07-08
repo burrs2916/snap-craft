@@ -154,6 +154,12 @@ export const EnhancedScreenshotApp = () => {
   // 因此无法在系统设置里出现/授权；只有 build 出的 .app 才会被系统登记到权限列表。
   const isDev = (import.meta as any).env?.DEV === true;
 
+  // 让本窗口对截屏「隐形」：避免工具自身被截进画面
+  // （mac 用 NSWindow.sharingType=.none，Windows 用 WDA_EXCLUDEFROMCAPTURE）
+  useEffect(() => {
+    invoke('apply_window_stealth', { label: getCurrentWindow().label }).catch(() => {});
+  }, []);
+
   const {
     setCurrentScreenshot,
     clearAnnotations,

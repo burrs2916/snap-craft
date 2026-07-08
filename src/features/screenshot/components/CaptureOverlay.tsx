@@ -29,6 +29,12 @@ export const CaptureOverlay = () => {
   // 已提交的选区：mouseup 时定型，避免确认按钮/双击的 mousedown 把 sel 重置成零尺寸导致 finish 提前返回
   const committedRef = useRef<Rect | null>(null);
 
+  // 让覆盖层窗口对截屏「隐形」：避免拖选时这层暗色遮罩被截进区域图
+  // （mac 用 NSWindow.sharingType=.none，Windows 用 WDA_EXCLUDEFROMCAPTURE）
+  useEffect(() => {
+    invoke('apply_window_stealth', { label: getCurrentWindow().label }).catch(() => {});
+  }, []);
+
   const closeSelf = useCallback(async () => {
     const w = getCurrentWindow();
     await w.close();
