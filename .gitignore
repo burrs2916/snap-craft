@@ -1,0 +1,62 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build output
+dist/
+build/
+target/
+
+# IDE and editor
+.vscode/
+.idea/
+.codebuddy/
+.workbuddy/
+*.swp
+*.swo
+*~
+
+# Runtime data
+data/
+logs/
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Lock files (optional - uncomment if you don't want to commit)
+# pnpm-lock.yaml
+# package-lock.json
+
+# Test and temporary files
+*.test.ts
+*.test.tsx
+*.spec.ts
+*.spec.tsx
+test-*.js
+test-*.ts
+analyze_*.py
+*.disabled
+
+# Generated files
+src-tauri/gen/
+
+# Documentation drafts and working files
+docs/工作总结/
+docs/需求分析/
+deliverables/
+*.md.backup
+
+# CAD test files
+*.dwg
+*.dxf
+*.cadbin
+
+# Temporary reports and analysis
+TEST_REPORT-*.md
+cad_*_report.md
+cad_*_analysis.md
+
+# All documentation
+docs/

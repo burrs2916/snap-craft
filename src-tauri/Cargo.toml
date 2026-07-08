@@ -1,0 +1,29 @@
+[package]
+name = "snap-craft"
+version = "0.1.0"
+description = "SnapCraft - A premium cross-platform screenshot tool"
+authors = ["you"]
+edition = "2021"
+# 与 `[[bin]]` 并存时，需显式指定 `cargo run` 的默认目标，否则 Tauri 开发模式会报无法选择二进制。
+default-run = "snap-craft"
+
+[lib]
+name = "snap_craft_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "=2.11.0", features = ["protocol-asset"] }
+tauri-plugin-opener = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-global-shortcut = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+chrono = "0.4"
+base64 = "0.22"
+xcap = "0.9"
+arboard = "3"
+image = "0.25"

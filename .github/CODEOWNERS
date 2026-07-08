@@ -1,0 +1,21 @@
+# 默认所有代码由以下人员审核
+* @burrs2916
+
+# 前端代码
+/src/ @burrs2916
+
+# 后端代码
+/src-tauri/ @burrs2916
+
+# CI 配置
+/.github/workflows/ @burrs2916
+
+# 文档
+/docs/ @burrs2916
+/README.md @burrs2916
+/LICENSE @burrs2916
+
+# 配置文件
+/package.json @burrs2916
+/src-tauri/Cargo.toml @burrs2916
+/src-tauri/tauri.conf.json @burrs2916
