@@ -59,6 +59,9 @@ export const CaptureOverlay = () => {
     // 优先用当前 sel；若被确认按钮/双击的 mousedown 冲掉，则回退到已提交的选区
     const s = sel && sel.w >= 5 && sel.h >= 5 ? sel : committedRef.current;
     if (!s || s.w < 5 || s.h < 5) return;
+    // 先隐藏覆盖层自身（含暗色遮罩），否则它会被截进区域截图里
+    const w = getCurrentWindow();
+    await w.hide();
     try {
       const dataUrl = await invoke<string>('capture_region', { rect: toBackendRect(s) });
       await emit('region-captured', dataUrl);

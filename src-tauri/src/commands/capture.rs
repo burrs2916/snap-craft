@@ -81,30 +81,6 @@ fn capture_to_data_url(args: &[&str]) -> Result<String, String> {
     Err("截图已取消".into())
 }
 
-/// 按 1-based index 取对应显示器的全局几何（逻辑点），用于 `-R` 截屏。
-/// index 对应 `list_displays` 返回的 `DisplayInfo.id`（即 `CGGetActiveDisplayList` 顺序）。
-#[cfg(target_os = "macos")]
-fn display_bounds_rect(idx: u32) -> Option<(i32, i32, u32, u32)> {
-    const MAX: u32 = 32;
-    let mut displays: [u32; MAX as usize] = [0; MAX as usize];
-    let mut count: u32 = 0;
-    unsafe {
-        CGGetActiveDisplayList(MAX, displays.as_mut_ptr(), &mut count);
-    }
-    let i = (idx as usize).checked_sub(1)?;
-    if i >= count as usize {
-        return None;
-    }
-    let d = displays[i];
-    let b = unsafe { CGDisplayBounds(d) };
-    Some((
-        b.origin.x as i32,
-        b.origin.y as i32,
-        b.size.width as u32,
-        b.size.height as u32,
-    ))
-}
-
 #[tauri::command]
 pub async fn capture_screen(_app: AppHandle, display_id: Option<u32>) -> Result<String, String> {
     #[cfg(target_os = "macos")]
@@ -117,22 +93,52 @@ pub async fn capture_screen(_app: AppHandle, display_id: Option<u32>) -> Result<
                 "tell application \"System Events\" to set visible of (first process whose name is \"SnapCraft\") to false",
             ])
             .output();
-        // 截图前等待自身窗口隐藏完成（macOS 隐藏有动画延迟）。窗口未完全隐掉就被截，
-        // 会截到工具界面本身——尤其窗口最大化时表现为整屏黑屏。
-        std::thread::sleep(std::time::Duration::from_millis(500));
-        let mut parts: Vec<String> = vec!["-x".into()];
-        if let Some(idx) = display_id {
-            // 用 `-R` 截选中显示器的全局几何区域，彻底绕开 `screencapture -D` 的
-            // 1-based 序号歧义（该序号与 `CGGetActiveDisplayList` 枚举顺序不一致，
-            // 非主屏序号还会被 screencapture 静默回退成主屏，导致「只能截主屏」）。
-            if let Some((x, y, w, h)) = display_bounds_rect(idx) {
-                parts.push("-R".into());
-                parts.push(format!("{},{},{},{}", x, y, w, h));
+        // 等待自身窗口隐藏动画完成（macOS 隐藏有动画延迟）
+        std::thread::sleep(std::time::Duration::from_millis(400));
+
+        // 选定要抓取的显示器：display_id 来自 list_displays 的 1-based id（即
+        // CGGetActiveDisplayList 数组下标 + 1），直接拿对应的 CGDirectDisplayID，
+        // 用 CGDisplayCreateImage 精确抓那块屏——100% 对应，不受屏幕排列顺序影响。
+        let displays = enumerate_displays();
+        let target = match display_id {
+            Some(idx) => {
+                let i = (idx as usize).saturating_sub(1);
+                displays.get(i).copied().unwrap_or_else(|| {
+                    if displays.is_empty() {
+                        unsafe { CGMainDisplayID() }
+                    } else {
+                        displays[0]
+                    }
+                })
             }
-            // idx 越界取不到 bounds 时回退 `-x` 主屏全屏
+            None => {
+                if displays.is_empty() {
+                    unsafe { CGMainDisplayID() }
+                } else {
+                    displays[0]
+                }
+            }
+        };
+
+        let img = unsafe { CGDisplayCreateImage(target) };
+        if img.is_null() {
+            return Err(
+                "截图失败：可能 SnapCraft 未获得「屏幕录制」权限，或无法抓取该显示器画面。\
+                 \n请打开 系统设置 → 隐私与安全性 → 屏幕录制，确认 SnapCraft 已开启开关。\
+                 \n（若以开发模式 tauri dev 运行，系统不会登记本应用，请改用 build 出的 .app）"
+                    .into(),
+            );
         }
-        let refs: Vec<&str> = parts.iter().map(|s| s.as_str()).collect();
-        capture_to_data_url(&refs)
+        let result = cgimage_to_rgba(img).and_then(|rgba| {
+            let path = store::temp_png_path();
+            let path_str = path.to_str().ok_or("无效的临时路径")?.to_string();
+            rgba
+                .save(&path_str)
+                .map_err(|e| format!("保存截图失败: {}", e))?;
+            store::file_to_data_url(&path)
+        });
+        unsafe { CGImageRelease(img) };
+        result
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -145,15 +151,36 @@ pub async fn capture_screen(_app: AppHandle, display_id: Option<u32>) -> Result<
 pub async fn capture_region(_app: AppHandle, rect: Option<CaptureRect>) -> Result<String, String> {
     #[cfg(target_os = "macos")]
     {
-        // 收到 rect（来自透明覆盖层）：用非交互 -R 按全局坐标截取，彻底绕开
-        // 交互式 screencapture -i 在「App 非前台」时选框起不来的问题，且支持跨屏。
-        // rect 已是全局 Quartz 坐标（points），与 screencapture -R 同坐标系。
+        // 收到 rect（来自透明覆盖层，已是全局 Quartz 逻辑点坐标）：用 CGWindowListCreateImage
+        // 按全局坐标精确抓取该区域。彻底绕开 screencapture -R 的坐标歧义，且天然支持跨屏。
+        // 调用前主窗口与覆盖层均已隐藏，所以抓到的是干净的真实屏幕。
         if let Some(r) = rect {
             if r.width >= 5 && r.height >= 5 {
-                let rarg = format!("{},{},{},{}", r.x, r.y, r.width, r.height);
-                let parts = vec!["-x".to_string(), "-R".to_string(), rarg];
-                let refs: Vec<&str> = parts.iter().map(|s| s.as_str()).collect();
-                return capture_to_data_url(&refs);
+                let bounds = CGRect {
+                    origin: CGPoint {
+                        x: r.x as f64,
+                        y: r.y as f64,
+                    },
+                    size: CGSize {
+                        width: r.width as f64,
+                        height: r.height as f64,
+                    },
+                };
+                // kCGWindowListOptionOnScreenOnly = 2, kCGNullWindowID = 0, kCGWindowImageDefault = 0
+                let img = unsafe { CGWindowListCreateImage(bounds, 2, 0, 0) };
+                if img.is_null() {
+                    return Err("区域截屏失败：无法抓取该区域（可能未获得屏幕录制权限）".into());
+                }
+                let result = cgimage_to_rgba(img).and_then(|rgba| {
+                    let path = store::temp_png_path();
+                    let path_str = path.to_str().ok_or("无效的临时路径")?.to_string();
+                    rgba
+                        .save(&path_str)
+                        .map_err(|e| format!("保存截图失败: {}", e))?;
+                    store::file_to_data_url(&path)
+                });
+                unsafe { CGImageRelease(img) };
+                return result;
             }
         }
         // 兜底：无 rect 时退回交互式（理论上覆盖层总会传 rect）
@@ -254,6 +281,34 @@ extern "C" {
     // 改用 CGDisplayPixelsWide/High（物理像素）除以 CGDisplayBounds（逻辑点）反推 scale。
     fn CGDisplayPixelsWide(display: u32) -> usize;
     fn CGDisplayPixelsHigh(display: u32) -> usize;
+
+    // ===== 直接抓屏（替代 screencapture 命令行，避免 -D 序号歧义 / -R 坐标歧义）=====
+    // 返回指定显示器的当前画面，100% 精确对应那块屏（不受屏幕排列顺序影响）。
+    fn CGDisplayCreateImage(display: u32) -> *mut std::ffi::c_void;
+    fn CGImageRelease(image: *mut std::ffi::c_void);
+    fn CGImageGetWidth(image: *mut std::ffi::c_void) -> usize;
+    fn CGImageGetHeight(image: *mut std::ffi::c_void) -> usize;
+    fn CGImageGetBitsPerPixel(image: *mut std::ffi::c_void) -> usize;
+    fn CGImageGetBytesPerRow(image: *mut std::ffi::c_void) -> usize;
+    fn CGImageGetDataProvider(image: *mut std::ffi::c_void) -> *mut std::ffi::c_void;
+    // 按全局 Quartz 坐标（逻辑点，原点主屏左上、y 向下，含所有显示器）截取屏幕区域，
+    // 用于区域截图，彻底绕开 screencapture -R 的坐标坑，且天然支持跨屏。
+    fn CGWindowListCreateImage(
+        screen_bounds: CGRect,
+        list_option: u32,
+        window_id: u32,
+        image_option: u32,
+    ) -> *mut std::ffi::c_void;
+}
+
+// CoreFoundation：CGImage 的像素数据经 CGDataProviderCopyData 得到 CFData，需 CF 函数读取。
+#[cfg(target_os = "macos")]
+#[link(name = "CoreFoundation", kind = "framework")]
+extern "C" {
+    fn CGDataProviderCopyData(provider: *mut std::ffi::c_void) -> *mut std::ffi::c_void;
+    fn CFDataGetLength(data: *mut std::ffi::c_void) -> isize;
+    fn CFDataGetBytePtr(data: *mut std::ffi::c_void) -> *const u8;
+    fn CFRelease(cf: *const std::ffi::c_void);
 }
 
 #[cfg(target_os = "macos")]
@@ -303,7 +358,8 @@ pub fn list_displays() -> Vec<DisplayInfo> {
                 1.0
             };
             out.push(DisplayInfo {
-                // screencapture -D 用 1 基序号（1=主屏，其余按 CGGetActiveDisplayList 顺序）
+                // 1 基序号（1=主屏），与 capture_screen 的 display_id 对应：
+                // 即 enumerate_displays()[id-1]，用于 CGDisplayCreateImage 精确抓该屏
                 id: (i as u32) + 1,
                 is_main: d == main,
                 x: b.origin.x as i32,
@@ -362,4 +418,67 @@ pub fn open_screen_recording_settings() -> Result<(), String> {
     {
         Err("仅 macOS 需要此操作".into())
     }
+}
+
+// ===== CoreGraphics 抓屏辅助（macOS）=====
+
+/// 枚举所有活动显示器的 CGDirectDisplayID（顺序与 list_displays 的 1-based id 对应）。
+#[cfg(target_os = "macos")]
+fn enumerate_displays() -> Vec<u32> {
+    const MAX: u32 = 32;
+    let mut displays: [u32; MAX as usize] = [0; MAX as usize];
+    let mut count: u32 = 0;
+    unsafe {
+        CGGetActiveDisplayList(MAX, displays.as_mut_ptr(), &mut count);
+    }
+    displays[..count as usize].to_vec()
+}
+
+/// 将 CGImageRef 的像素数据转换为 image::RgbaImage（内存顺序 [R,G,B,A]）。
+/// CoreGraphics 抓出的 CGImage 通常为 kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Big，
+/// 即每像素 4 字节、内存顺序 [A,R,G,B]；这里逐像素转为 RGBA 供 PNG 编码。
+#[cfg(target_os = "macos")]
+fn cgimage_to_rgba(image: *mut std::ffi::c_void) -> Result<image::RgbaImage, String> {
+    let width = unsafe { CGImageGetWidth(image) } as u32;
+    let height = unsafe { CGImageGetHeight(image) } as u32;
+    if width == 0 || height == 0 {
+        return Err("截图结果为空（图像尺寸为 0）".into());
+    }
+    let bpr = unsafe { CGImageGetBytesPerRow(image) } as usize;
+    let bpp = unsafe { CGImageGetBitsPerPixel(image) };
+    if bpp != 32 {
+        return Err(format!("不支持的图像像素格式（{}bpp，期望 32）", bpp));
+    }
+    let provider = unsafe { CGImageGetDataProvider(image) };
+    if provider.is_null() {
+        return Err("无法获取图像数据提供者".into());
+    }
+    let data = unsafe { CGDataProviderCopyData(provider) };
+    if data.is_null() {
+        return Err("读取图像数据失败（可能屏幕录制权限被拒）".into());
+    }
+    let len = unsafe { CFDataGetLength(data) };
+    let ptr = unsafe { CFDataGetBytePtr(data) };
+    let out = if ptr.is_null() {
+        Err("图像数据为空".into())
+    } else {
+        let bytes = unsafe { std::slice::from_raw_parts(ptr, len as usize) };
+        let mut buf: Vec<u8> = Vec::with_capacity((width as usize) * (height as usize) * 4);
+        for y in 0..height as usize {
+            let row = &bytes[y * bpr..];
+            for x in 0..width as usize {
+                let o = x * 4;
+                // 源：[A, R, G, B]（premultiplied-first, big-endian 布局）；目标：[R, G, B, A]
+                let a = row[o];
+                let r = row[o + 1];
+                let g = row[o + 2];
+                let b = row[o + 3];
+                buf.extend_from_slice(&[r, g, b, a]);
+            }
+        }
+        image::RgbaImage::from_raw(width, height, buf)
+            .ok_or_else(|| "图像缓冲构造失败".to_string())
+    };
+    unsafe { CFRelease(data as *const std::ffi::c_void) };
+    out
 }
