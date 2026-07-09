@@ -1,4 +1,4 @@
-import { Stage, Layer, Image as KonvaImage, Line, Rect, Ellipse, Text } from 'react-konva';
+import { Stage, Layer, Image as KonvaImage, Line, Rect, Ellipse, Text, Circle, Group } from 'react-konva';
 import { useEffect, useRef, useState, forwardRef, useImperativeHandle } from 'react';
 import type Konva from 'konva';
 import { useScreenshotStore } from '../store/screenshotStore';
@@ -160,6 +160,20 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, AnnotationCanvasProp
       return;
     }
 
+    if (activeTool === 'number') {
+      // 序号标注：点击即放一个，数字 = 当前序号标注数 + 1（自动递增）
+      const count = annotations.filter((a) => a.geometry.type === 'number').length + 1;
+      onAnnotationAdd({
+        id: genId(),
+        geometry: { type: 'number', points: [pos], text: String(count) },
+        layerId: 'default',
+        color: currentColor,
+        lineWidth: currentStrokeWidth,
+        opacity: 1,
+        properties: {},
+      });
+      return;
+    }
     if (activeTool === 'freehand') {
       setDraft({ type: 'freehand', points: [pos] });
     } else {
@@ -313,6 +327,78 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, AnnotationCanvasProp
               setEditing({ x: ann.geometry.points[0].x, y: ann.geometry.points[0].y, id: ann.id, text: ann.geometry.text || '' });
             }}
           />
+        );
+      }
+      case 'highlight': {
+        const [a, b] = ann.geometry.points;
+        const x = Math.min(a.x, b.x);
+        const y = Math.min(a.y, b.y);
+        const w = Math.abs(b.x - a.x);
+        const h = Math.abs(b.y - a.y);
+        // 荧光笔：半透明填充模拟马克笔高亮，不遮挡文字
+        return (
+          <Rect
+            {...baseProps}
+            x={x}
+            y={y}
+            width={w}
+            height={h}
+            fill={ann.color}
+            opacity={0.3}
+            cornerRadius={2}
+          />
+        );
+      }
+      case 'mosaic': {
+        const [a, b] = ann.geometry.points;
+        const x = Math.min(a.x, b.x);
+        const y = Math.min(a.y, b.y);
+        const w = Math.abs(b.x - a.x);
+        const h = Math.abs(b.y - a.y);
+        // 马赛克：区域内像素块网格遮挡（简化版，未读底图采样；下批升级真像素化）
+        const bs = 10;
+        const cols = Math.max(1, Math.ceil(w / bs));
+        const rows = Math.max(1, Math.ceil(h / bs));
+        return (
+          <Group {...baseProps}>
+            {Array.from({ length: rows * cols }).map((_, i) => {
+              const r = Math.floor(i / cols);
+              const c = i % cols;
+              return (
+                <Rect
+                  key={i}
+                  x={x + c * bs}
+                  y={y + r * bs}
+                  width={bs}
+                  height={bs}
+                  fill="#6e6e73"
+                  opacity={0.85}
+                />
+              );
+            })}
+          </Group>
+        );
+      }
+      case 'number': {
+        const p = ann.geometry.points[0];
+        const num = ann.geometry.text || '1';
+        // 序号：圆形背景 + 白色数字，点击工具自动递增
+        return (
+          <Group {...baseProps}>
+            <Circle x={p.x} y={p.y} radius={16} fill={ann.color} />
+            <Text
+              x={p.x - 16}
+              y={p.y - 16}
+              width={32}
+              height={32}
+              text={num}
+              fontSize={18}
+              fontStyle="bold"
+              fill="#fff"
+              align="center"
+              verticalAlign="middle"
+            />
+          </Group>
         );
       }
       case 'freehand': {

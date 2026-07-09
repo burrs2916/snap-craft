@@ -8,6 +8,9 @@ const TOOLS = [
   { id: 'circle', icon: '⭕', name: '圆形' },
   { id: 'text', icon: '📝', name: '文字' },
   { id: 'freehand', icon: '✏️', name: '自由绘制' },
+  { id: 'highlight', icon: '🖍️', name: '高亮' },
+  { id: 'mosaic', icon: '🔲', name: '马赛克' },
+  { id: 'number', icon: '🔢', name: '序号' },
 ];
 
 // 主题感知的标注调色板

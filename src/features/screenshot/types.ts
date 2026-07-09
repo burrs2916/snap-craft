@@ -4,7 +4,7 @@ export interface Point {
 }
 
 export interface AnnotationGeometry {
-  type: 'point' | 'line' | 'rectangle' | 'circle' | 'text' | 'arrow' | 'freehand';
+  type: 'point' | 'line' | 'rectangle' | 'circle' | 'text' | 'arrow' | 'freehand' | 'highlight' | 'mosaic' | 'number';
   points: Point[];
   text?: string;
   fontSize?: number;
