@@ -490,6 +490,10 @@ extern "C" {
     ) -> *mut std::ffi::c_void;
     fn CGContextDrawImage(ctx: *mut std::ffi::c_void, rect: CGRect, image: *mut std::ffi::c_void);
     fn CGContextRelease(ctx: *mut std::ffi::c_void);
+    // 坐标变换：翻转 Y 轴，让 DrawImage 输出与 image::RgbaImage/PNG 的「左上为原点」一致，
+    // 否则截图会上下颠倒（CG 位图上下文原点在左下角）。
+    fn CGContextTranslateCTM(ctx: *mut std::ffi::c_void, tx: f64, ty: f64);
+    fn CGContextScaleCTM(ctx: *mut std::ffi::c_void, sx: f64, sy: f64);
 }
 
 // CoreFoundation：CGImage 的像素数据经 CGDataProviderCopyData 得到 CFData，需 CF 函数读取。
@@ -700,7 +704,7 @@ fn enumerate_displays() -> Vec<u32> {
 /// image::RgbaImage 完全一致，从根上消除偏色。
 #[cfg(target_os = "macos")]
 #[allow(non_upper_case_globals)]
-const kCGImageAlphaPremultipliedLast: u32 = 1;
+const kCGImageAlphaNoneSkipLast: u32 = 6;
 #[cfg(target_os = "macos")]
 #[allow(non_upper_case_globals)]
 const kCGImageByteOrder32Little: u32 = 0x2000;
@@ -727,7 +731,10 @@ fn cgimage_to_rgba(image: *mut std::ffi::c_void) -> Result<image::RgbaImage, Str
             8,
             bytes_per_row,
             color_space,
-            kCGImageAlphaPremultipliedLast | kCGImageByteOrder32Little,
+            // NoneSkipLast：第 4 字节是填充位（无 alpha 语义），杜绝 CGWindowListCreateImage
+            // 返回的 alpha 通道非 255 时被当作预乘系数导致整图偏色（偏红/偏暗/发黑）。
+            // 32Little：内存顺序 [R,G,B,X]，与 image::RgbaImage 的 [R,G,B,A] 完全对齐。
+            kCGImageAlphaNoneSkipLast | kCGImageByteOrder32Little,
         )
     };
     if ctx.is_null() {
@@ -735,6 +742,10 @@ fn cgimage_to_rgba(image: *mut std::ffi::c_void) -> Result<image::RgbaImage, Str
         return Err("无法创建位图上下文（截图失败）".into());
     }
     unsafe {
+        // CG 位图上下文原点在左下角，PNG/RgbaImage 期望左上角。
+        // 先把坐标系上移 height、再 Y 翻转，DrawImage 输出的缓冲区即为「左上为原点」的正确朝向。
+        CGContextTranslateCTM(ctx, 0.0, height as f64);
+        CGContextScaleCTM(ctx, 1.0, -1.0);
         CGContextDrawImage(
             ctx,
             CGRect {
@@ -745,6 +756,12 @@ fn cgimage_to_rgba(image: *mut std::ffi::c_void) -> Result<image::RgbaImage, Str
         );
         CGContextRelease(ctx);
         CFRelease(color_space as *const std::ffi::c_void);
+    }
+    // 填充位无语义，强制 alpha=255，保证 PNG 完全不透明
+    let mut i = 3;
+    while i < buf.len() {
+        buf[i] = 255;
+        i += 4;
     }
     image::RgbaImage::from_raw(width, height, buf)
         .ok_or_else(|| "图像缓冲构造失败".to_string())

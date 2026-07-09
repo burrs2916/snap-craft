@@ -62,9 +62,14 @@ export const CaptureOverlay = () => {
   };
 
   const finish = useCallback(async () => {
-    // 优先用当前 sel；若被确认按钮/双击的 mousedown 冲掉，则回退到已提交的选区
-    const s = sel && sel.w >= 5 && sel.h >= 5 ? sel : committedRef.current;
-    if (!s || s.w < 5 || s.h < 5) return;
+    // 有选区用选区；没有（直接 Enter / 点确认）则截整屏——
+    // 覆盖层铺满的范围即选中屏，window.innerWidth/Height 正好是整屏逻辑尺寸
+    const s =
+      sel && sel.w >= 5 && sel.h >= 5
+        ? sel
+        : committedRef.current && committedRef.current.w >= 5 && committedRef.current.h >= 5
+          ? committedRef.current
+          : { x: 0, y: 0, w: window.innerWidth, h: window.innerHeight };
     // 先隐藏覆盖层自身（含暗色遮罩），否则它会被截进区域截图里
     const w = getCurrentWindow();
     await w.hide();
@@ -138,6 +143,10 @@ export const CaptureOverlay = () => {
         cursor: 'crosshair',
         userSelect: 'none',
         WebkitUserSelect: 'none',
+        // 一打开就给选中屏蒙一层淡阴影（符合「选屏后整体变暗」的预期）；
+        // 开始拖选后改透明，由选区 boxShadow 接管蒙版（选区亮、区外暗）。
+        background:
+          sel && sel.w > 0 && sel.h > 0 ? 'transparent' : 'rgba(0,0,0,0.35)',
       }}
       onMouseDown={onDown}
       onMouseMove={onMove}

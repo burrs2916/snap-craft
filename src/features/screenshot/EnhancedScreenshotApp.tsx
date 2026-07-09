@@ -350,32 +350,49 @@ export const EnhancedScreenshotApp = () => {
   );
 
   // 多屏选择器：点选具体显示器后执行全屏截取该屏
+  // 选屏后进入「该屏的区域选择覆盖层」：屏上蒙阴影、可拖选区域或确认截整屏。
+  // 所见即所得——截取范围就是覆盖层上看到的范围，彻底规避「选副屏却截到主屏」。
   const pickDisplay = useCallback(
     async (displayId: number | null) => {
       setShowDisplayPicker(false);
-      if (busy) return;
+      if (busy || displayId == null) return;
+      const d = displays.find((x) => x.id === displayId);
+      if (!d) return;
       setBusy(true);
       const win = getCurrentWindow();
       await win.hide();
-      try {
-        const dataUrl = await invoke<string>('capture_screen', { display_id: displayId });
-        await onCaptured(dataUrl);
-      } catch (e) {
-        const msg = String(e);
-        if (msg.includes('屏幕录制')) {
-          setPermissionNeeded(true);
-          return;
+      // 覆盖层只铺在选中屏上：位置/尺寸即该屏的全局逻辑矩形
+      const q = new URLSearchParams({
+        mode: 'region',
+        platform: 'macos',
+        ox: String(d.x),
+        oy: String(d.y),
+      });
+      const opts: Record<string, unknown> = {
+        title: 'SnapCraft 截图选择',
+        transparent: true,
+        decorations: false,
+        alwaysOnTop: true,
+        resizable: false,
+        visible: true,
+        x: d.x,
+        y: d.y,
+        width: d.width,
+        height: d.height,
+        url: `/#capture-overlay?${q.toString()}`,
+      };
+      const existing = await WebviewWindow.getByLabel('capture-overlay');
+      if (existing) {
+        try {
+          await existing.close();
+        } catch {
+          /* ignore */
         }
-        if (!msg.includes('截图已取消') && !msg.toLowerCase().includes('cancelled')) {
-          flash('截图失败：' + msg, 'error');
-        }
-      } finally {
-        await win.show();
-        await win.setFocus();
-        setBusy(false);
       }
+      new WebviewWindow('capture-overlay', opts as any);
+      // 结果由 region-captured / region-cancelled 事件收尾（与 doCapture 同款监听）
     },
-    [onCaptured, flash, busy, setPermissionNeeded]
+    [busy, displays]
   );
 
   const doCapture = useCallback(
