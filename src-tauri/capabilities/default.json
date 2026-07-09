@@ -1,12 +1,11 @@
 {
   "identifier": "main-window",
-  "description": "Capabilities for the main window and region-selection overlay",
-  "windows": ["main", "capture-overlay", "pin-*"],
+  "description": "Capability for the main application window",
+  "windows": ["main"],
   "permissions": [
     "core:default",
     "core:event:allow-emit",
     "core:event:allow-listen",
-    "core:window:allow-start-dragging",
     "core:window:allow-create",
     "core:window:allow-close",
     "core:window:allow-set-fullscreen",

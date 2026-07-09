@@ -1,0 +1,11 @@
+{
+  "identifier": "capture-overlay",
+  "description": "Capability for the transparent region-selection overlay window",
+  "windows": ["capture-overlay"],
+  "permissions": [
+    "core:default",
+    "core:event:allow-emit",
+    "core:window:allow-hide",
+    "core:window:allow-close"
+  ]
+}

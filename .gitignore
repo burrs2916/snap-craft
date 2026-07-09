@@ -60,3 +60,11 @@ cad_*_analysis.md
 
 # All documentation
 docs/
+
+# Agent/expert framework scaffolding (not part of the app)
+AGENTS.md
+HEARTBEAT.md
+IDENTITY.md
+SOUL.md
+TOOLS.md
+USER.md

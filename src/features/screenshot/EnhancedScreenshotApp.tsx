@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, emit, once, type UnlistenFn } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
@@ -39,7 +39,7 @@ const fmtScale = (s: number): string => {
 };
 
 // 多屏选择器：点选具体显示器后由 pickDisplay 执行截取
-const DisplayPicker = ({
+const DisplayPicker = memo(({
   displays,
   onPick,
   onCancel,
@@ -106,10 +106,10 @@ const DisplayPicker = ({
       </div>
     </div>
   );
-};
+});
 
 // 历史缩略图：滚入视口才把 dataUrl 设为 src，避免一次性解码全部大图
-const LazyHistoryThumb = ({ dataUrl, alt }: { dataUrl: string; alt: string }) => {
+const LazyHistoryThumb = memo(({ dataUrl, alt }: { dataUrl: string; alt: string }) => {
   const ref = useRef<HTMLImageElement>(null);
   const [src, setSrc] = useState('');
   useEffect(() => {
@@ -135,7 +135,7 @@ const LazyHistoryThumb = ({ dataUrl, alt }: { dataUrl: string; alt: string }) =>
       style={src ? undefined : { backgroundColor: 'var(--surface-strong)' }}
     />
   );
-};
+});
 
 export const EnhancedScreenshotApp = () => {
   const [theme, setTheme] = useState<Theme>(
@@ -194,11 +194,20 @@ export const EnhancedScreenshotApp = () => {
     }
   }, [theme]);
 
+  // flash 计时器用 ref 持有：连续调用时清掉上一次定时器，组件卸载也清理，避免内存泄漏/陈旧 toast
+  const flashTimer = useRef<number | null>(null);
   const flash = useCallback((msg: string, type: 'success' | 'error' = 'success') => {
     setToast(msg);
     setToastType(type);
-    window.setTimeout(() => setToast(null), 1800);
+    if (flashTimer.current !== null) window.clearTimeout(flashTimer.current);
+    flashTimer.current = window.setTimeout(() => setToast(null), 1800);
   }, []);
+  useEffect(
+    () => () => {
+      if (flashTimer.current !== null) window.clearTimeout(flashTimer.current);
+    },
+    []
+  );
 
   // ===== 启动加载历史记录 =====
   useEffect(() => {
@@ -465,16 +474,27 @@ export const EnhancedScreenshotApp = () => {
     [onCaptured, flash, platform, openRegionOverlay, busy, setPermissionNeeded, displays]
   );
 
-  // ===== 全局快捷键监听 =====
+  // 用 ref 持有最新 doCapture / onCaptured，快捷键监听只注册一次，
+  // 避免 busy 翻转（捕获进行中）时反复注销/重注册监听器导致快捷键偶发丢失
+  const doCaptureRef = useRef(doCapture);
+  useEffect(() => {
+    doCaptureRef.current = doCapture;
+  });
+  const onCapturedRef = useRef(onCaptured);
+  useEffect(() => {
+    onCapturedRef.current = onCaptured;
+  });
+
+  // ===== 全局快捷键监听（只注册一次，内部通过 ref 读最新函数）=====
   useEffect(() => {
     const un: Promise<UnlistenFn>[] = [
-      listen('capture-screen', () => doCapture('screen')),
-      listen('capture-region', () => doCapture('region')),
-      listen('capture-window', () => doCapture('window')),
+      listen('capture-screen', () => doCaptureRef.current('screen')),
+      listen('capture-region', () => doCaptureRef.current('region')),
+      listen('capture-window', () => doCaptureRef.current('window')),
       // Windows / Linux 区域截图由覆盖层回传结果
       listen('region-captured', (e) => {
         const win = getCurrentWindow();
-        onCaptured(e.payload as string).then(() => {
+        onCapturedRef.current(e.payload as string).then(() => {
           win.show();
           win.setFocus();
           setBusy(false);
@@ -490,7 +510,7 @@ export const EnhancedScreenshotApp = () => {
     return () => {
       un.forEach((p) => p.then((fn) => fn()));
     };
-  }, [doCapture, onCaptured]);
+  }, []);
 
   // 保存 / 复制时若已标注，合并标注后导出（否则用原始截图）
   const getExportDataUrl = (): string => {
