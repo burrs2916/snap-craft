@@ -56,7 +56,10 @@ fn capture_to_data_url(args: &[&str]) -> Result<String, String> {
 
     // 成功：生成了 PNG 文件
     if path.exists() {
-        return store::file_to_data_url(&path);
+        let url = store::file_to_data_url(&path);
+        // 清理临时 PNG，避免每次截图泄漏一个文件
+        let _ = std::fs::remove_file(&path);
+        return url;
     }
 
     // 未生成文件：区分「用户取消」「权限被拒」「其他真实错误」
@@ -137,7 +140,9 @@ pub async fn capture_screen(_app: AppHandle, display_id: Option<u32>) -> Result<
             rgba
                 .save(&path_str)
                 .map_err(|e| format!("保存截图失败: {}", e))?;
-            store::file_to_data_url(&path)
+            let url = store::file_to_data_url(&path);
+            let _ = std::fs::remove_file(&path);
+            url
         });
         unsafe { CGImageRelease(img) };
         result
@@ -186,7 +191,9 @@ pub async fn capture_region(_app: AppHandle, rect: Option<CaptureRect>) -> Resul
                     rgba
                         .save(&path_str)
                         .map_err(|e| format!("保存截图失败: {}", e))?;
-                    store::file_to_data_url(&path)
+                    let url = store::file_to_data_url(&path);
+                    let _ = std::fs::remove_file(&path);
+                    url
                 });
                 unsafe { CGImageRelease(img) };
                 return result;

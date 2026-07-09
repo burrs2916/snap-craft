@@ -36,6 +36,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, AnnotationCanvasProp
   const [selBox, setSelBox] = useState<{ x: number; y: number; width: number; height: number } | null>(null);
   const [box, setBox] = useState({ w: 0, h: 0 });
   const [editing, setEditing] = useState<{ x: number; y: number; id?: string; text?: string } | null>(null);
+  const [imageError, setImageError] = useState(false);
 
   const {
     selectedId,
@@ -51,7 +52,9 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, AnnotationCanvasProp
   useEffect(() => {
     if (!imageData) return;
     const img = new Image();
-    img.onload = () => setImage(img);
+    img.onload = () => { setImage(img); setImageError(false); };
+    // 损坏 dataUrl 时给错误态，否则永远"加载中…"无反馈
+    img.onerror = () => { setImage(null); setImageError(true); };
     img.src = imageData;
   }, [imageData]);
 
@@ -99,6 +102,8 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, AnnotationCanvasProp
       }
       if (e.key === 'Delete' || e.key === 'Backspace') {
         if (selectedId) {
+          // Backspace 在 Tauri webview 可能触发后退导航，必须拦截
+          e.preventDefault();
           deleteAnnotation(selectedId);
           setSelectedId(null);
         }
@@ -298,10 +303,13 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, AnnotationCanvasProp
             fill={ann.color}
             onDblClick={(ev) => {
               ev.cancelBubble = true;
+              // 重置提交锁，否则首次新建后 commitText 直接 return，编辑内容丢失
+              committedRef.current = false;
               setEditing({ x: ann.geometry.points[0].x, y: ann.geometry.points[0].y, id: ann.id, text: ann.geometry.text || '' });
             }}
             onDblTap={(ev) => {
               ev.cancelBubble = true;
+              committedRef.current = false;
               setEditing({ x: ann.geometry.points[0].x, y: ann.geometry.points[0].y, id: ann.id, text: ann.geometry.text || '' });
             }}
           />
@@ -360,6 +368,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, AnnotationCanvasProp
     [scale]
   );
 
+  if (imageError) return <div className="canvas-loading">图片加载失败（数据可能损坏）</div>;
   if (!image) return <div className="canvas-loading">加载中…</div>;
 
   const draftAnn: AnnotationObject = draft

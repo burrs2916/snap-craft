@@ -22,15 +22,14 @@
         "decorations": true,
         "transparent": false,
         "dragDropEnabled": false,
-        "devtools": true
+        "devtools": false
       }
     ],
     "security": {
-      "csp": null,
+      "csp": "default-src 'self'; img-src 'self' data: asset: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'",
       "assetProtocol": {
         "enable": true,
         "scope": [
-          "$HOME/**",
           "$APPDATA/**",
           "$RESOURCE/**"
         ]

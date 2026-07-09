@@ -46,8 +46,12 @@ pub fn load_history(app: &tauri::AppHandle) -> Vec<HistoryItem> {
 pub fn save_history(app: &tauri::AppHandle, items: &[HistoryItem]) -> Result<(), String> {
     let path = history_path(app)?;
     let json = serde_json::to_string_pretty(items).map_err(|e| e.to_string())?;
-    let mut file = fs::File::create(&path).map_err(|e| e.to_string())?;
+    // 原子写：先写临时文件再 rename，避免写到一半崩溃损坏 history.json
+    let tmp = path.with_extension("json.tmp");
+    let mut file = fs::File::create(&tmp).map_err(|e| e.to_string())?;
     file.write_all(json.as_bytes()).map_err(|e| e.to_string())?;
+    file.flush().map_err(|e| e.to_string())?;
+    fs::rename(&tmp, &path).map_err(|e| format!("历史保存失败: {}", e))?;
     Ok(())
 }
 

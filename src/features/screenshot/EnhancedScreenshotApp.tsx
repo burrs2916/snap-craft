@@ -221,9 +221,11 @@ export const EnhancedScreenshotApp = () => {
   const onCaptured = useCallback(
     async (dataUrl: string) => {
       const { width, height } = await new Promise<{ width: number; height: number }>(
-        (res) => {
+        (res, rej) => {
           const img = new Image();
           img.onload = () => res({ width: img.width, height: img.height });
+          // 损坏 dataUrl 时 reject，否则 Promise 永挂 → 主窗口永久隐藏 + busy 卡死
+          img.onerror = () => rej(new Error('截图数据损坏，无法解码'));
           img.src = dataUrl;
         }
       );
@@ -403,6 +405,11 @@ export const EnhancedScreenshotApp = () => {
         if (kind === 'region' || (kind === 'window' && platform === 'macos')) {
           await openRegionOverlay(kind);
           overlayOpened = true;
+          // 兜底：覆盖层若崩溃/不发事件，30s 后强制恢复主窗口，避免永久隐藏 + busy 卡死
+          window.setTimeout(() => {
+            getCurrentWindow().show();
+            setBusy(false);
+          }, 30000);
           return; // 结果由 region-captured / region-cancelled 事件收尾
         }
         // Windows / Linux 窗口截图 / 全屏（单屏或主屏）
@@ -464,6 +471,8 @@ export const EnhancedScreenshotApp = () => {
     if (annotations.length > 0 && canvasRef.current) {
       const merged = canvasRef.current.getMergedImageDataUrl();
       if (merged) return merged;
+      // 合并失败（stage/layer 未就绪）静默回退原图会让标注丢失，这里明确提示
+      flash('标注合并失败，已导出原图（标注未包含）', 'error');
     }
     return current!.dataUrl;
   };

@@ -10,8 +10,10 @@ interface Rect {
   h: number;
 }
 
-// 从 URL 读取覆盖层模式与坐标参数（主窗口通过 query 传入，因覆盖层是独立 JS 上下文）
-const params = new URLSearchParams(window.location.search);
+// 从 URL 读取覆盖层模式与坐标参数（主窗口通过 query 传入，因覆盖层是独立 JS 上下文）。
+// 参数挂在 hash 的 query 段（`/#capture-overlay?mode=region&...`），location.search 为空，
+// 必须从 hash 切出 query 再解析，否则 MODE 恒为 region、PLATFORM 恒 other、ORIGIN 恒 0。
+const params = new URLSearchParams(window.location.hash.split('?')[1] || '');
 const MODE: 'region' | 'window' = params.get('mode') === 'window' ? 'window' : 'region';
 const PLATFORM = params.get('platform') || 'other';
 const ORIGIN_X = Number(params.get('ox') || 0);
