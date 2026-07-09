@@ -150,6 +150,9 @@ export const EnhancedScreenshotApp = () => {
   const [displays, setDisplays] = useState<DisplayInfo[]>([]);
   const [showDisplayPicker, setShowDisplayPicker] = useState(false);
   const [permissionNeeded, setPermissionNeeded] = useState(false);
+  // 截图后快捷选择栏：截完不直接进编辑，先弹一排（复制/钉图/保存/编辑/重截）
+  const [capturedPreview, setCapturedPreview] = useState<{ dataUrl: string; width: number; height: number } | null>(null);
+  const [lastCaptureKind, setLastCaptureKind] = useState<'screen' | 'region' | 'window'>('screen');
   // 开发模式（tauri dev）跑的是裸二进制，macOS 不会把它列入 TCC「屏幕录制」列表，
   // 因此无法在系统设置里出现/授权；只有 build 出的 .app 才会被系统登记到权限列表。
   const isDev = (import.meta as any).env?.DEV === true;
@@ -253,7 +256,8 @@ export const EnhancedScreenshotApp = () => {
         updatedAt: createdAt,
       });
       clearAnnotations();
-      setCurrentView('edit');
+      // 不直接进编辑页：先弹快捷选择栏（复制/钉图/保存/编辑/重截），用户选「编辑」才进编辑器
+      setCapturedPreview({ dataUrl, width, height });
     },
     [setCurrentScreenshot, clearAnnotations]
   );
@@ -387,6 +391,7 @@ export const EnhancedScreenshotApp = () => {
   const doCapture = useCallback(
     async (kind: 'screen' | 'region' | 'window') => {
       if (busy) return; // 防止 busy 期间（窗口隐藏前）重复点击 / 快捷键再次触发
+      setLastCaptureKind(kind);
       // macOS 多显示器：全屏截图先让用户选具体显示器
       if (kind === 'screen' && platform === 'macos' && displays.length > 1) {
         const win = getCurrentWindow();
@@ -502,23 +507,16 @@ export const EnhancedScreenshotApp = () => {
     }
   };
 
-  // 钉图到桌面：新建独立置顶透明窗口显示当前截图，可拖动/滚轮缩放/双击关闭。
-  // 数据通过事件握手传输（dataUrl 太大不能塞进 URL）。
-  const pinToDesktop = useCallback(async () => {
-    if (!current) return;
+  // 钉图到桌面：通用版，接受任意 dataUrl（编辑页按钮 + 快捷栏都用它）
+  const pinImage = useCallback(async (dataUrl: string, width: number, height: number) => {
     const label = `pin-${Date.now()}`;
-    const exportUrl = getExportDataUrl();
-    const w = Math.min(current.width, 1400);
-    const h = Math.min(current.height, 900) + 28;
+    const w = Math.min(width, 1400);
+    const h = Math.min(height, 900) + 28;
     let pinWin: WebviewWindow | null = null;
     // 握手：pin 窗口 mount 后 emit('pin-ready')，主窗口收到再 emit('pin-data')，避免竞态
     const un = await once<{ label: string }>('pin-ready', async (e) => {
       if (e.payload?.label === label && pinWin) {
-        await pinWin.emit('pin-data', {
-          dataUrl: exportUrl,
-          width: current.width,
-          height: current.height,
-        });
+        await pinWin.emit('pin-data', { dataUrl, width, height });
         un();
       }
     });
@@ -536,12 +534,29 @@ export const EnhancedScreenshotApp = () => {
       // macOS 透明窗口需要 private API；Tauri 2.11 类型未暴露该字段，运行时支持
       macOSPrivateApi: true,
     } as any);
-  }, [current, getExportDataUrl]);
+  }, []);
+
+  const pinToDesktop = useCallback(async () => {
+    if (!current) return;
+    await pinImage(getExportDataUrl(), current.width, current.height);
+  }, [current, getExportDataUrl, pinImage]);
 
   const cycleTheme = () =>
     setTheme((t) => (t === 'light' ? 'dark' : t === 'dark' ? 'system' : 'light'));
   const themeIcon = theme === 'light' ? '☀️' : theme === 'dark' ? '🌙' : '🖥️';
   const themeLabel = theme === 'light' ? '浅色' : theme === 'dark' ? '深色' : '跟随系统';
+
+  // 快捷选择栏按钮统一样式
+  const cabBtn = {
+    background: 'rgba(255,255,255,0.12)',
+    color: '#fff',
+    border: 'none',
+    borderRadius: 8,
+    padding: '8px 12px',
+    cursor: 'pointer',
+    fontSize: 13,
+    whiteSpace: 'nowrap',
+  } as const;
 
   const openHistory = (h: HistoryEntry) => {
     setCurrent({ dataUrl: h.dataUrl, width: h.width, height: h.height });
@@ -803,6 +818,98 @@ export const EnhancedScreenshotApp = () => {
         <div className={`toast toast-${toastType}`}>
           <span className="toast-icon">{toastType === 'error' ? '!' : '✓'}</span>
           <span className="toast-msg">{toast}</span>
+        </div>
+      )}
+      {capturedPreview && (
+        <div
+          style={{
+            position: 'fixed',
+            bottom: 24,
+            left: '50%',
+            transform: 'translateX(-50%)',
+            display: 'flex',
+            alignItems: 'center',
+            gap: 12,
+            background: 'rgba(28,28,30,0.92)',
+            backdropFilter: 'blur(20px)',
+            WebkitBackdropFilter: 'blur(20px)',
+            padding: '10px 14px',
+            borderRadius: 14,
+            boxShadow: '0 8px 32px rgba(0,0,0,0.35)',
+            zIndex: 80,
+            border: '1px solid rgba(255,255,255,0.1)',
+          }}
+        >
+          <img
+            src={capturedPreview.dataUrl}
+            alt="captured"
+            style={{ height: 48, borderRadius: 6, border: '1px solid rgba(255,255,255,0.15)' }}
+          />
+          <div style={{ display: 'flex', gap: 6 }}>
+            <button
+              onClick={async () => {
+                try {
+                  await invoke('copy_to_clipboard', { image_data: capturedPreview.dataUrl });
+                  flash('已复制', 'success');
+                } catch (e) {
+                  flash('复制失败：' + String(e), 'error');
+                }
+              }}
+              style={cabBtn}
+            >
+              📋 复制
+            </button>
+            <button
+              onClick={() => pinImage(capturedPreview.dataUrl, capturedPreview.width, capturedPreview.height)}
+              style={cabBtn}
+            >
+              📌 钉图
+            </button>
+            <button
+              onClick={async () => {
+                const p = await save({
+                  defaultPath: `snapcraft-${Date.now()}.png`,
+                  filters: [{ name: 'PNG Image', extensions: ['png'] }],
+                });
+                if (!p) return;
+                try {
+                  await invoke('save_screenshot', { image_data: capturedPreview.dataUrl, file_path: p });
+                  flash('已保存', 'success');
+                } catch (e) {
+                  flash('保存失败：' + String(e), 'error');
+                }
+              }}
+              style={cabBtn}
+            >
+              💾 保存
+            </button>
+            <button
+              onClick={() => {
+                setCapturedPreview(null);
+                setCurrentView('edit');
+              }}
+              style={cabBtn}
+            >
+              ✏️ 编辑
+            </button>
+            <button
+              onClick={() => {
+                setCapturedPreview(null);
+                doCapture(lastCaptureKind);
+              }}
+              style={cabBtn}
+            >
+              🔄 重截
+            </button>
+            <button
+              onClick={() => setCapturedPreview(null)}
+              title="丢弃"
+              aria-label="丢弃"
+              style={{ ...cabBtn, width: 32, padding: 0 }}
+            >
+              ✕
+            </button>
+          </div>
         </div>
       )}
       {permissionNeeded && (
