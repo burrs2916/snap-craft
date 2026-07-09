@@ -417,25 +417,35 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, AnnotationCanvasProp
         const y = Math.min(a.y, b.y);
         const w = Math.abs(b.x - a.x);
         const h = Math.abs(b.y - a.y);
-        // 马赛克：区域内像素块网格遮挡（简化版，未读底图采样；下批升级真像素化）
-        const bs = 10;
+        if (w < 1 || h < 1) return null;
+        // 真像素化：按块采样底图像素，块内统一色 = 经典马赛克打码效果。
+        // 复用取色器已缓存的整图自然像素（imageDataCache），避免每帧 getImageData。
+        const cache = imageDataCache.current;
+        const scale = stageRef.current?.scaleX() ?? 1;
+        const imgW = imgSize.current.w;
+        const imgH = imgSize.current.h;
+        const bs = 10; // 画布坐标下每块边长
         const cols = Math.max(1, Math.ceil(w / bs));
         const rows = Math.max(1, Math.ceil(h / bs));
+        const cw = w / cols;
+        const ch = h / rows;
         return (
           <Group {...baseProps}>
             {Array.from({ length: rows * cols }).map((_, i) => {
               const r = Math.floor(i / cols);
               const c = i % cols;
+              const bx = x + c * cw;
+              const by = y + r * ch;
+              let fill = '#6e6e73';
+              // 底图可用时采样块中心像素作为块色；否则回退网格
+              if (cache && imgW > 0 && imgH > 0) {
+                const nx = Math.min(imgW - 1, Math.max(0, Math.round((bx + cw / 2) / scale)));
+                const ny = Math.min(imgH - 1, Math.max(0, Math.round((by + ch / 2) / scale)));
+                const idx = (ny * imgW + nx) * 4;
+                fill = `rgb(${cache[idx]},${cache[idx + 1]},${cache[idx + 2]})`;
+              }
               return (
-                <Rect
-                  key={i}
-                  x={x + c * bs}
-                  y={y + r * bs}
-                  width={bs}
-                  height={bs}
-                  fill="#6e6e73"
-                  opacity={0.85}
-                />
+                <Rect key={i} x={bx} y={by} width={cw} height={ch} fill={fill} listening={false} />
               );
             })}
           </Group>
