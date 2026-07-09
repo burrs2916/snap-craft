@@ -356,37 +356,57 @@ export const EnhancedScreenshotApp = () => {
     [platform, displays]
   );
 
-  // 选屏后直接抓取该屏整屏画面。颜色已修（NoneSkipLast + 强制 alpha255 + Y 翻转）；
-  // 多屏走几何矩形 CGWindowListCreateImage，精确对应选中屏，不会截到主屏。
-  // 注：曾尝试「选屏→覆盖层→拖选」交互，但 Tauri WebviewWindow 在多屏下的窗口坐标系
-  // 与 CoreGraphics 全局坐标不一致，覆盖层会错位并把主窗口状态搞乱（主页面乱跳），
-  // 故回退到稳定的直接抓取。覆盖层式区域选择待后续用更可靠的坐标方案再迭代。
+  // 选屏后进入该屏的区域选择覆盖层：屏上蒙阴影、可拖选区域或确认截整屏。
+  // 之前回退因覆盖层乱跳，根因是 App.tsx hash 匹配 + CaptureOverlay search 解析两个 P0
+  // （batch 3 已修）。现恢复，加 macOSPrivateApi（macOS 透明窗口必需）+ 30s 超时兜底。
   const pickDisplay = useCallback(
     async (displayId: number | null) => {
       setShowDisplayPicker(false);
-      if (busy) return;
+      if (busy || displayId == null) return;
+      const d = displays.find((x) => x.id === displayId);
+      if (!d) return;
       setBusy(true);
       const win = getCurrentWindow();
       await win.hide();
-      try {
-        const dataUrl = await invoke<string>('capture_screen', { display_id: displayId });
-        await onCaptured(dataUrl);
-      } catch (e) {
-        const msg = String(e);
-        if (msg.includes('屏幕录制')) {
-          setPermissionNeeded(true);
-          return;
+      // 覆盖层只铺在选中屏上：位置/尺寸即该屏的全局逻辑矩形
+      const q = new URLSearchParams({
+        mode: 'region',
+        platform: 'macos',
+        ox: String(d.x),
+        oy: String(d.y),
+      });
+      const opts: Record<string, unknown> = {
+        title: 'SnapCraft 截图选择',
+        transparent: true,
+        decorations: false,
+        alwaysOnTop: true,
+        resizable: false,
+        visible: true,
+        x: d.x,
+        y: d.y,
+        width: d.width,
+        height: d.height,
+        // macOS 透明窗口需要 private API；Tauri 2.11 类型未暴露，运行时支持
+        macOSPrivateApi: true,
+        url: `/#capture-overlay?${q.toString()}`,
+      };
+      const existing = await WebviewWindow.getByLabel('capture-overlay');
+      if (existing) {
+        try {
+          await existing.close();
+        } catch {
+          /* ignore */
         }
-        if (!msg.includes('截图已取消') && !msg.toLowerCase().includes('cancelled')) {
-          flash('截图失败：' + msg, 'error');
-        }
-      } finally {
-        await win.show();
-        await win.setFocus();
-        setBusy(false);
       }
+      new WebviewWindow('capture-overlay', opts as any);
+      // 兜底：覆盖层若崩溃不发事件，30s 后强制恢复主窗口，避免永久隐藏 + busy 卡死
+      window.setTimeout(() => {
+        getCurrentWindow().show();
+        setBusy(false);
+      }, 30000);
+      // 结果由 region-captured / region-cancelled 事件收尾
     },
-    [onCaptured, flash, busy, setPermissionNeeded]
+    [busy, displays]
   );
 
   const doCapture = useCallback(
