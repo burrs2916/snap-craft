@@ -633,7 +633,9 @@ pub fn apply_window_stealth(app: tauri::AppHandle, label: String) -> Result<(), 
         let hwnd = window
             .hwnd()
             .map_err(|e| format!("获取 HWND 失败: {}", e))?;
-        set_hwnd_exclude_from_capture(hwnd as *mut std::ffi::c_void);
+        // HWND 在 windows-rs 中是元组结构体包裹（底层为 *mut c_void 或 isize），
+        // 不能用 `as` 整体强转，需取 .0 再 cast（两种底层表示都安全）。
+        set_hwnd_exclude_from_capture(hwnd.0 as *mut std::ffi::c_void);
     }
 
     #[cfg(not(any(target_os = "macos", windows)))]
