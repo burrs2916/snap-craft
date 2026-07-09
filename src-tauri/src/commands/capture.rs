@@ -103,31 +103,26 @@ pub async fn capture_screen(_app: AppHandle, display_id: Option<u32>) -> Result<
         // 等待自身窗口隐藏动画完成（macOS 隐藏有动画延迟）
         std::thread::sleep(std::time::Duration::from_millis(400));
 
-        // 选定要抓取的显示器：display_id 来自 list_displays 的 1-based id（即
-        // CGGetActiveDisplayList 数组下标 + 1），直接拿对应的 CGDirectDisplayID，
-        // 用 CGDisplayCreateImage 精确抓那块屏——100% 对应，不受屏幕排列顺序影响。
-        let displays = enumerate_displays();
-        let target = match display_id {
+        // 选定要抓取的显示器，直接使用该显示器的「全局几何矩形」抓取
+        // （CGDisplayBounds 返回的全局 Quartz 坐标，与区域截图同坐标系）。
+        // 用 CGWindowListCreateImage(rect, onScreenOnly) 按几何精确截取，不再依赖
+        // CGDisplayCreateImage + 显示索引映射，彻底规避「选了副屏却截到主屏」的错位。
+        let rect = match display_id {
             Some(idx) => {
+                let displays = enumerate_displays();
                 let i = (idx as usize).saturating_sub(1);
-                displays.get(i).copied().unwrap_or_else(|| {
-                    if displays.is_empty() {
-                        unsafe { CGMainDisplayID() }
-                    } else {
-                        displays[0]
-                    }
-                })
+                let d = displays
+                    .get(i)
+                    .copied()
+                    .unwrap_or_else(|| unsafe { CGMainDisplayID() });
+                unsafe { CGDisplayBounds(d) }
             }
-            None => {
-                if displays.is_empty() {
-                    unsafe { CGMainDisplayID() }
-                } else {
-                    displays[0]
-                }
-            }
+            None => unsafe { CGDisplayBounds(CGMainDisplayID()) },
         };
 
-        let img = unsafe { CGDisplayCreateImage(target) };
+        // kCGWindowListOptionOnScreenOnly = 2；window_id = 0 (kCGNullWindowID)；image_option = 0。
+        // 设了 sharingType=.none 的自身窗口会被系统自动排除，不会截进画面。
+        let img = unsafe { CGWindowListCreateImage(rect, 2, 0, 0) };
         if img.is_null() {
             return Err(
                 "截图失败：可能 SnapCraft 未获得「屏幕录制」权限，或无法抓取该显示器画面。\
@@ -470,13 +465,9 @@ extern "C" {
 
     // ===== 直接抓屏（替代 screencapture 命令行，避免 -D 序号歧义 / -R 坐标歧义）=====
     // 返回指定显示器的当前画面，100% 精确对应那块屏（不受屏幕排列顺序影响）。
-    fn CGDisplayCreateImage(display: u32) -> *mut std::ffi::c_void;
     fn CGImageRelease(image: *mut std::ffi::c_void);
     fn CGImageGetWidth(image: *mut std::ffi::c_void) -> usize;
     fn CGImageGetHeight(image: *mut std::ffi::c_void) -> usize;
-    fn CGImageGetBitsPerPixel(image: *mut std::ffi::c_void) -> usize;
-    fn CGImageGetBytesPerRow(image: *mut std::ffi::c_void) -> usize;
-    fn CGImageGetDataProvider(image: *mut std::ffi::c_void) -> *mut std::ffi::c_void;
     // 按全局 Quartz 坐标（逻辑点，原点主屏左上、y 向下，含所有显示器）截取屏幕区域，
     // 用于区域截图，彻底绕开 screencapture -R 的坐标坑，且天然支持跨屏。
     fn CGWindowListCreateImage(
@@ -485,15 +476,26 @@ extern "C" {
         window_id: u32,
         image_option: u32,
     ) -> *mut std::ffi::c_void;
+    // 颜色空间 + 位图上下文：把任意字节序的 CGImage 重绘成「明确 RGBA little-endian」，
+    // 彻底规避 CGImage 实际像素格式不固定（BGRA/ARGB）导致的通道错位（偏蓝）。
+    fn CGColorSpaceCreateDeviceRGB() -> *mut std::ffi::c_void;
+    fn CGBitmapContextCreate(
+        data: *mut std::ffi::c_void,
+        width: usize,
+        height: usize,
+        bits_per_component: usize,
+        bytes_per_row: usize,
+        colorspace: *mut std::ffi::c_void,
+        bitmap_info: u32,
+    ) -> *mut std::ffi::c_void;
+    fn CGContextDrawImage(ctx: *mut std::ffi::c_void, rect: CGRect, image: *mut std::ffi::c_void);
+    fn CGContextRelease(ctx: *mut std::ffi::c_void);
 }
 
 // CoreFoundation：CGImage 的像素数据经 CGDataProviderCopyData 得到 CFData，需 CF 函数读取。
 #[cfg(target_os = "macos")]
 #[link(name = "CoreFoundation", kind = "framework")]
 extern "C" {
-    fn CGDataProviderCopyData(provider: *mut std::ffi::c_void) -> *mut std::ffi::c_void;
-    fn CFDataGetLength(data: *mut std::ffi::c_void) -> isize;
-    fn CFDataGetBytePtr(data: *mut std::ffi::c_void) -> *const u8;
     fn CFRelease(cf: *const std::ffi::c_void);
 }
 
@@ -689,9 +691,20 @@ fn enumerate_displays() -> Vec<u32> {
     displays[..count as usize].to_vec()
 }
 
-/// 将 CGImageRef 的像素数据转换为 image::RgbaImage（内存顺序 [R,G,B,A]）。
-/// CoreGraphics 抓出的 CGImage 通常为 kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Big，
-/// 即每像素 4 字节、内存顺序 [A,R,G,B]；这里逐像素转为 RGBA 供 PNG 编码。
+/// 将 CGImageRef 转换为 image::RgbaImage（内存顺序 [R,G,B,A]，RGBA little-endian）。
+///
+/// 坑点：CGDisplayCreateImage / CGWindowListCreateImage 产出的 CGImage 其底层像素字节序
+/// 并不固定（Apple Silicon / 新 SDK 上常为 BGRA），若直接按 [A,R,G,B] 裸读通道会错位 →
+/// 整图偏蓝（红蓝互换）。因此这里**不直接读原始字节**，而是把图像重新绘制到一个
+/// 「明确 RGBA little-endian、premultiplied-last」的位图上下文，输出的字节顺序与
+/// image::RgbaImage 完全一致，从根上消除偏色。
+#[cfg(target_os = "macos")]
+#[allow(non_upper_case_globals)]
+const kCGImageAlphaPremultipliedLast: u32 = 1;
+#[cfg(target_os = "macos")]
+#[allow(non_upper_case_globals)]
+const kCGImageByteOrder32Little: u32 = 0x2000;
+
 #[cfg(target_os = "macos")]
 fn cgimage_to_rgba(image: *mut std::ffi::c_void) -> Result<image::RgbaImage, String> {
     let width = unsafe { CGImageGetWidth(image) } as u32;
@@ -699,41 +712,40 @@ fn cgimage_to_rgba(image: *mut std::ffi::c_void) -> Result<image::RgbaImage, Str
     if width == 0 || height == 0 {
         return Err("截图结果为空（图像尺寸为 0）".into());
     }
-    let bpr = unsafe { CGImageGetBytesPerRow(image) } as usize;
-    let bpp = unsafe { CGImageGetBitsPerPixel(image) };
-    if bpp != 32 {
-        return Err(format!("不支持的图像像素格式（{}bpp，期望 32）", bpp));
+    let bytes_per_row = (width as usize) * 4;
+    let mut buf: Vec<u8> = vec![0u8; (height as usize) * bytes_per_row];
+
+    let color_space = unsafe { CGColorSpaceCreateDeviceRGB() };
+    if color_space.is_null() {
+        return Err("无法创建颜色空间".into());
     }
-    let provider = unsafe { CGImageGetDataProvider(image) };
-    if provider.is_null() {
-        return Err("无法获取图像数据提供者".into());
-    }
-    let data = unsafe { CGDataProviderCopyData(provider) };
-    if data.is_null() {
-        return Err("读取图像数据失败（可能屏幕录制权限被拒）".into());
-    }
-    let len = unsafe { CFDataGetLength(data) };
-    let ptr = unsafe { CFDataGetBytePtr(data) };
-    let out = if ptr.is_null() {
-        Err("图像数据为空".into())
-    } else {
-        let bytes = unsafe { std::slice::from_raw_parts(ptr, len as usize) };
-        let mut buf: Vec<u8> = Vec::with_capacity((width as usize) * (height as usize) * 4);
-        for y in 0..height as usize {
-            let row = &bytes[y * bpr..];
-            for x in 0..width as usize {
-                let o = x * 4;
-                // 源：[A, R, G, B]（premultiplied-first, big-endian 布局）；目标：[R, G, B, A]
-                let a = row[o];
-                let r = row[o + 1];
-                let g = row[o + 2];
-                let b = row[o + 3];
-                buf.extend_from_slice(&[r, g, b, a]);
-            }
-        }
-        image::RgbaImage::from_raw(width, height, buf)
-            .ok_or_else(|| "图像缓冲构造失败".to_string())
+    let ctx = unsafe {
+        CGBitmapContextCreate(
+            buf.as_mut_ptr() as *mut std::ffi::c_void,
+            width as usize,
+            height as usize,
+            8,
+            bytes_per_row,
+            color_space,
+            kCGImageAlphaPremultipliedLast | kCGImageByteOrder32Little,
+        )
     };
-    unsafe { CFRelease(data as *const std::ffi::c_void) };
-    out
+    if ctx.is_null() {
+        unsafe { CFRelease(color_space as *const std::ffi::c_void) };
+        return Err("无法创建位图上下文（截图失败）".into());
+    }
+    unsafe {
+        CGContextDrawImage(
+            ctx,
+            CGRect {
+                origin: CGPoint { x: 0.0, y: 0.0 },
+                size: CGSize { width: width as f64, height: height as f64 },
+            },
+            image,
+        );
+        CGContextRelease(ctx);
+        CFRelease(color_space as *const std::ffi::c_void);
+    }
+    image::RgbaImage::from_raw(width, height, buf)
+        .ok_or_else(|| "图像缓冲构造失败".to_string())
 }
