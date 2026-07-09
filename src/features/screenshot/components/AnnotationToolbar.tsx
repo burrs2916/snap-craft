@@ -11,6 +11,8 @@ const TOOLS = [
   { id: 'highlight', icon: '🖍️', name: '高亮' },
   { id: 'mosaic', icon: '🔲', name: '马赛克' },
   { id: 'number', icon: '🔢', name: '序号' },
+  { id: 'ruler', icon: '📐', name: '量尺' },
+  { id: 'color', icon: '💧', name: '取色' },
 ];
 
 // 主题感知的标注调色板

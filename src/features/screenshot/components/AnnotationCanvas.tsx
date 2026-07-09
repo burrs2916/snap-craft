@@ -31,12 +31,18 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, AnnotationCanvasProp
   const wrapRef = useRef<HTMLDivElement>(null);
   const committedRef = useRef(false);
   const selBoxRef = useRef<Konva.Rect | null>(null);
+  // 缓存原图像素，供取色器快速采样（避免每次 mousemove 都 getImageData）
+  const imageDataCache = useRef<Uint8ClampedArray | null>(null);
+  const imgSize = useRef<{ w: number; h: number }>({ w: 0, h: 0 });
   const [image, setImage] = useState<HTMLImageElement | null>(null);
   const [draft, setDraft] = useState<{ type: AnnotationGeometry['type']; points: Point[] } | null>(null);
   const [selBox, setSelBox] = useState<{ x: number; y: number; width: number; height: number } | null>(null);
   const [box, setBox] = useState({ w: 0, h: 0 });
   const [editing, setEditing] = useState<{ x: number; y: number; id?: string; text?: string } | null>(null);
   const [imageError, setImageError] = useState(false);
+  // 取色器：光标下像素色 + 浮窗位置
+  const [pickerColor, setPickerColor] = useState<string | null>(null);
+  const [pickerPos, setPickerPos] = useState<{ x: number; y: number } | null>(null);
 
   const {
     selectedId,
@@ -46,13 +52,31 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, AnnotationCanvasProp
     undo,
     redo,
     currentColor,
+    setCurrentColor,
     currentStrokeWidth,
   } = useScreenshotStore();
 
   useEffect(() => {
     if (!imageData) return;
     const img = new Image();
-    img.onload = () => { setImage(img); setImageError(false); };
+    img.onload = () => {
+      setImage(img);
+      setImageError(false);
+      // 缓存像素供取色器快速采样
+      try {
+        const c = document.createElement('canvas');
+        c.width = img.width;
+        c.height = img.height;
+        const ctx = c.getContext('2d', { willReadFrequently: true });
+        if (ctx) {
+          ctx.drawImage(img, 0, 0);
+          imageDataCache.current = ctx.getImageData(0, 0, img.width, img.height).data;
+          imgSize.current = { w: img.width, h: img.height };
+        }
+      } catch {
+        imageDataCache.current = null;
+      }
+    };
     // 损坏 dataUrl 时给错误态，否则永远"加载中…"无反馈
     img.onerror = () => { setImage(null); setImageError(true); };
     img.src = imageData;
@@ -153,6 +177,24 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, AnnotationCanvasProp
       return;
     }
 
+    if (activeTool === 'color') {
+      // 取色：点击把光标下像素色设为当前标注色（可连续取）
+      const p = stage.getRelativePointerPosition();
+      if (p && imageDataCache.current && imgSize.current.w > 0) {
+        const x = Math.max(0, Math.min(imgSize.current.w - 1, Math.round(p.x)));
+        const y = Math.max(0, Math.min(imgSize.current.h - 1, Math.round(p.y)));
+        const idx = (y * imgSize.current.w + x) * 4;
+        const d = imageDataCache.current;
+        const hex =
+          '#' +
+          [d[idx], d[idx + 1], d[idx + 2]]
+            .map((v) => v.toString(16).padStart(2, '0'))
+            .join('');
+        setCurrentColor(hex);
+      }
+      return;
+    }
+
     if (activeTool === 'text') {
       // 画布内文字输入框，替代原生 window.prompt
       committedRef.current = false;
@@ -182,9 +224,27 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, AnnotationCanvasProp
   };
 
   const handleMouseMove = (e: Konva.KonvaEventObject<MouseEvent>) => {
-    if (!draft) return;
     const stage = e.target.getStage();
     if (!stage) return;
+    // 取色器：实时读光标下像素色 + 跟随浮窗
+    if (activeTool === 'color') {
+      const pos = stage.getRelativePointerPosition();
+      if (pos && imageDataCache.current && imgSize.current.w > 0) {
+        const x = Math.max(0, Math.min(imgSize.current.w - 1, Math.round(pos.x)));
+        const y = Math.max(0, Math.min(imgSize.current.h - 1, Math.round(pos.y)));
+        const idx = (y * imgSize.current.w + x) * 4;
+        const d = imageDataCache.current;
+        const hex =
+          '#' +
+          [d[idx], d[idx + 1], d[idx + 2]]
+            .map((v) => v.toString(16).padStart(2, '0'))
+            .join('');
+        setPickerColor(hex);
+        setPickerPos({ x: e.evt.clientX, y: e.evt.clientY });
+      }
+      return;
+    }
+    if (!draft) return;
     const pos = stage.getRelativePointerPosition();
     if (!pos) return;
     if (draft.type === 'freehand') {
@@ -401,6 +461,21 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, AnnotationCanvasProp
           </Group>
         );
       }
+      case 'ruler': {
+        const [a, b] = ann.geometry.points;
+        const flat = [a.x, a.y, b.x, b.y];
+        const len = Math.round(Math.hypot(b.x - a.x, b.y - a.y));
+        const mx = (a.x + b.x) / 2;
+        const my = (a.y + b.y) / 2;
+        // 量尺：两点线 + 中点像素数标签
+        return (
+          <Group {...baseProps}>
+            <Line points={flat} stroke={ann.color} strokeWidth={ann.lineWidth} lineCap="round" />
+            <Rect x={mx - 30} y={my - 12} width={60} height={20} fill={ann.color} opacity={0.9} cornerRadius={4} />
+            <Text x={mx - 30} y={my - 12} width={60} height={20} text={`${len}px`} fontSize={12} fill="#fff" align="center" verticalAlign="middle" />
+          </Group>
+        );
+      }
       case 'freehand': {
         const flat = ann.geometry.points.flatMap((p) => [p.x, p.y]);
         return (
@@ -551,7 +626,39 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, AnnotationCanvasProp
         </Layer>
       </Stage>
       {textEditor}
-      </div>
+      {pickerColor && pickerPos && activeTool === 'color' && (
+        <div
+          style={{
+            position: 'fixed',
+            left: pickerPos.x + 14,
+            top: pickerPos.y + 14,
+            background: 'rgba(0,0,0,0.82)',
+            color: '#fff',
+            padding: '4px 8px',
+            borderRadius: 6,
+            fontSize: 12,
+            pointerEvents: 'none',
+            display: 'flex',
+            alignItems: 'center',
+            gap: 6,
+            zIndex: 20,
+            fontFamily: 'var(--font-mono, monospace)',
+          }}
+        >
+          <span
+            style={{
+              width: 14,
+              height: 14,
+              borderRadius: 3,
+              background: pickerColor,
+              border: '1px solid rgba(255,255,255,0.4)',
+              display: 'inline-block',
+            }}
+          />
+          {pickerColor.toUpperCase()}
+        </div>
+      )}
+    </div>
   );
 });
 
