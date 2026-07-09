@@ -6,6 +6,7 @@ import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { save } from '@tauri-apps/plugin-dialog';
 import { AnnotationToolbar } from './components/AnnotationToolbar';
 import AnnotationCanvas, { AnnotationCanvasHandle } from './components/AnnotationCanvas';
+import { LayerPanel } from './components/LayerPanel';
 import { useScreenshotStore } from './store/screenshotStore';
 
 type Theme = 'light' | 'dark' | 'system';
@@ -622,8 +623,9 @@ export const EnhancedScreenshotApp = () => {
             </button>
           </div>
         </div>
-        <div className="editor-canvas-area">
-          <div className="editor-canvas">
+        <div className="editor-canvas-area" style={{ display: 'flex' }}>
+          <LayerPanel />
+          <div className="editor-canvas" style={{ flex: 1 }}>
             <AnnotationCanvas
               ref={canvasRef}
               imageData={current.dataUrl}

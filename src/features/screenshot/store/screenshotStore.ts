@@ -40,16 +40,12 @@ interface ScreenshotState {
 
 const HISTORY_LIMIT = 50;
 
-// 从 annotations 重新推导图层的 objects，保证撤销/重做后 layers 与 annotations 一致
-const rebuildLayers = (anns: AnnotationObject[]): Layer[] => [
-  {
-    id: 'default',
-    name: '默认图层',
-    visible: true,
-    locked: false,
-    objects: anns.filter((a) => a.layerId === 'default').map((a) => a.id),
-  },
-];
+// 保留现有图层结构，只按 annotations 重新推导每层的 objects（不丢非 default 层）
+const rebuildLayers = (anns: AnnotationObject[], existing: Layer[]): Layer[] =>
+  existing.map((layer) => ({
+    ...layer,
+    objects: anns.filter((a) => a.layerId === layer.id).map((a) => a.id),
+  }));
 
 export const useScreenshotStore = create<ScreenshotState>((set, get) => ({
   currentScreenshot: null,
@@ -73,11 +69,12 @@ export const useScreenshotStore = create<ScreenshotState>((set, get) => ({
   setCurrentScreenshot: (screenshot) => set({ currentScreenshot: screenshot }),
   
   addAnnotation: (annotation) => set((state) => {
-    const anns = [...state.annotations, annotation];
+    const ann = { ...annotation, layerId: annotation.layerId || state.activeLayerId || 'default' };
+    const anns = [...state.annotations, ann];
     return {
       past: [...state.past, state.annotations].slice(-HISTORY_LIMIT),
       annotations: anns,
-      layers: rebuildLayers(anns),
+      layers: rebuildLayers(anns, state.layers),
       future: [],
     };
   }),
@@ -89,17 +86,17 @@ export const useScreenshotStore = create<ScreenshotState>((set, get) => ({
     return {
       past: [...state.past, state.annotations].slice(-HISTORY_LIMIT),
       annotations: anns,
-      layers: rebuildLayers(anns),
+      layers: rebuildLayers(anns, state.layers),
       future: [],
     };
   }),
-  
+
   deleteAnnotation: (id) => set((state) => {
     const anns = state.annotations.filter(ann => ann.id !== id);
     return {
       past: [...state.past, state.annotations].slice(-HISTORY_LIMIT),
       annotations: anns,
-      layers: rebuildLayers(anns),
+      layers: rebuildLayers(anns, state.layers),
       future: [],
       selectedId: state.selectedId === id ? null : state.selectedId,
     };
@@ -117,9 +114,15 @@ export const useScreenshotStore = create<ScreenshotState>((set, get) => ({
     )
   })),
   
-  deleteLayer: (id) => set((state) => ({
-    layers: state.layers.filter(layer => layer.id !== id)
-  })),
+  deleteLayer: (id) => set((state) => {
+    const anns = state.annotations.filter((a) => a.layerId !== id);
+    const layers = state.layers.filter((l) => l.id !== id);
+    return {
+      annotations: anns,
+      layers: rebuildLayers(anns, layers),
+      activeLayerId: state.activeLayerId === id ? (layers[0]?.id ?? 'default') : state.activeLayerId,
+    };
+  }),
   
   setSelectedAnnotations: (ids) => set({ selectedAnnotationIds: ids }),
   
@@ -130,7 +133,14 @@ export const useScreenshotStore = create<ScreenshotState>((set, get) => ({
   setCurrentColor: (c) => set({ currentColor: c }),
   setCurrentStrokeWidth: (w) => set({ currentStrokeWidth: w }),
 
-  clearAnnotations: () => set({ annotations: [], selectedAnnotationIds: [], selectedId: null, past: [], future: [] }),
+  clearAnnotations: () => set((state) => ({
+    annotations: [],
+    selectedAnnotationIds: [],
+    selectedId: null,
+    past: [],
+    future: [],
+    layers: state.layers.map((l) => ({ ...l, objects: [] })),
+  })),
 
   undo: () => set((s) => {
     if (s.past.length === 0) return s;
@@ -138,7 +148,7 @@ export const useScreenshotStore = create<ScreenshotState>((set, get) => ({
     return {
       past: s.past.slice(0, -1),
       annotations: prev,
-      layers: rebuildLayers(prev),
+      layers: rebuildLayers(prev, s.layers),
       future: [s.annotations, ...s.future].slice(0, HISTORY_LIMIT),
       selectedId: null,
       selectedAnnotationIds: [],
@@ -151,7 +161,7 @@ export const useScreenshotStore = create<ScreenshotState>((set, get) => ({
     return {
       past: [...s.past, s.annotations].slice(-HISTORY_LIMIT),
       annotations: next,
-      layers: rebuildLayers(next),
+      layers: rebuildLayers(next, s.layers),
       future: s.future.slice(1),
       selectedId: null,
       selectedAnnotationIds: [],

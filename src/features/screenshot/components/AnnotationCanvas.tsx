@@ -54,6 +54,8 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, AnnotationCanvasProp
     currentColor,
     setCurrentColor,
     currentStrokeWidth,
+    layers,
+    activeLayerId,
   } = useScreenshotStore();
 
   useEffect(() => {
@@ -154,7 +156,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, AnnotationCanvasProp
         onAnnotationAdd({
           id: genId(),
           geometry: { type: 'text', points: [{ x: pos.x, y: pos.y }], text: t, fontSize: 22 },
-          layerId: 'default',
+          layerId: activeLayerId || 'default',
           color: currentColor,
           lineWidth: currentStrokeWidth,
           opacity: 1,
@@ -208,7 +210,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, AnnotationCanvasProp
       onAnnotationAdd({
         id: genId(),
         geometry: { type: 'number', points: [pos], text: String(count) },
-        layerId: 'default',
+        layerId: activeLayerId || 'default',
         color: currentColor,
         lineWidth: currentStrokeWidth,
         opacity: 1,
@@ -267,7 +269,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, AnnotationCanvasProp
       onAnnotationAdd({
         id: genId(),
         geometry: { type: draft.type, points: pts },
-        layerId: 'default',
+        layerId: activeLayerId || 'default',
         color: currentColor,
         lineWidth: currentStrokeWidth,
         opacity: 1,
@@ -536,7 +538,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, AnnotationCanvasProp
     ? {
         id: '__draft',
         geometry: { type: draft.type, points: draft.points },
-        layerId: 'default',
+        layerId: activeLayerId || 'default',
         color: currentColor,
         lineWidth: currentStrokeWidth,
         opacity: 1,
@@ -608,7 +610,9 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, AnnotationCanvasProp
           <KonvaImage image={image} />
         </Layer>
         <Layer ref={layerRef}>
-          {annotations.map((ann) => renderShape(ann, false))}
+          {annotations
+            .filter((ann) => layers.find((l) => l.id === ann.layerId)?.visible !== false)
+            .map((ann) => renderShape(ann, false))}
           {draft && renderShape(draftAnn, true)}
           {selBox && (
             <Rect
