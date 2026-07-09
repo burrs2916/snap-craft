@@ -349,50 +349,37 @@ export const EnhancedScreenshotApp = () => {
     [platform, displays]
   );
 
-  // 多屏选择器：点选具体显示器后执行全屏截取该屏
-  // 选屏后进入「该屏的区域选择覆盖层」：屏上蒙阴影、可拖选区域或确认截整屏。
-  // 所见即所得——截取范围就是覆盖层上看到的范围，彻底规避「选副屏却截到主屏」。
+  // 选屏后直接抓取该屏整屏画面。颜色已修（NoneSkipLast + 强制 alpha255 + Y 翻转）；
+  // 多屏走几何矩形 CGWindowListCreateImage，精确对应选中屏，不会截到主屏。
+  // 注：曾尝试「选屏→覆盖层→拖选」交互，但 Tauri WebviewWindow 在多屏下的窗口坐标系
+  // 与 CoreGraphics 全局坐标不一致，覆盖层会错位并把主窗口状态搞乱（主页面乱跳），
+  // 故回退到稳定的直接抓取。覆盖层式区域选择待后续用更可靠的坐标方案再迭代。
   const pickDisplay = useCallback(
     async (displayId: number | null) => {
       setShowDisplayPicker(false);
-      if (busy || displayId == null) return;
-      const d = displays.find((x) => x.id === displayId);
-      if (!d) return;
+      if (busy) return;
       setBusy(true);
       const win = getCurrentWindow();
       await win.hide();
-      // 覆盖层只铺在选中屏上：位置/尺寸即该屏的全局逻辑矩形
-      const q = new URLSearchParams({
-        mode: 'region',
-        platform: 'macos',
-        ox: String(d.x),
-        oy: String(d.y),
-      });
-      const opts: Record<string, unknown> = {
-        title: 'SnapCraft 截图选择',
-        transparent: true,
-        decorations: false,
-        alwaysOnTop: true,
-        resizable: false,
-        visible: true,
-        x: d.x,
-        y: d.y,
-        width: d.width,
-        height: d.height,
-        url: `/#capture-overlay?${q.toString()}`,
-      };
-      const existing = await WebviewWindow.getByLabel('capture-overlay');
-      if (existing) {
-        try {
-          await existing.close();
-        } catch {
-          /* ignore */
+      try {
+        const dataUrl = await invoke<string>('capture_screen', { display_id: displayId });
+        await onCaptured(dataUrl);
+      } catch (e) {
+        const msg = String(e);
+        if (msg.includes('屏幕录制')) {
+          setPermissionNeeded(true);
+          return;
         }
+        if (!msg.includes('截图已取消') && !msg.toLowerCase().includes('cancelled')) {
+          flash('截图失败：' + msg, 'error');
+        }
+      } finally {
+        await win.show();
+        await win.setFocus();
+        setBusy(false);
       }
-      new WebviewWindow('capture-overlay', opts as any);
-      // 结果由 region-captured / region-cancelled 事件收尾（与 doCapture 同款监听）
     },
-    [busy, displays]
+    [onCaptured, flash, busy, setPermissionNeeded]
   );
 
   const doCapture = useCallback(
@@ -527,6 +514,16 @@ export const EnhancedScreenshotApp = () => {
     clearAnnotations();
     setCurrentView('edit');
   };
+
+  // 删除一条历史截图：本地立即移除（响应快）+ 后端持久化（防刷新复活）
+  const deleteHistory = useCallback(async (id: string) => {
+    setHistory((h) => h.filter((x) => x.id !== id));
+    try {
+      await invoke('delete_history', { id });
+    } catch {
+      /* 本地已删，忽略后端错误 */
+    }
+  }, []);
 
   // ===== 编辑视图 =====
   if (currentView === 'edit' && current) {
@@ -689,6 +686,7 @@ export const EnhancedScreenshotApp = () => {
                 <div
                   key={h.id}
                   className="history-item"
+                  style={{ position: 'relative' }}
                   role="button"
                   tabIndex={0}
                   aria-label={`查看截图 ${new Date(h.createdAt).toLocaleString()}`}
@@ -704,6 +702,34 @@ export const EnhancedScreenshotApp = () => {
                   <div className="history-item-overlay">
                     <span>{new Date(h.createdAt).toLocaleString()}</span>
                   </div>
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      deleteHistory(h.id);
+                    }}
+                    title="删除此截图"
+                    aria-label="删除此截图"
+                    style={{
+                      position: 'absolute',
+                      top: 6,
+                      right: 6,
+                      width: 26,
+                      height: 26,
+                      borderRadius: 6,
+                      border: 'none',
+                      background: 'rgba(0,0,0,0.65)',
+                      color: '#fff',
+                      fontSize: 14,
+                      cursor: 'pointer',
+                      padding: 0,
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      zIndex: 5,
+                    }}
+                  >
+                    ✕
+                  </button>
                 </div>
               ))}
             </div>
