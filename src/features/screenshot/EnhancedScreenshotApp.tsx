@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { listen, emit, type UnlistenFn } from '@tauri-apps/api/event';
+import { listen, emit, once, type UnlistenFn } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { save } from '@tauri-apps/plugin-dialog';
@@ -502,6 +502,42 @@ export const EnhancedScreenshotApp = () => {
     }
   };
 
+  // 钉图到桌面：新建独立置顶透明窗口显示当前截图，可拖动/滚轮缩放/双击关闭。
+  // 数据通过事件握手传输（dataUrl 太大不能塞进 URL）。
+  const pinToDesktop = useCallback(async () => {
+    if (!current) return;
+    const label = `pin-${Date.now()}`;
+    const exportUrl = getExportDataUrl();
+    const w = Math.min(current.width, 1400);
+    const h = Math.min(current.height, 900) + 28;
+    let pinWin: WebviewWindow | null = null;
+    // 握手：pin 窗口 mount 后 emit('pin-ready')，主窗口收到再 emit('pin-data')，避免竞态
+    const un = await once<{ label: string }>('pin-ready', async (e) => {
+      if (e.payload?.label === label && pinWin) {
+        await pinWin.emit('pin-data', {
+          dataUrl: exportUrl,
+          width: current.width,
+          height: current.height,
+        });
+        un();
+      }
+    });
+    pinWin = new WebviewWindow(label, {
+      title: 'SnapCraft 钉图',
+      url: '/#pin',
+      width: w,
+      height: h,
+      transparent: true,
+      decorations: false,
+      alwaysOnTop: true,
+      resizable: true,
+      skipTaskbar: true,
+      center: true,
+      // macOS 透明窗口需要 private API；Tauri 2.11 类型未暴露该字段，运行时支持
+      macOSPrivateApi: true,
+    } as any);
+  }, [current, getExportDataUrl]);
+
   const cycleTheme = () =>
     setTheme((t) => (t === 'light' ? 'dark' : t === 'dark' ? 'system' : 'light'));
   const themeIcon = theme === 'light' ? '☀️' : theme === 'dark' ? '🌙' : '🖥️';
@@ -562,6 +598,9 @@ export const EnhancedScreenshotApp = () => {
             </button>
             <button className="toolbar-btn" onClick={handleCopy}>
               📋 复制
+            </button>
+            <button className="toolbar-btn" onClick={pinToDesktop} title="钉到桌面（置顶显示，可拖动缩放）">
+              📌 钉图
             </button>
             <button className="toolbar-btn save-btn" onClick={handleSave}>
               💾 保存
