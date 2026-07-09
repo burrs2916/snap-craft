@@ -73,6 +73,7 @@ pub fn run() {
             commands::edit::copy_to_clipboard,
             commands::history::get_history,
             commands::history::add_history,
+            commands::history::get_history_image,
             commands::history::delete_history,
             commands::history::clear_history,
             get_platform,

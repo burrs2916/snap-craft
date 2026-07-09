@@ -108,34 +108,45 @@ const DisplayPicker = memo(({
   );
 });
 
-// 历史缩略图：滚入视口才把 dataUrl 设为 src，避免一次性解码全部大图
-const LazyHistoryThumb = memo(({ dataUrl, alt }: { dataUrl: string; alt: string }) => {
-  const ref = useRef<HTMLImageElement>(null);
-  const [src, setSrc] = useState('');
-  useEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    const io = new IntersectionObserver((entries) => {
-      entries.forEach((e) => {
-        if (e.isIntersecting) {
-          setSrc(dataUrl);
-          io.disconnect();
-        }
+// 历史缩略图：滚入视口才取图，避免一次性解码全部大图。
+// 历史条目图片存独立 PNG 文件，按需 invoke get_history_image 拉取（不在列表内联 base64）。
+const LazyHistoryThumb = memo(
+  ({ id, dataUrl, alt }: { id: string; dataUrl?: string; alt: string }) => {
+    const ref = useRef<HTMLImageElement>(null);
+    const [src, setSrc] = useState('');
+    useEffect(() => {
+      const el = ref.current;
+      if (!el) return;
+      const io = new IntersectionObserver((entries) => {
+        entries.forEach((e) => {
+          if (e.isIntersecting) {
+            if (dataUrl) {
+              // 内存中已持有（如刚截完的条目）：直接用
+              setSrc(dataUrl);
+            } else {
+              // 历史条目图片存独立文件，滚入视口才按需拉取
+              invoke<string>('get_history_image', { id })
+                .then(setSrc)
+                .catch(() => {});
+            }
+            io.disconnect();
+          }
+        });
       });
-    });
-    io.observe(el);
-    return () => io.disconnect();
-  }, [dataUrl]);
-  return (
-    <img
-      ref={ref}
-      src={src || undefined}
-      alt={alt}
-      loading="lazy"
-      style={src ? undefined : { backgroundColor: 'var(--surface-strong)' }}
-    />
-  );
-});
+      io.observe(el);
+      return () => io.disconnect();
+    }, [id, dataUrl]);
+    return (
+      <img
+        ref={ref}
+        src={src || undefined}
+        alt={alt}
+        loading="lazy"
+        style={src ? undefined : { backgroundColor: 'var(--surface-strong)' }}
+      />
+    );
+  }
+);
 
 export const EnhancedScreenshotApp = () => {
   const [theme, setTheme] = useState<Theme>(
@@ -218,7 +229,7 @@ export const EnhancedScreenshotApp = () => {
           setHistory(
             raw.map((i) => ({
               id: i.id,
-              dataUrl: i.data_url,
+              dataUrl: i.data_url ?? '',
               createdAt: i.created_at,
               width: i.width,
               height: i.height,
@@ -599,12 +610,22 @@ export const EnhancedScreenshotApp = () => {
     whiteSpace: 'nowrap',
   } as const;
 
-  const openHistory = (h: HistoryEntry) => {
-    setCurrent({ dataUrl: h.dataUrl, width: h.width, height: h.height });
+  const openHistory = async (h: HistoryEntry) => {
+    // 历史条目图片按需从磁盘拉取（不在列表里内联 base64）
+    let dataUrl = h.dataUrl;
+    if (!dataUrl) {
+      try {
+        dataUrl = await invoke<string>('get_history_image', { id: h.id });
+      } catch {
+        flash('无法加载该历史截图', 'error');
+        return;
+      }
+    }
+    setCurrent({ dataUrl, width: h.width, height: h.height });
     setCurrentScreenshot({
       id: h.id,
       filePath: '',
-      dataUrl: h.dataUrl,
+      dataUrl,
       width: h.width,
       height: h.height,
       annotations: [],
@@ -803,7 +824,7 @@ export const EnhancedScreenshotApp = () => {
                     }
                   }}
                 >
-                  <LazyHistoryThumb dataUrl={h.dataUrl} alt="screenshot" />
+                  <LazyHistoryThumb id={h.id} dataUrl={h.dataUrl || undefined} alt="screenshot" />
                   <div className="history-item-overlay">
                     <span>{new Date(h.createdAt).toLocaleString()}</span>
                   </div>
