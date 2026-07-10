@@ -50,10 +50,7 @@
     "macOS": {
       "entitlements": "Entitlements.plist",
       "signingIdentity": "-",
-      "infoPlist": {
-        "NSScreenCaptureUsageDescription": "SnapCraft 需要屏幕录制权限来截取屏幕画面。",
-        "NSAppleEventsUsageDescription": "SnapCraft 需要发送 AppleScript 指令以将截图复制到剪贴板。"
-      }
+      "infoPlist": "Info.plist"
     }
   }
 }

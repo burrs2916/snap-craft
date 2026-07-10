@@ -83,13 +83,26 @@ pub async fn capture_screen(_app: AppHandle, display_id: Option<u32>) -> Result<
     {
         // 等待窗口隐藏完成，避免截到自身窗口（macOS 隐藏存在极短过渡）
         std::thread::sleep(std::time::Duration::from_millis(200));
-        let mut parts: Vec<String> = vec!["-x".into()];
-        if let Some(d) = display_id {
-            parts.push("-D".into());
-            parts.push(d.to_string());
+
+        // 如果指定了 display_id，用 -R 全局坐标精确截取该显示器
+        // （-D 期望的是 1 基序号但序号与 CGGetActiveDisplayList 顺序不对应，多屏时不可靠）
+        if let Some(did) = display_id {
+            // 查询该 display 的全局边界
+            let bounds = unsafe { CGDisplayBounds(did) };
+            let rarg = format!(
+                "{},{},{},{}",
+                bounds.origin.x as i32,
+                bounds.origin.y as i32,
+                bounds.size.width as i32,
+                bounds.size.height as i32
+            );
+            let parts = ["-x".to_string(), "-R".to_string(), rarg];
+            let refs: Vec<&str> = parts.iter().map(|s| s.as_str()).collect();
+            return capture_to_data_url(&refs);
         }
-        let refs: Vec<&str> = parts.iter().map(|s| s.as_str()).collect();
-        capture_to_data_url(&refs)
+
+        // 无 display_id：截取全部显示器（-x 无参数 = 全屏所有显示器）
+        capture_to_data_url(&["-x"])
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -241,7 +254,7 @@ pub fn list_displays() -> Vec<DisplayInfo> {
         }
         let main = unsafe { CGMainDisplayID() };
         let mut out = Vec::new();
-        for (i, &d) in displays.iter().enumerate().take(count as usize) {
+        for &d in displays.iter().take(count as usize) {
             let b = unsafe { CGDisplayBounds(d) };
             let px_w = unsafe { CGDisplayPixelsWide(d) } as u32;
             let px_h = unsafe { CGDisplayPixelsHigh(d) } as u32;
@@ -252,8 +265,8 @@ pub fn list_displays() -> Vec<DisplayInfo> {
                 1.0
             };
             out.push(DisplayInfo {
-                // screencapture -D 用 1 基序号（1=主屏，其余按 CGGetActiveDisplayList 顺序）
-                id: (i as u32) + 1,
+                // 返回真实的 CoreGraphics Display ID，而非序号
+                id: d,
                 is_main: d == main,
                 x: b.origin.x as i32,
                 y: b.origin.y as i32,
