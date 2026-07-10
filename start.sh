@@ -218,24 +218,39 @@ start_dev() {
         sleep 1
     done
 
-    # 2) 以 dev 配置编译 Rust 二进制
-    #    DEP_TAURI_DEV=1 → tauri-build 不启用 custom-protocol 特性，
-    #    运行时 is_dev() 为真、走 devUrl 连 vite；touch build.rs 强制 build
-    #    script 重跑以读取该变量（否则可能命中上次 release 缓存）。
-    #    不开 custom-protocol 即等于 pnpm tauri dev 的编译产物。
-    log_info "正在以 dev 配置编译 Rust 二进制 (DEP_TAURI_DEV=1, 走 devUrl) ..."
+    # 2) 以 dev 配置编译 Rust 二进制（仅在必要时重建，避免反复重编导致
+    #    ad-hoc 签名漂移、系统「屏幕录制」TCC 授权丢失）
+    #    DEP_TAURI_DEV=1 → tauri-build 不启用 custom-protocol 特性，运行时 is_dev()
+    #    为真、走 devUrl 连 vite；touch build.rs 强制 build script 重跑以读取该变量。
+    #    用 .dev_build_marker 标记「当前二进制确为 dev 模式」：纯重开（无 Rust 改动）
+    #    时直接复用，不重编、不重签 → ad-hoc 签名稳定 → 授权可跨重开保留。
     cd "$SCRIPT_DIR/src-tauri"
-    touch build.rs
-    if ! DEP_TAURI_DEV=1 cargo build 2>&1 | tail -6; then
-        log_error "Rust 编译失败，请查阅上方输出"
-        exit 1
-    fi
     BIN="$SCRIPT_DIR/src-tauri/target/debug/snap-craft"
+    DEV_MARKER="$SCRIPT_DIR/src-tauri/target/debug/.dev_build_marker"
+    NEED_REBUILD=0
+    if [ ! -x "$BIN" ] || [ ! -f "$DEV_MARKER" ]; then
+        NEED_REBUILD=1
+    elif [ "$SCRIPT_DIR/src-tauri/build.rs" -nt "$BIN" ]; then
+        NEED_REBUILD=1
+    elif [ -n "$(find "$SCRIPT_DIR/src-tauri/src" -name '*.rs' -newer "$BIN" 2>/dev/null | head -1)" ]; then
+        NEED_REBUILD=1
+    fi
+    if [ "$NEED_REBUILD" = "1" ]; then
+        log_info "正在以 dev 配置编译 Rust 二进制 (DEP_TAURI_DEV=1, 走 devUrl) ..."
+        touch build.rs
+        if ! DEP_TAURI_DEV=1 cargo build 2>&1 | tail -6; then
+            log_error "Rust 编译失败，请查阅上方输出"
+            exit 1
+        fi
+        touch "$DEV_MARKER"
+        log_info "✅ dev 模式二进制已编译"
+    else
+        log_info "✅ 复用已有 dev 模式二进制（无 Rust 改动，跳过重编以保持签名稳定）"
+    fi
     if [ ! -x "$BIN" ]; then
         log_error "未找到编译产物: $BIN"
         exit 1
     fi
-    log_info "✅ dev 模式二进制已编译"
 
     # 3) 包成 .app 并签名
     build_dev_app_bundle "$BIN"
