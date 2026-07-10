@@ -20,9 +20,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOG_DIR="$SCRIPT_DIR/logs"
 VITE_LOG="$LOG_DIR/vite.log"
 TAURI_LOG="$LOG_DIR/tauri.log"
+# 截屏诊断日志（Rust 端 logger 会写入此文件，用于精确定位截图错误）
+DEV_LOG="$LOG_DIR/dev.log"
 
 # Vite 开发服务器端口
-VITE_PORT=1422
+VITE_PORT=1925
 
 # 进程名称标识
 VITE_PROCESS="vite"
@@ -33,6 +35,11 @@ APP_PROCESS="SnapCraft"
 APP_NAME="SnapCraft"
 APP_BUNDLE="$SCRIPT_DIR/src-tauri/target/release/bundle/macos/$APP_NAME.app"
 APP_IDENTIFIER="com.snap-craft.app"
+
+# dev 模式 .app 包（独立于 release 的 com.snap-craft.app，避免 TCC 权限冲突）
+# start.sh dev 会把 dev 配置编译的二进制包成此 .app 并打开，使其能进入系统「屏幕录制」TCC 列表
+DEV_APP_BUNDLE="$SCRIPT_DIR/src-tauri/target/debug/SnapCraft-dev.app"
+DEV_APP_ID="com.snap-craft.app.dev"
 
 # 本地自签名证书名（可选）。创建方式见 README：
 #   钥匙串访问 → 证书助理 → 创建证书 → 名称任意（如 SnapCraft Local）
@@ -176,37 +183,77 @@ pre_check() {
     check_dependencies
 }
 
-# 启动开发模式（前后端同时启动）
+# 启动开发模式（.app 包形式，可授权屏幕录制；前端走 vite HMR）
+# 做法：用 vite 起前端 dev server（HMR），并以 dev 配置（DEP_TAURI_DEV=1，
+#   不启用 custom-protocol 特性）编译 Rust 二进制（走 devUrl 连 vite），再包成
+#   .app、签名、打开。相比 pnpm tauri dev 直接跑裸二进制，这样产出的 .app
+#   拥有 Info.plist / Bundle ID，可被系统授予「屏幕录制」TCC 权限。
+# 注：改了 Rust 代码需重跑本脚本；改前端走 vite HMR，无需重开。
 start_dev() {
-    log_info "SnapCraft 开发模式启动脚本"
+    log_info "SnapCraft 开发模式（.app 包，可授权屏幕录制）启动脚本"
     echo "========================================"
 
     # 前置检查
     pre_check
 
-    # 停止所有相关进程
+    # 停止所有相关进程（含可能残留的裸二进制 / 旧 dev .app）
     stop_all_processes
 
-    log_info "正在启动开发模式（前后端同时启动）..."
-    log_info "前端地址: http://localhost:${VITE_PORT}"
-    log_info "Vite 日志: $VITE_LOG"
-    log_info "Tauri 日志: $TAURI_LOG"
-    log_info "按 Ctrl+C 停止服务"
-    echo "----------------------------------------"
+    # 截屏诊断日志：注入绝对路径给 Rust 端 logger，并清空上一次运行的旧日志
+    # （即便用 open 启动 .app 时丢弃了该环境变量，Rust 端也会用编译期兜底路径
+    #  写入 logs/dev.log，见 src-tauri/src/logger.rs）
+    mkdir -p "$LOG_DIR"
+    export SNAP_LOG_FILE="$DEV_LOG"
+    : > "$DEV_LOG"
+    log_info "截屏诊断日志: $DEV_LOG  （实时查看：tail -f logs/dev.log）"
 
-    cd "$SCRIPT_DIR"
+    # 1) 前端 dev server（vite，端口与 tauri.conf.json 的 devUrl 一致）
+    log_info "正在启动前端 dev server (vite, 端口 $VITE_PORT) ..."
+    ( cd "$SCRIPT_DIR" && nohup pnpm dev > "$VITE_LOG" 2>&1 & )
+    for i in $(seq 1 30); do
+        if lsof -ti:"$VITE_PORT" >/dev/null 2>&1; then
+            log_info "前端 dev server 已就绪: http://localhost:$VITE_PORT"
+            break
+        fi
+        sleep 1
+    done
 
-    # 使用 pnpm tauri dev 启动（会同时启动前后端）
-    # 实测：tauri dev 直接运行 target/debug/snap-craft 裸二进制（非 .app 包），
-    # 无 Info.plist / Bundle 结构，无法进入系统「屏幕录制」TCC 列表，
-    # 故 dev 模式仅适合调 UI；截图/权限验收请用 ./start.sh app（已自动签名 .app）。
-    if [ -n "$SNAP_SIGN_ID" ]; then
-        log_warn "提示：dev 为裸二进制，无法授权屏幕录制；权限验收请另开终端跑 ./start.sh app（将用证书「$SNAP_SIGN_ID」签名 .app）。"
-    else
-        log_warn "提示：dev 为裸二进制，无法授权屏幕录制；权限验收请另开终端跑 ./start.sh app（ad-hoc 签名，右键打开即可授权）。"
+    # 2) 以 dev 配置编译 Rust 二进制
+    #    DEP_TAURI_DEV=1 → tauri-build 不启用 custom-protocol 特性，
+    #    运行时 is_dev() 为真、走 devUrl 连 vite；touch build.rs 强制 build
+    #    script 重跑以读取该变量（否则可能命中上次 release 缓存）。
+    #    不开 custom-protocol 即等于 pnpm tauri dev 的编译产物。
+    log_info "正在以 dev 配置编译 Rust 二进制 (DEP_TAURI_DEV=1, 走 devUrl) ..."
+    cd "$SCRIPT_DIR/src-tauri"
+    touch build.rs
+    if ! DEP_TAURI_DEV=1 cargo build 2>&1 | tail -6; then
+        log_error "Rust 编译失败，请查阅上方输出"
+        exit 1
     fi
-    log_info "正在启动 Tauri 开发模式..."
-    pnpm tauri dev
+    BIN="$SCRIPT_DIR/src-tauri/target/debug/snap-craft"
+    if [ ! -x "$BIN" ]; then
+        log_error "未找到编译产物: $BIN"
+        exit 1
+    fi
+    log_info "✅ dev 模式二进制已编译"
+
+    # 3) 包成 .app 并签名
+    build_dev_app_bundle "$BIN"
+
+    # 4) 打开 dev .app（拥有 Info.plist / Bundle ID，可进入 TCC 列表）
+    log_info "正在打开 $DEV_APP_BUNDLE ..."
+    open "$DEV_APP_BUNDLE"
+    cat <<'EOF'
+
+────────────────────────────────────────────
+✅ 已以 .app 形式打开（开发模式：前端走 vite HMR，改 UI 即时生效）
+👉 首次使用请点一次「全屏截图」，会弹出系统「屏幕录制」授权，点「允许」。
+👉 之后去 系统设置 → 隐私与安全性 → 屏幕录制，即可看到 SnapCraft 且开关已开。
+👉 改了 Rust 代码需重跑 ./start.sh dev；改前端走 vite HMR，无需重开。
+👉 截屏问题查 logs/dev.log（已注入全链路诊断日志）。
+👉 重置 dev .app 权限：tccutil reset All com.snap-craft.app.dev
+────────────────────────────────────────────
+EOF
 }
 
 # 构建项目（前端）
@@ -291,6 +338,54 @@ reset_permissions() {
     log_info "已重置。下次打开 .app 截图会重新请求授权。"
 }
 
+# 将 dev 二进制包成 .app（拥有 Info.plist / Bundle ID，可进入 TCC 列表）
+# 并签名：有本地自签名证书则用其（Gatekeeper 信任、TCC 稳定），否则 ad-hoc。
+# 本地构建的文件不带 quarantine，直接 open 即可，无需「右键→打开」。
+build_dev_app_bundle() {
+    local bin="$1"
+    local app="$DEV_APP_BUNDLE"
+    local id="$DEV_APP_ID"
+    rm -rf "$app"
+    mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+    cp "$bin" "$app/Contents/MacOS/SnapCraft"
+    chmod +x "$app/Contents/MacOS/SnapCraft"
+    cat > "$app/Contents/Info.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key><string>SnapCraft</string>
+    <key>CFBundleDisplayName</key><string>SnapCraft</string>
+    <key>CFBundleIdentifier</key><string>$id</string>
+    <key>CFBundleExecutable</key><string>SnapCraft</string>
+    <key>CFBundlePackageType</key><string>APPL</string>
+    <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+    <key>CFBundleShortVersionString</key><string>0.1.0</string>
+    <key>CFBundleVersion</key><string>1</string>
+    <key>LSMinimumSystemVersion</key><string>10.13</string>
+    <key>NSHighResolutionCapable</key><true/>
+</dict>
+</plist>
+PLIST
+    # 1) 优先用本机自签名证书（Gatekeeper 信任、TCC 授权跨重编稳定）
+    if [ -n "$SNAP_SIGN_ID" ] && cert_exists "$SNAP_SIGN_ID"; then
+        log_info "用本机自签名证书「$SNAP_SIGN_ID」对 dev .app 签名 ..."
+        if codesign --force --deep --sign "$SNAP_SIGN_ID" "$app" 2>&1; then
+            log_info "✅ 证书签名完成"
+        else
+            log_warn "⚠️ 证书签名失败（可能被钥匙串锁定），回退 ad-hoc"
+        fi
+    fi
+    # 2) 确保有签名（TCC 要求应用已签名）：未签名或证书失败时做 ad-hoc
+    if ! codesign -v "$app" >/dev/null 2>&1; then
+        log_info "对 dev .app 进行 ad-hoc 签名（TCC 要求已签名）..."
+        codesign --force --deep --sign - "$app" 2>&1 || log_warn "⚠️ ad-hoc 签名失败"
+    fi
+    # 本地构建不带隔离属性，去除以防万一
+    xattr -dr com.apple.quarantine "$app" 2>/dev/null || true
+    log_info "✅ dev .app 已就绪: $app"
+}
+
 # 检查本机钥匙串是否存在指定名称的代码签名证书
 cert_exists() {
     local name="$1"
@@ -344,7 +439,7 @@ show_help() {
     echo "用法: $0 [选项]"
     echo ""
     echo "选项:"
-    echo "  dev              启动开发模式（前后端同时启动，默认；仅调 UI，无法授权屏幕录制）"
+    echo "  dev              启动开发模式（.app 包形式，可授权屏幕录制；前端走 vite HMR）"
     echo "  stop             停止所有相关进程"
     echo "  build            构建前端"
     echo "  build-tauri      构建 Tauri 应用（不打开）"

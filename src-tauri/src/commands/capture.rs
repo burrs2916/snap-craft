@@ -30,6 +30,7 @@ pub struct DisplayInfo {
 /// macOS 原生截图（全屏/区域/窗口），返回 PNG 的 data URL
 #[cfg(target_os = "macos")]
 fn capture_to_data_url(args: &[&str]) -> Result<String, String> {
+    let started = std::time::Instant::now();
     let path = store::temp_png_path();
     let path_str = path.to_str().ok_or("无效的临时路径")?;
 
@@ -37,27 +38,68 @@ fn capture_to_data_url(args: &[&str]) -> Result<String, String> {
     // -R 是非交互（指定矩形），-x 无 UI（全屏，失败即权限问题）
     let is_interactive = args.iter().any(|a| *a == "-i" || *a == "-w");
 
-    let output = Command::new("screencapture")
-        .args(args)
-        .arg(path_str)
-        .output()
-        .map_err(|e| format!("无法启动 screencapture: {}", e))?;
+    clog!(
+        "capture",
+        "screencapture 调用: args={:?} 交互式={} 权限(预检)={} 临时文件={}",
+        args,
+        is_interactive,
+        mac_has_screen_capture_access(),
+        path_str
+    );
+
+    let output = match Command::new("screencapture").args(args).arg(path_str).output() {
+        Ok(o) => o,
+        Err(e) => {
+            clog!("capture", "无法启动 screencapture: {}", e);
+            return Err(format!("无法启动 screencapture: {}", e));
+        }
+    };
+
+    let file_exists = path.exists();
+    let stdout_str = String::from_utf8_lossy(&output.stdout);
+    let stderr_raw = String::from_utf8_lossy(&output.stderr);
+    clog!(
+        "capture",
+        "screencapture 返回: 退出码={:?} 成功={} 生成文件={} 耗时={}ms stdout={:?} stderr={:?}",
+        output.status.code(),
+        output.status.success(),
+        file_exists,
+        started.elapsed().as_millis(),
+        stdout_str.trim(),
+        stderr_raw.trim()
+    );
 
     // 成功：生成了 PNG 文件
-    if path.exists() {
+    if file_exists {
+        let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
         let result = store::file_to_data_url(&path);
         // 清理临时文件，避免 /tmp 堆积
         let _ = std::fs::remove_file(&path);
+        match &result {
+            Ok(d) => clog!(
+                "capture",
+                "截图成功: PNG {} 字节, data_url {} 字符, 总耗时={}ms",
+                size,
+                d.len(),
+                started.elapsed().as_millis()
+            ),
+            Err(e) => clog!("capture", "截图生成文件但编码 data_url 失败: {}", e),
+        }
         return result;
     }
 
     // 未生成文件：区分「用户取消」「权限被拒」「其他真实错误」
-    let stderr = String::from_utf8_lossy(&output.stderr).to_lowercase();
+    let stderr = stderr_raw.to_lowercase();
     let looks_denied = stderr.contains("denied")
         || stderr.contains("permission")
         || stderr.contains("not authorized");
 
     if looks_denied {
+        clog!(
+            "capture",
+            "判定=权限被拒(屏幕录制未授权); stderr={:?}",
+            stderr_raw.trim()
+        );
         return Err(
             "截图失败：SnapCraft 没有「屏幕录制」权限。请打开 系统设置 → 隐私与安全性 → 屏幕录制，\
              找到 SnapCraft 并开启开关，然后重试。\n\
@@ -69,19 +111,23 @@ fn capture_to_data_url(args: &[&str]) -> Result<String, String> {
 
     // 交互式截图（区域/窗口）按 Esc 或点空白取消：stderr 多为空或含 cancel
     if is_interactive && (stderr.trim().is_empty() || stderr.contains("cancel")) {
+        clog!("capture", "判定=用户取消(交互式, stderr 空或含 cancel)");
         return Err("截图已取消".into());
     }
 
     // 其它情况（含 -R 矩形非法、-w 启动失败等）如实上报，不再被静默吞掉
     if !stderr.trim().is_empty() {
+        clog!("capture", "判定=其它错误; stderr={:?}", stderr_raw.trim());
         return Err(format!("截图失败：{}", stderr.trim()));
     }
 
+    clog!("capture", "判定=已取消(无文件且 stderr 为空)");
     Err("截图已取消".into())
 }
 
 #[tauri::command]
 pub async fn capture_screen(_app: AppHandle, display_id: Option<u32>) -> Result<String, String> {
+    clog!("capture", "命令=capture_screen display_id={:?}", display_id);
     #[cfg(target_os = "macos")]
     {
         // 等待窗口隐藏完成，避免截到自身窗口（macOS 隐藏存在极短过渡）
@@ -94,6 +140,7 @@ pub async fn capture_screen(_app: AppHandle, display_id: Option<u32>) -> Result<
             let bounds = unsafe { CGDisplayBounds(did) };
             // 校验 bounds 有效性：显示器断开时 CGDisplayBounds 返回全零
             if bounds.size.width < 1.0 || bounds.size.height < 1.0 {
+                clog!("capture", "display_id={} 的 bounds 无效(可能已断开): {:?}x{:?}", did, bounds.size.width, bounds.size.height);
                 return Err("指定的显示器不可用，可能已断开连接".into());
             }
             let rarg = format!(
@@ -120,6 +167,10 @@ pub async fn capture_screen(_app: AppHandle, display_id: Option<u32>) -> Result<
 
 #[tauri::command]
 pub async fn capture_region(_app: AppHandle, rect: Option<CaptureRect>) -> Result<String, String> {
+    match &rect {
+        Some(r) => clog!("capture", "命令=capture_region rect=({},{},{}x{})", r.x, r.y, r.width, r.height),
+        None => clog!("capture", "命令=capture_region rect=None(将退回交互式)"),
+    }
     #[cfg(target_os = "macos")]
     {
         // 收到 rect（来自透明覆盖层）：用非交互 -R 按全局坐标截取，彻底绕开
@@ -149,6 +200,7 @@ pub async fn capture_region(_app: AppHandle, rect: Option<CaptureRect>) -> Resul
 
 #[tauri::command]
 pub async fn capture_window(_app: AppHandle) -> Result<String, String> {
+    clog!("capture", "命令=capture_window");
     #[cfg(target_os = "macos")]
     {
         // 等待覆盖层窗口完全隐藏（与 capture_screen 一致），避免截到正在消失的覆盖层

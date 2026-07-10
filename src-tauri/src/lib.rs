@@ -1,4 +1,6 @@
 // SnapCraft - 智能截屏工具
+#[macro_use]
+mod logger;
 mod commands;
 mod store;
 
@@ -44,6 +46,20 @@ pub fn run() {
                 .build(),
         )
         .setup(|app| {
+            // 启动分隔：便于在 logs/dev.log 中区分每一次运行
+            clog!(
+                "boot",
+                "========== SnapCraft 启动 (os={}, debug={}) ==========",
+                std::env::consts::OS,
+                cfg!(debug_assertions)
+            );
+            #[cfg(target_os = "macos")]
+            clog!(
+                "boot",
+                "屏幕录制权限(启动预检)={}",
+                commands::capture::check_screen_capture_access()
+            );
+
             // 注册全局快捷键：macOS 用 ⌘，Windows/Linux 用 Ctrl
             let mut failed: Vec<String> = Vec::new();
             for modifiers in [Modifiers::SUPER, Modifiers::CONTROL] {
