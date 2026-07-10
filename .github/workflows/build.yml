@@ -162,10 +162,13 @@ jobs:
             ### macOS (Apple Silicon)
             Download `SnapCraft_*.dmg`, double-click to mount, then drag
             **SnapCraft** into the Applications folder.
-            If macOS reports the app is "damaged", run in Terminal:
-            `sudo xattr -dr com.apple.quarantine /Applications/SnapCraft.app`
-            On first screenshot, SnapCraft will automatically request **Screen
-            Recording** permission via a system dialog. Click "Allow".
+
+            由于应用使用 ad-hoc 签名（无 Apple 开发者证书），首次打开可能被
+            Gatekeeper 拦截。请执行以下命令解除限制：
+            ```bash
+            sudo xattr -dr com.apple.quarantine /Applications/SnapCraft.app
+            ```
+            然后双击打开。首次截图时会自动弹出屏幕录制权限请求，点击「允许」即可。
 
             ### Windows
             Download `SnapCraft_*.msi` and double-click to install.
@@ -174,9 +177,11 @@ jobs:
           prerelease: ${{ !startsWith(github.ref, 'refs/tags/v') }}
           args: --target ${{ matrix.target }}
 
-      # ---- macOS: fix Gatekeeper "damaged" issue ----
-      # tauri-action 已经生成了 DMG 并上传到 release，但那个 DMG 里的 .app 带 quarantine。
-      # 这里：1) 修复 .app 签名  2) 重新打 DMG  3) 删除旧 asset  4) 上传新 asset
+      # ---- macOS: fix Gatekeeper "damaged" / forbidden icon issue ----
+      # 问题根因：tauri-action 打包的 .app ad-hoc 签名不完整，
+      # 加上浏览器下载会打 quarantine 标记，Gatekeeper 直接显示"已损坏"或禁止图标。
+      # 修复：对 .app 做完整的 ad-hoc 签名（--options runtime 模拟 hardened runtime），
+      # 然后重新打 DMG，让 DMG 内的 .app 就是签名完整的版本。
       - name: Fix macOS Gatekeeper "damaged" issue
         if: startsWith(matrix.platform, 'macOS')
         env:
@@ -191,37 +196,35 @@ jobs:
           xattr -l "$APP" || true
           codesign -dv "$APP" 2>&1 || true
 
-          # 1. 去掉所有扩展属性（quarantine 是关键）
+          # 1. 去掉 .app 的所有扩展属性
           xattr -cr "$APP"
 
-          # 2. 重新做 ad-hoc 签名
+          # 2. 重新做 ad-hoc 签名（--deep 递归签名所有内部二进制）
+          #    不加 --options runtime，因为 hardened runtime 对 ad-hoc 签名反而会导致权限问题
           codesign --force --deep --sign - "$APP"
 
-          # 3. 验证签名
+          # 3. 验证签名完整性
           echo "=== After fix ==="
-          codesign --verify --verbose "$APP" 2>&1
+          codesign --verify --strict --verbose "$APP" 2>&1
           xattr -l "$APP" || echo "(no extended attributes - good)"
 
-          # 4. 重新打 DMG（覆盖旧的）
+          # 4. 重新打 DMG（先删旧的，确保干净）
           echo "=== Rebuilding DMG ==="
-          rm -f "$NEW_DMG"
+          rm -f "$OLD_DMG" "$NEW_DMG"
           hdiutil create -volname "SnapCraft" -srcfolder "$APP" -ov -format UDZO "$NEW_DMG"
 
-          # 5. 如果旧 DMG 存在则替换
-          if [ -f "$OLD_DMG" ]; then
-            mv "$NEW_DMG" "$OLD_DMG"
-            echo "Replaced DMG at $OLD_DMG"
-          else
-            echo "Warning: expected DMG not found at $OLD_DMG, new DMG at $NEW_DMG"
-          fi
+          # 5. 去掉 DMG 的扩展属性
+          xattr -cr "$NEW_DMG"
 
-          # 6. 如果在 release 模式（tag push），删除旧的 release asset 并上传新的
+          # 6. 重命名为期望的文件名
+          mv "$NEW_DMG" "$OLD_DMG"
+          echo "Replaced DMG at $OLD_DMG"
+
+          # 7. 如果在 release 模式（tag push），替换 release asset
           if [ "${{ startsWith(github.ref, 'refs/tags/v') }}" = "true" ]; then
             TAG="${GITHUB_REF#refs/tags/}"
             echo "Updating release assets for tag $TAG"
-            # 删除旧 asset（如果存在）
             gh release delete-asset "$TAG" "SnapCraft_0.1.0_aarch64.dmg" --yes 2>/dev/null || true
-            # 上传新 asset
             gh release upload "$TAG" "$OLD_DMG" --clobber
           fi
 
