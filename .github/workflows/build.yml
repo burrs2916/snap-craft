@@ -165,13 +165,12 @@ jobs:
             ### macOS (Apple Silicon)
             Download `SnapCraft_*.dmg`, double-click to mount, then drag
             **SnapCraft** into the Applications folder.
-            First launch may be blocked by Gatekeeper (ad-hoc signed):
-            right-click -> **Open**, or run once:
+            If macOS reports the app is "damaged", this is a Gatekeeper
+            quarantine issue — run once in Terminal:
             `sudo xattr -dr com.apple.quarantine /Applications/SnapCraft.app`
+            Then double-click to launch.
             On first screenshot, SnapCraft will automatically request **Screen
             Recording** permission via a system dialog. Simply click "Allow".
-            If the dialog doesn't appear, go to System Settings > Privacy &
-            Security > Screen Recording and enable SnapCraft manually.
 
             ### Windows
             Download `SnapCraft_*.msi` and double-click to install. Unsigned build,
@@ -179,6 +178,19 @@ jobs:
           releaseDraft: ${{ startsWith(github.ref, 'refs/tags/v') }}
           prerelease: ${{ !startsWith(github.ref, 'refs/tags/v') }}
           args: --target ${{ matrix.target }}
+
+      # ---- macOS: strip quarantine + re-sign ad-hoc so Gatekeeper doesn't block ----
+      - name: Fix macOS Gatekeeper "damaged" issue
+        if: startsWith(matrix.platform, 'macOS')
+        run: |
+          APP="src-tauri/target/${{ matrix.target }}/release/bundle/macos/SnapCraft.app"
+          # 去掉 quarantine 属性，防止 Gatekeeper 拦截
+          xattr -cr "$APP"
+          # 重新做 ad-hoc 签名（不需要 Apple 证书），让 Gatekeeper 认可
+          codesign --force --deep --sign - "$APP"
+          # 打包 DMG
+          cd src-tauri/target/${{ matrix.target }}/release/bundle/macos
+          hdiutil create -volname "SnapCraft" -srcfolder SnapCraft.app -ov -format UDZO "../../../bundle/dmg/SnapCraft.dmg" || true
 
       # ---- Upload build artifacts ----
       - name: Upload artifacts (macOS)
