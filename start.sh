@@ -197,8 +197,14 @@ start_dev() {
     cd "$SCRIPT_DIR"
 
     # 使用 pnpm tauri dev 启动（会同时启动前后端）
-    # 注意：dev 模式跑的是裸二进制，不会进入系统「屏幕录制」权限列表，
-    # 仅适合调 UI；截图/权限验收请用 ./start.sh app
+    # 实测：tauri dev 直接运行 target/debug/snap-craft 裸二进制（非 .app 包），
+    # 无 Info.plist / Bundle 结构，无法进入系统「屏幕录制」TCC 列表，
+    # 故 dev 模式仅适合调 UI；截图/权限验收请用 ./start.sh app（已自动签名 .app）。
+    if [ -n "$SNAP_SIGN_ID" ]; then
+        log_warn "提示：dev 为裸二进制，无法授权屏幕录制；权限验收请另开终端跑 ./start.sh app（将用证书「$SNAP_SIGN_ID」签名 .app）。"
+    else
+        log_warn "提示：dev 为裸二进制，无法授权屏幕录制；权限验收请另开终端跑 ./start.sh app（ad-hoc 签名，右键打开即可授权）。"
+    fi
     log_info "正在启动 Tauri 开发模式..."
     pnpm tauri dev
 }
@@ -338,7 +344,7 @@ show_help() {
     echo "用法: $0 [选项]"
     echo ""
     echo "选项:"
-    echo "  dev              启动开发模式（前后端同时启动，默认）"
+    echo "  dev              启动开发模式（前后端同时启动，默认；仅调 UI，无法授权屏幕录制）"
     echo "  stop             停止所有相关进程"
     echo "  build            构建前端"
     echo "  build-tauri      构建 Tauri 应用（不打开）"
