@@ -148,7 +148,6 @@ jobs:
             ${{ runner.os }}-${{ matrix.target }}-cargo-
 
       # ---- Build Tauri App ----
-      # macOS: tauri-action builds and creates DMG, then we fix signing below
       - name: Build Tauri App
         uses: tauri-apps/tauri-action@v0
         env:
@@ -176,57 +175,6 @@ jobs:
           releaseDraft: ${{ startsWith(github.ref, 'refs/tags/v') }}
           prerelease: ${{ !startsWith(github.ref, 'refs/tags/v') }}
           args: --target ${{ matrix.target }}
-
-      # ---- macOS: fix Gatekeeper "damaged" / forbidden icon issue ----
-      # 问题根因：tauri-action 打包的 .app ad-hoc 签名不完整，
-      # 加上浏览器下载会打 quarantine 标记，Gatekeeper 直接显示"已损坏"或禁止图标。
-      # 修复：对 .app 做完整的 ad-hoc 签名（--options runtime 模拟 hardened runtime），
-      # 然后重新打 DMG，让 DMG 内的 .app 就是签名完整的版本。
-      - name: Fix macOS Gatekeeper "damaged" issue
-        if: startsWith(matrix.platform, 'macOS')
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          BUNDLE_DIR="src-tauri/target/${{ matrix.target }}/release/bundle"
-          APP="$BUNDLE_DIR/macos/SnapCraft.app"
-          OLD_DMG="$BUNDLE_DIR/dmg/SnapCraft_0.1.0_aarch64.dmg"
-          NEW_DMG="$BUNDLE_DIR/dmg/SnapCraft-fixed.dmg"
-
-          echo "=== Before fix ==="
-          xattr -l "$APP" || true
-          codesign -dv "$APP" 2>&1 || true
-
-          # 1. 去掉 .app 的所有扩展属性
-          xattr -cr "$APP"
-
-          # 2. 重新做 ad-hoc 签名（--deep 递归签名所有内部二进制）
-          #    不加 --options runtime，因为 hardened runtime 对 ad-hoc 签名反而会导致权限问题
-          codesign --force --deep --sign - "$APP"
-
-          # 3. 验证签名完整性
-          echo "=== After fix ==="
-          codesign --verify --strict --verbose "$APP" 2>&1
-          xattr -l "$APP" || echo "(no extended attributes - good)"
-
-          # 4. 重新打 DMG（先删旧的，确保干净）
-          echo "=== Rebuilding DMG ==="
-          rm -f "$OLD_DMG" "$NEW_DMG"
-          hdiutil create -volname "SnapCraft" -srcfolder "$APP" -ov -format UDZO "$NEW_DMG"
-
-          # 5. 去掉 DMG 的扩展属性
-          xattr -cr "$NEW_DMG"
-
-          # 6. 重命名为期望的文件名
-          mv "$NEW_DMG" "$OLD_DMG"
-          echo "Replaced DMG at $OLD_DMG"
-
-          # 7. 如果在 release 模式（tag push），替换 release asset
-          if [ "${{ startsWith(github.ref, 'refs/tags/v') }}" = "true" ]; then
-            TAG="${GITHUB_REF#refs/tags/}"
-            echo "Updating release assets for tag $TAG"
-            gh release delete-asset "$TAG" "SnapCraft_0.1.0_aarch64.dmg" --yes 2>/dev/null || true
-            gh release upload "$TAG" "$OLD_DMG" --clobber
-          fi
 
       # ---- Upload build artifacts ----
       - name: Upload artifacts (macOS)
