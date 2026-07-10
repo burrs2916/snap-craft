@@ -1,4 +1,5 @@
 use crate::store;
+#[cfg(target_os = "macos")]
 use std::process::Command;
 use tauri::AppHandle;
 

@@ -1,4 +1,5 @@
 use crate::store;
+#[cfg(target_os = "macos")]
 use std::process::Command;
 use tauri::AppHandle;
 #[cfg(not(target_os = "macos"))]
@@ -27,11 +28,8 @@ pub struct DisplayInfo {
 }
 
 /// macOS 原生截图（全屏/区域/窗口），返回 PNG 的 data URL
+#[cfg(target_os = "macos")]
 fn capture_to_data_url(args: &[&str]) -> Result<String, String> {
-    if !cfg!(target_os = "macos") {
-        return Err("当前平台暂仅支持 macOS 原生截图".into());
-    }
-
     let path = store::temp_png_path();
     let path_str = path.to_str().ok_or("无效的临时路径")?;
 

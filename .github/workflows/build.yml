@@ -147,11 +147,8 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-${{ matrix.target }}-cargo-
 
-      # ---- Build & Bundle with tauri-action ----
-      # macOS uses ad-hoc signing (tauri.conf.json: signingIdentity: "-"),
-      # so NO Apple certificate / notarization is required in CI.
-      # Do NOT set APPLE_* env vars here - empty values trigger notarization
-      # and break the DMG bundling step.
+      # ---- Build Tauri App ----
+      # macOS: tauri-action builds and creates DMG, then we fix signing below
       - name: Build Tauri App
         uses: tauri-apps/tauri-action@v0
         env:
@@ -165,32 +162,68 @@ jobs:
             ### macOS (Apple Silicon)
             Download `SnapCraft_*.dmg`, double-click to mount, then drag
             **SnapCraft** into the Applications folder.
-            If macOS reports the app is "damaged", this is a Gatekeeper
-            quarantine issue — run once in Terminal:
+            If macOS reports the app is "damaged", run in Terminal:
             `sudo xattr -dr com.apple.quarantine /Applications/SnapCraft.app`
-            Then double-click to launch.
             On first screenshot, SnapCraft will automatically request **Screen
-            Recording** permission via a system dialog. Simply click "Allow".
+            Recording** permission via a system dialog. Click "Allow".
 
             ### Windows
-            Download `SnapCraft_*.msi` and double-click to install. Unsigned build,
-            so SmartScreen may warn - choose "More info -> Run anyway".
+            Download `SnapCraft_*.msi` and double-click to install.
+            SmartScreen may warn - choose "More info -> Run anyway".
           releaseDraft: ${{ startsWith(github.ref, 'refs/tags/v') }}
           prerelease: ${{ !startsWith(github.ref, 'refs/tags/v') }}
           args: --target ${{ matrix.target }}
 
-      # ---- macOS: strip quarantine + re-sign ad-hoc so Gatekeeper doesn't block ----
+      # ---- macOS: fix Gatekeeper "damaged" issue ----
+      # tauri-action 已经生成了 DMG 并上传到 release，但那个 DMG 里的 .app 带 quarantine。
+      # 这里：1) 修复 .app 签名  2) 重新打 DMG  3) 删除旧 asset  4) 上传新 asset
       - name: Fix macOS Gatekeeper "damaged" issue
         if: startsWith(matrix.platform, 'macOS')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          APP="src-tauri/target/${{ matrix.target }}/release/bundle/macos/SnapCraft.app"
-          # 去掉 quarantine 属性，防止 Gatekeeper 拦截
+          BUNDLE_DIR="src-tauri/target/${{ matrix.target }}/release/bundle"
+          APP="$BUNDLE_DIR/macos/SnapCraft.app"
+          OLD_DMG="$BUNDLE_DIR/dmg/SnapCraft_0.1.0_aarch64.dmg"
+          NEW_DMG="$BUNDLE_DIR/dmg/SnapCraft-fixed.dmg"
+
+          echo "=== Before fix ==="
+          xattr -l "$APP" || true
+          codesign -dv "$APP" 2>&1 || true
+
+          # 1. 去掉所有扩展属性（quarantine 是关键）
           xattr -cr "$APP"
-          # 重新做 ad-hoc 签名（不需要 Apple 证书），让 Gatekeeper 认可
+
+          # 2. 重新做 ad-hoc 签名
           codesign --force --deep --sign - "$APP"
-          # 打包 DMG
-          cd src-tauri/target/${{ matrix.target }}/release/bundle/macos
-          hdiutil create -volname "SnapCraft" -srcfolder SnapCraft.app -ov -format UDZO "../../../bundle/dmg/SnapCraft.dmg" || true
+
+          # 3. 验证签名
+          echo "=== After fix ==="
+          codesign --verify --verbose "$APP" 2>&1
+          xattr -l "$APP" || echo "(no extended attributes - good)"
+
+          # 4. 重新打 DMG（覆盖旧的）
+          echo "=== Rebuilding DMG ==="
+          rm -f "$NEW_DMG"
+          hdiutil create -volname "SnapCraft" -srcfolder "$APP" -ov -format UDZO "$NEW_DMG"
+
+          # 5. 如果旧 DMG 存在则替换
+          if [ -f "$OLD_DMG" ]; then
+            mv "$NEW_DMG" "$OLD_DMG"
+            echo "Replaced DMG at $OLD_DMG"
+          else
+            echo "Warning: expected DMG not found at $OLD_DMG, new DMG at $NEW_DMG"
+          fi
+
+          # 6. 如果在 release 模式（tag push），删除旧的 release asset 并上传新的
+          if [ "${{ startsWith(github.ref, 'refs/tags/v') }}" = "true" ]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+            echo "Updating release assets for tag $TAG"
+            # 删除旧 asset（如果存在）
+            gh release delete-asset "$TAG" "SnapCraft_0.1.0_aarch64.dmg" --yes 2>/dev/null || true
+            # 上传新 asset
+            gh release upload "$TAG" "$OLD_DMG" --clobber
+          fi
 
       # ---- Upload build artifacts ----
       - name: Upload artifacts (macOS)
