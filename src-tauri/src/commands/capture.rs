@@ -1,5 +1,4 @@
 use crate::store;
-#[cfg(target_os = "macos")]
 use std::process::Command;
 use tauri::AppHandle;
 #[cfg(not(target_os = "macos"))]
