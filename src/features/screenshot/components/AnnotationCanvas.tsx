@@ -46,6 +46,9 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, AnnotationCanvasProp
     redo,
     currentColor,
     currentStrokeWidth,
+    setActiveTool,
+    setCurrentColor,
+    setCurrentStrokeWidth,
   } = useScreenshotStore();
 
   useEffect(() => {
@@ -85,7 +88,17 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, AnnotationCanvasProp
   }, [selectedId, annotations]);
 
   // Delete / Backspace 删除选中，Esc 取消选中；Ctrl/⌘+Z 撤销、+Shift 重做
+  // 数字键 1-7 切换标注工具；[ / ] 调节线宽
   useEffect(() => {
+    const TOOL_KEYS: Record<string, string> = {
+      '1': 'select',
+      '2': 'arrow',
+      '3': 'line',
+      '4': 'rectangle',
+      '5': 'circle',
+      '6': 'text',
+      '7': 'freehand',
+    };
     const onKey = (e: KeyboardEvent) => {
       const tag = (document.activeElement?.tagName || '').toUpperCase();
       // 输入框聚焦时交给浏览器原生处理（文字删除 / 撤销），不拦截
@@ -95,6 +108,27 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, AnnotationCanvasProp
         e.preventDefault();
         if (e.shiftKey) redo();
         else undo();
+        return;
+      }
+      // ⌘/Ctrl+S 保存、⌘/Ctrl+C 复制——交给编辑器顶层处理，这里不拦截
+      if ((e.metaKey || e.ctrlKey) && (e.key === 's' || e.key === 'S' || e.key === 'c' || e.key === 'C')) {
+        return;
+      }
+      // 数字键切换工具
+      if (TOOL_KEYS[e.key]) {
+        e.preventDefault();
+        setActiveTool(TOOL_KEYS[e.key]);
+        return;
+      }
+      // [ / ] 调节线宽
+      if (e.key === '[') {
+        e.preventDefault();
+        setCurrentStrokeWidth(Math.max(2, currentStrokeWidth - 2));
+        return;
+      }
+      if (e.key === ']') {
+        e.preventDefault();
+        setCurrentStrokeWidth(Math.min(8, currentStrokeWidth + 2));
         return;
       }
       if (e.key === 'Delete' || e.key === 'Backspace') {
@@ -108,7 +142,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, AnnotationCanvasProp
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [selectedId, deleteAnnotation, setSelectedId, undo, redo]);
+  }, [selectedId, deleteAnnotation, setSelectedId, undo, redo, setActiveTool, setCurrentStrokeWidth, currentStrokeWidth]);
 
   // 提交画布内文字（Enter 或失焦触发），用 ref 防止重复提交
   // 若带 id 则是编辑已有文字（走 updateAnnotation），否则新增（走 onAnnotationAdd）

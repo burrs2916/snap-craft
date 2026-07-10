@@ -273,11 +273,13 @@ pub fn list_displays() -> Vec<DisplayInfo> {
 }
 
 // ===== macOS 屏幕录制权限（仅 macOS） =====
-// 用 CoreGraphics 的 CGPreflightScreenCaptureAccess 预检，无需弹窗即可知道权限状态。
+// CGPreflightScreenCaptureAccess：预检权限状态，不弹窗
+// CGRequestScreenCaptureAccess：请求权限，首次调用会弹出系统授权对话框
 #[cfg(target_os = "macos")]
 #[link(name = "CoreGraphics", kind = "framework")]
 extern "C" {
     fn CGPreflightScreenCaptureAccess() -> std::os::raw::c_uchar;
+    fn CGRequestScreenCaptureAccess() -> std::os::raw::c_uchar;
 }
 
 #[cfg(target_os = "macos")]
@@ -291,6 +293,26 @@ pub fn check_screen_capture_access() -> bool {
     #[cfg(target_os = "macos")]
     {
         mac_has_screen_capture_access()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        true
+    }
+}
+
+/// 请求屏幕录制权限。首次调用会弹出系统授权对话框，用户点击后系统会创建 TCC 条目。
+/// 已授权时直接返回 true。非 macOS 返回 true。
+/// 这是解决「ad-hoc 签名权限不持久」的关键——系统弹窗授权创建的 TCC 条目比手动开关更稳定。
+#[tauri::command]
+pub fn request_screen_capture_access() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        // 先预检：已授权就直接返回，避免重复弹窗
+        if mac_has_screen_capture_access() {
+            return true;
+        }
+        // 请求权限——会弹出系统授权对话框
+        unsafe { CGRequestScreenCaptureAccess() != 0 }
     }
     #[cfg(not(target_os = "macos"))]
     {

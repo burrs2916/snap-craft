@@ -136,19 +136,39 @@ export const CaptureOverlay = () => {
       onDoubleClick={MODE === 'region' ? finish : undefined}
     >
       {MODE === 'region' && sel && sel.w > 0 && sel.h > 0 && (
-        <div
-          style={{
-            position: 'fixed',
-            left: sel.x,
-            top: sel.y,
-            width: sel.w,
-            height: sel.h,
-            border: '2px solid #ff3b30',
-            boxShadow: '0 0 0 9999px rgba(0,0,0,0.4)',
-            pointerEvents: 'none',
-            borderRadius: 2,
-          }}
-        />
+        <>
+          <div
+            style={{
+              position: 'fixed',
+              left: sel.x,
+              top: sel.y,
+              width: sel.w,
+              height: sel.h,
+              border: '2px solid #ff3b30',
+              boxShadow: '0 0 0 9999px rgba(0,0,0,0.4)',
+              pointerEvents: 'none',
+              borderRadius: 2,
+            }}
+          />
+          <div
+            style={{
+              position: 'fixed',
+              left: sel.x,
+              top: Math.max(sel.y - 28, 4),
+              background: 'rgba(0,0,0,0.75)',
+              color: '#fff',
+              padding: '2px 8px',
+              borderRadius: 4,
+              fontSize: 12,
+              fontFamily: 'monospace',
+              pointerEvents: 'none',
+              whiteSpace: 'nowrap',
+              transform: sel.y < 28 ? 'translateY(100%)' : 'none',
+            }}
+          >
+            {Math.round(sel.w)} × {Math.round(sel.h)}
+          </div>
+        </>
       )}
 
       {!started && MODE === 'region' && (

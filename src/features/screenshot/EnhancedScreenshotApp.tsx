@@ -173,7 +173,7 @@ export const EnhancedScreenshotApp = () => {
   const flash = useCallback((msg: string, type: 'success' | 'error' = 'success') => {
     setToast(msg);
     setToastType(type);
-    window.setTimeout(() => setToast(null), 1800);
+    window.setTimeout(() => setToast(null), type === 'error' ? 5000 : 1800);
   }, []);
 
   // ===== 启动加载历史记录 =====
@@ -232,6 +232,13 @@ export const EnhancedScreenshotApp = () => {
       });
       clearAnnotations();
       setCurrentView('edit');
+      // 截图后自动复制到剪贴板——用户截图最常见的目的就是粘贴
+      try {
+        await invoke('copy_to_clipboard', { image_data: dataUrl });
+        flash('已复制到剪贴板', 'success');
+      } catch {
+        /* 自动复制失败不阻断使用，用户可手动复制 */
+      }
     },
     [setCurrentScreenshot, clearAnnotations]
   );
@@ -253,24 +260,38 @@ export const EnhancedScreenshotApp = () => {
       .catch(() => setDisplays([]));
   }, [platform]);
 
-  // ===== macOS 屏幕录制权限：启动预检 + 从系统设置返回后自动复检 =====
+  // ===== macOS 屏幕录制权限：启动预检 → 自动请求弹窗 → fallback 手动引导 =====
   useEffect(() => {
     if (platform !== 'macos') return;
     const check = async () => {
       try {
         const ok = await invoke<boolean>('check_screen_capture_access');
-        setPermissionNeeded(!ok);
+        if (ok) {
+          setPermissionNeeded(false);
+          return;
+        }
+        // 没权限：先尝试调用 request 触发系统授权弹窗（比让用户手动去设置更可靠）
+        if (!isDev) {
+          const granted = await invoke<boolean>('request_screen_capture_access');
+          if (granted) {
+            setPermissionNeeded(false);
+            return;
+          }
+        }
+        // request 失败或 dev 模式：显示手动引导页
+        setPermissionNeeded(true);
       } catch {
-        /* 检测失败不阻断使用 */
+        setPermissionNeeded(true);
       }
     };
     check();
+    // 从系统设置返回后重新检测
     const onFocus = () => check();
     window.addEventListener('focus', onFocus);
     return () => window.removeEventListener('focus', onFocus);
-  }, [platform]);
+  }, [platform, isDev]);
 
-  // 一键打开「系统设置 → 屏幕录制」，用户开启后返回即可
+  // 一键打开「系统设置 → 屏幕录制」，用户开启后返回时自动重新检测
   const openScreenRecordingSettings = useCallback(() => {
     invoke('open_screen_recording_settings').catch(() => {});
   }, []);
@@ -429,6 +450,9 @@ export const EnhancedScreenshotApp = () => {
         win.setFocus();
         setBusy(false);
       }),
+      listen('shortcut-register-failed', (e) => {
+        flash(String(e.payload), 'error');
+      }),
     ];
     return () => {
       un.forEach((p) => p.then((fn) => fn()));
@@ -526,6 +550,29 @@ export const EnhancedScreenshotApp = () => {
     setCurrentView('edit');
   };
 
+  // ===== 编辑视图：⌘/Ctrl+S 保存、⌘/Ctrl+C 复制 =====
+  useEffect(() => {
+    if (currentView !== 'edit') return;
+    const onKey = (e: KeyboardEvent) => {
+      const tag = (document.activeElement?.tagName || '').toUpperCase();
+      if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+      if ((e.metaKey || e.ctrlKey) && (e.key === 's' || e.key === 'S')) {
+        e.preventDefault();
+        handleSave();
+      }
+      if ((e.metaKey || e.ctrlKey) && (e.key === 'c' || e.key === 'C')) {
+        // 只在没有选中文本时拦截，避免影响正常文本复制
+        const sel = window.getSelection();
+        if (!sel || sel.toString().length === 0) {
+          e.preventDefault();
+          handleCopy();
+        }
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [currentView, current, annotations]);
+
   // ===== 编辑视图 =====
   if (currentView === 'edit' && current) {
     return (
@@ -552,10 +599,10 @@ export const EnhancedScreenshotApp = () => {
             <button className="theme-toggle" title={`主题：${themeLabel}`} onClick={cycleTheme}>
               {themeIcon}
             </button>
-            <button className="toolbar-btn" onClick={handleCopy}>
+            <button className="toolbar-btn" onClick={handleCopy} title={`${modLabel}+C 复制`}>
               📋 复制
             </button>
-            <button className="toolbar-btn save-btn" onClick={handleSave}>
+            <button className="toolbar-btn save-btn" onClick={handleSave} title={`${modLabel}+S 保存`}>
               💾 保存
             </button>
           </div>

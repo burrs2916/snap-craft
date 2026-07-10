@@ -168,8 +168,10 @@ jobs:
             First launch may be blocked by Gatekeeper (ad-hoc signed):
             right-click -> **Open**, or run once:
             `sudo xattr -dr com.apple.quarantine /Applications/SnapCraft.app`
-            On first screenshot, grant **Screen Recording** in
-            System Settings > Privacy & Security.
+            On first screenshot, SnapCraft will automatically request **Screen
+            Recording** permission via a system dialog. Simply click "Allow".
+            If the dialog doesn't appear, go to System Settings > Privacy &
+            Security > Screen Recording and enable SnapCraft manually.
 
             ### Windows
             Download `SnapCraft_*.msi` and double-click to install. Unsigned build,

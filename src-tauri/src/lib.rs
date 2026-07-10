@@ -45,20 +45,30 @@ pub fn run() {
         )
         .setup(|app| {
             // 注册全局快捷键：macOS 用 ⌘，Windows/Linux 用 Ctrl
+            let mut failed: Vec<String> = Vec::new();
             for modifiers in [Modifiers::SUPER, Modifiers::CONTROL] {
                 let shift = modifiers | Modifiers::SHIFT;
-                let _ = app
-                    .global_shortcut()
-                    .register(Shortcut::new(Some(shift), Code::KeyS));
-                let _ = app
-                    .global_shortcut()
-                    .register(Shortcut::new(Some(shift), Code::Digit1));
-                let _ = app
-                    .global_shortcut()
-                    .register(Shortcut::new(Some(shift), Code::Digit2));
-                let _ = app
-                    .global_shortcut()
-                    .register(Shortcut::new(Some(shift), Code::Digit3));
+                let keys = [
+                    (Code::KeyS, "⌘/Ctrl+Shift+S"),
+                    (Code::Digit1, "⌘/Ctrl+Shift+1"),
+                    (Code::Digit2, "⌘/Ctrl+Shift+2"),
+                    (Code::Digit3, "⌘/Ctrl+Shift+3"),
+                ];
+                for (code, label) in keys {
+                    let ok = app
+                        .global_shortcut()
+                        .register(Shortcut::new(Some(shift), code));
+                    if !ok {
+                        failed.push(label.to_string());
+                    }
+                }
+            }
+            if !failed.is_empty() {
+                let msg = format!(
+                    "以下快捷键注册失败，可能被其他应用占用：{}",
+                    failed.join("、")
+                );
+                let _ = app.emit("shortcut-register-failed", msg);
             }
             Ok(())
         })
@@ -75,6 +85,7 @@ pub fn run() {
             commands::history::clear_history,
             get_platform,
             commands::capture::check_screen_capture_access,
+            commands::capture::request_screen_capture_access,
             commands::capture::open_screen_recording_settings,
         ])
         .run(tauri::generate_context!())

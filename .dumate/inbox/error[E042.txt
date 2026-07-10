@@ -1,0 +1,90 @@
+error[E0425]: cannot find function `capture_xcap_screen` in this scope
+  --> src\commands\capture.rs:99:9
+   |
+99 |         capture_xcap_screen()
+   |         ^^^^^^^^^^^^^^^^^^^ not found in this scope
+   |
+help: consider importing this function
+   |
+ 1 + use crate::commands::capture::xcap_capture::capture_xcap_screen;
+   |
+
+error[E0425]: cannot find function `capture_xcap_region` in this scope
+   --> src\commands\capture.rs:128:9
+    |
+128 |         capture_xcap_region(rect)
+    |         ^^^^^^^^^^^^^^^^^^^ not found in this scope
+    |
+help: consider importing this function
+    |
+  1 + use crate::commands::capture::xcap_capture::capture_xcap_region;
+    |
+
+error[E0425]: cannot find function `capture_xcap_window` in this scope
+   --> src\commands\capture.rs:145:9
+    |
+145 |         capture_xcap_window()
+    |         ^^^^^^^^^^^^^^^^^^^ not found in this scope
+    |
+help: consider importing this function
+    |
+  1 + use crate::commands::capture::xcap_capture::capture_xcap_window;
+    |
+
+error[E0425]: cannot find type `Image` in crate `xcap::image`
+   --> src\commands\capture.rs:155:44
+    |
+155 |     fn save_and_encode(image: xcap::image::Image) -> Result<String, String> {
+    |                                            ^^^^^ not found in `xcap::image`
+
+warning: unused import: `std::process::Command`
+ --> src\commands\edit.rs:2:5
+  |
+2 | use std::process::Command;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+error[E0308]: mismatched types
+  --> src\commands\edit.rs:63:24
+   |
+63 |                 bytes: rgba,
+   |                        ^^^^ expected `Cow<'_, [u8]>`, found `Vec<u8>`
+   |
+   = note: expected enum `Cow<'_, [u8]>`
+            found struct `Vec<u8>`
+help: call `Into::into` on this expression to convert `Vec<u8>` into `Cow<'_, [u8]>`
+   |
+63 |                 bytes: rgba.into(),
+   |                            +++++++
+
+error[E0308]: arguments to this method are incorrect
+   --> src\commands\capture.rs:176:14
+    |
+176 |             .capture_region(rect.x, rect.y, rect.width, rect.height)
+    |              ^^^^^^^^^^^^^^ ------  ------ expected `u32`, found `i32`
+    |                             |
+    |                             expected `u32`, found `i32`
+    |
+note: method defined here
+   --> C:\Users\runneradmin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\xcap-0.9.6\src\monitor.rs:95:12
+    |
+ 95 |     pub fn capture_region(&self, x: u32, y: u32, width: u32, height: u32) -> XCapResult<RgbaImage> {
+    |            ^^^^^^^^^^^^^^
+help: you can convert an `i32` to a `u32` and panic if the converted value doesn't fit
+    |
+176 |             .capture_region(rect.x.try_into().unwrap(), rect.y, rect.width, rect.height)
+    |                                   ++++++++++++++++++++
+help: you can convert an `i32` to a `u32` and panic if the converted value doesn't fit
+    |
+176 |             .capture_region(rect.x, rect.y.try_into().unwrap(), rect.width, rect.height)
+    |                                           ++++++++++++++++++++
+
+Some errors have detailed explanations: E0308, E0425.
+For more information about an error, try `rustc --explain E0308`.
+warning: `snap-craft` (lib) generated 1 warning
+error: could not compile `snap-craft` (lib) due to 6 previous errors; 1 warning emitted
+failed to build app: failed to build app
+       Error failed to build app: failed to build app
+ ELIFECYCLE  Command failed with exit code 1.
+Error: Command "pnpm ["tauri","build","--target","x86_64-pc-windows-msvc"]" failed with exit code 1

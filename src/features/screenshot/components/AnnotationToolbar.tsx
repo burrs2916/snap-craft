@@ -1,13 +1,13 @@
 import { useScreenshotStore } from '../store/screenshotStore';
 
 const TOOLS = [
-  { id: 'select', icon: '↖️', name: '选择' },
-  { id: 'arrow', icon: '➡️', name: '箭头' },
-  { id: 'line', icon: '📏', name: '直线' },
-  { id: 'rectangle', icon: '⬜', name: '矩形' },
-  { id: 'circle', icon: '⭕', name: '圆形' },
-  { id: 'text', icon: '📝', name: '文字' },
-  { id: 'freehand', icon: '✏️', name: '自由绘制' },
+  { id: 'select', icon: '↖️', name: '选择 (1)' },
+  { id: 'arrow', icon: '➡️', name: '箭头 (2)' },
+  { id: 'line', icon: '📏', name: '直线 (3)' },
+  { id: 'rectangle', icon: '⬜', name: '矩形 (4)' },
+  { id: 'circle', icon: '⭕', name: '圆形 (5)' },
+  { id: 'text', icon: '📝', name: '文字 (6)' },
+  { id: 'freehand', icon: '✏️', name: '自由绘制 (7)' },
 ];
 
 // 主题感知的标注调色板
@@ -72,7 +72,7 @@ export const AnnotationToolbar = () => {
 
       <div className="tool-divider" />
 
-      {/* 线宽选择 */}
+      {/* 线宽选择 ([ / ] 调节) */}
       <div className="width-group" role="group" aria-label="线宽">
         {WIDTHS.map((w) => (
           <button
