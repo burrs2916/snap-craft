@@ -11,7 +11,8 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "app": "bash start.sh app",
-    "app:reset": "bash start.sh reset"
+    "app:reset": "bash start.sh reset",
+    "build:local": "bash scripts/build-local.sh"
   },
   "dependencies": {
     "@base-ui/react": "^1.4.1",
