@@ -55,10 +55,10 @@ pub fn run() {
                     (Code::Digit3, "⌘/Ctrl+Shift+3"),
                 ];
                 for (code, label) in keys {
-                    let ok = app
-                        .global_shortcut()
-                        .register(Shortcut::new(Some(shift), code));
-                    if !ok {
+                    if app.global_shortcut()
+                        .register(Shortcut::new(Some(shift), code))
+                        .is_err()
+                    {
                         failed.push(label.to_string());
                     }
                 }
