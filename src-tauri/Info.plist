@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>NSScreenCaptureUsageDescription</key>
+	<string>SnapCraft 需要屏幕录制权限来截取屏幕画面。</string>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>SnapCraft 需要发送 AppleScript 指令以将截图复制到剪贴板。</string>
+</dict>
+</plist>
