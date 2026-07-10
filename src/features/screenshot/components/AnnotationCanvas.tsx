@@ -368,10 +368,12 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, AnnotationCanvasProp
 
   const PAD = 16;
   const measured = box.w > 0 && box.h > 0;
-  const scale =
+  const rawScale =
     image && measured
       ? Math.min((box.w - PAD) / image.width, (box.h - PAD) / image.height, 1)
       : 1;
+  // 防御：scale 必须为正数，容器尺寸异常时退回 1
+  const scale = rawScale > 0 ? rawScale : 1;
 
   // 暴露合并导出能力：原图 + 标注 → PNG（自然分辨率，自动剔除选中高亮框）
   useImperativeHandle(

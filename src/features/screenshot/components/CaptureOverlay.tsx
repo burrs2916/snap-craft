@@ -10,8 +10,12 @@ interface Rect {
   h: number;
 }
 
-// 从 URL 读取覆盖层模式与坐标参数（主窗口通过 query 传入，因覆盖层是独立 JS 上下文）
-const params = new URLSearchParams(window.location.search);
+// 从 URL 读取覆盖层模式与坐标参数（主窗口通过 hash query 传入，因覆盖层是独立 JS 上下文）
+// URL 格式: /#capture-overlay?mode=region&platform=macos&ox=0&oy=0
+// window.location.search 对 hash 路由为空，需从 hash 中提取 query
+const hash = window.location.hash; // "#capture-overlay?mode=region&..."
+const queryStr = hash.includes('?') ? hash.slice(hash.indexOf('?') + 1) : '';
+const params = new URLSearchParams(queryStr);
 const MODE: 'region' | 'window' = params.get('mode') === 'window' ? 'window' : 'region';
 const PLATFORM = params.get('platform') || 'other';
 const ORIGIN_X = Number(params.get('ox') || 0);
@@ -28,12 +32,28 @@ export const CaptureOverlay = () => {
   const start = useRef<{ x: number; y: number } | null>(null);
   // 已提交的选区：mouseup 时定型，避免确认按钮/双击的 mousedown 把 sel 重置成零尺寸导致 finish 提前返回
   const committedRef = useRef<Rect | null>(null);
+  // sel 的 ref 镜像：finish/cancel 用 ref 读取最新 sel，不作为 useCallback 依赖，
+  // 避免拖拽过程中 sel 变化导致键盘监听器频繁注销/重注册（会产生 Enter/Esc 事件丢失竞态窗口）
+  const selRef = useRef<Rect | null>(null);
   // resize 手柄拖拽状态
   const [resizing, setResizing] = useState<string | null>(null);
+  // 防止 finish/cancel 重复执行（双击 Enter 或快速连按 Esc）
+  const doneRef = useRef(false);
+
+  // selRef 与 sel state 同步
+  useEffect(() => { selRef.current = sel; }, [sel]);
 
   const closeSelf = useCallback(async () => {
-    const w = getCurrentWindow();
-    await w.close();
+    try {
+      const w = getCurrentWindow();
+      await w.close();
+    } catch {
+      // close 失败时尝试 destroy 作为兜底
+      try {
+        const w = getCurrentWindow();
+        await w.destroy();
+      } catch { /* 忽略：窗口可能已关闭 */ }
+    }
   }, []);
 
   // 把本地 CSS 坐标换算成后端需要的矩形
@@ -58,9 +78,11 @@ export const CaptureOverlay = () => {
   };
 
   const finish = useCallback(async () => {
-    // 优先用当前 sel；若被确认按钮/双击的 mousedown 冲掉，则回退到已提交的选区
-    const s = sel && sel.w >= 5 && sel.h >= 5 ? sel : committedRef.current;
+    if (doneRef.current) return;
+    // 优先用当前 sel（从 ref 读取，不依赖 state）；若被确认按钮/双击的 mousedown 冲掉，则回退到已提交的选区
+    const s = selRef.current && selRef.current.w >= 5 && selRef.current.h >= 5 ? selRef.current : committedRef.current;
     if (!s || s.w < 5 || s.h < 5) return;
+    doneRef.current = true;
     try {
       const dataUrl = await invoke<string>('capture_region', { rect: toBackendRect(s) });
       await emit('region-captured', dataUrl);
@@ -69,15 +91,21 @@ export const CaptureOverlay = () => {
     } finally {
       await closeSelf();
     }
-  }, [sel, closeSelf]);
+  }, [closeSelf]);
 
   const cancel = useCallback(async () => {
-    await emit('region-cancelled', 'cancelled');
+    if (doneRef.current) return;
+    doneRef.current = true;
+    try {
+      await emit('region-cancelled', 'cancelled');
+    } catch { /* 忽略：事件发送失败不应阻塞关闭 */ }
     await closeSelf();
   }, [closeSelf]);
 
   // ===== 窗口模式：点击任意位置即隐藏覆盖层并取窗 =====
   const captureWindow = useCallback(async () => {
+    if (doneRef.current) return;
+    doneRef.current = true;
     const w = getCurrentWindow();
     await w.hide(); // 先隐藏，使后续点击落到目标窗口而非覆盖层
     try {
@@ -107,6 +135,8 @@ export const CaptureOverlay = () => {
     e.preventDefault();
     e.stopPropagation();
     if (!sel) return;
+    // 立即清空 start.current，防止 onMove 在 setResizing 异步生效前走入选区拖拽分支
+    start.current = null;
     setResizing(handle);
   };
 

@@ -130,7 +130,14 @@ export const useScreenshotStore = create<ScreenshotState>((set, get) => ({
   setCurrentColor: (c) => set({ currentColor: c }),
   setCurrentStrokeWidth: (w) => set({ currentStrokeWidth: w }),
 
-  clearAnnotations: () => set({ annotations: [], selectedAnnotationIds: [], selectedId: null, past: [], future: [] }),
+  clearAnnotations: () => set((s) => ({
+    annotations: [],
+    selectedAnnotationIds: [],
+    selectedId: null,
+    // 保留撤销能力：把当前 annotations 压入 past，清空 future
+    past: s.annotations.length > 0 ? [...s.past, s.annotations].slice(-HISTORY_LIMIT) : s.past,
+    future: [],
+  })),
 
   undo: () => set((s) => {
     if (s.past.length === 0) return s;

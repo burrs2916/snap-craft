@@ -135,6 +135,8 @@ export const EnhancedScreenshotApp = () => {
   const [displays, setDisplays] = useState<DisplayInfo[]>([]);
   const [showDisplayPicker, setShowDisplayPicker] = useState(false);
   const [permissionNeeded, setPermissionNeeded] = useState(false);
+  // 权限检查中：platform 未确定或正在 check/request 期间，避免 UI 闪烁
+  const [permissionChecking, setPermissionChecking] = useState(true);
   // 开发模式（tauri dev）跑的是裸二进制，macOS 不会把它列入 TCC「屏幕录制」列表，
   // 因此无法在系统设置里出现/授权；只有 build 出的 .app 才会被系统登记到权限列表。
   const isDev = (import.meta as any).env?.DEV === true;
@@ -149,6 +151,11 @@ export const EnhancedScreenshotApp = () => {
   } = useScreenshotStore();
 
   const canvasRef = useRef<AnnotationCanvasHandle>(null);
+  // busy 的 ref 镜像：供 doCapture 防重入检查，避免 busy 作为 useCallback 依赖
+  // 导致事件监听器在截图过程中频繁注销/重注册（会产生事件丢失竞态窗口）
+  const busyRef = useRef(false);
+  // 超时定时器 ref：正常完成截图后清理，避免堆积
+  const overlayTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // ===== 主题：light / dark / system =====
   useEffect(() => {
@@ -201,9 +208,10 @@ export const EnhancedScreenshotApp = () => {
   const onCaptured = useCallback(
     async (dataUrl: string) => {
       const { width, height } = await new Promise<{ width: number; height: number }>(
-        (res) => {
+        (res, rej) => {
           const img = new Image();
           img.onload = () => res({ width: img.width, height: img.height });
+          img.onerror = () => rej(new Error('截图数据解码失败'));
           img.src = dataUrl;
         }
       );
@@ -260,41 +268,83 @@ export const EnhancedScreenshotApp = () => {
       .catch(() => setDisplays([]));
   }, [platform]);
 
-  // ===== macOS 屏幕录制权限：启动预检 → 自动请求弹窗 → fallback 手动引导 =====
+  // ===== macOS 屏幕录制权限：启动预检 → 自动请求弹窗 → 延迟复检 → fallback 手动引导 =====
+  // 设计原则：用户只需点一次"允许"，系统弹窗后自动检测授权结果，形成闭环
   useEffect(() => {
-    if (platform !== 'macos') return;
-    const check = async () => {
+    if (platform !== 'macos') {
+      setPermissionChecking(false);
+      return;
+    }
+    let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const check = async (isFromFocus = false) => {
+      if (isFromFocus) {
+        // focus 防抖：快速切换窗口时不连续触发
+        if (debounceTimer) clearTimeout(debounceTimer);
+        debounceTimer = setTimeout(() => check(false), 300);
+        return;
+      }
       try {
         const ok = await invoke<boolean>('check_screen_capture_access');
         if (ok) {
           setPermissionNeeded(false);
+          setPermissionChecking(false);
           return;
         }
-        // 没权限：先尝试调用 request 触发系统授权弹窗（比让用户手动去设置更可靠）
+        // 没权限：非 dev 模式先尝试 request 弹窗（首次会弹系统对话框）
         if (!isDev) {
           const granted = await invoke<boolean>('request_screen_capture_access');
           if (granted) {
-            setPermissionNeeded(false);
+            // CGRequestScreenCaptureAccess 返回 true 不代表用户已经点了"允许"，
+            // 可能是系统弹窗刚出现。延迟 1.5s 后重新检查（用户可能已操作完）
+            setTimeout(() => check(false), 1500);
             return;
           }
+          // 返回 false：用户拒绝或弹窗未出现。延迟再查一次（系统弹窗有时延迟返回）
+          setTimeout(() => check(false), 1000);
+          return;
         }
-        // request 失败或 dev 模式：显示手动引导页
+        // dev 模式：显示引导页（dev 不会出现在系统设置列表中）
+        setPermissionChecking(false);
         setPermissionNeeded(true);
       } catch {
+        setPermissionChecking(false);
         setPermissionNeeded(true);
       }
     };
+
     check();
-    // 从系统设置返回后重新检测
-    const onFocus = () => check();
+    // 从系统设置返回后重新检测（防抖）
+    const onFocus = () => check(true);
     window.addEventListener('focus', onFocus);
-    return () => window.removeEventListener('focus', onFocus);
+    return () => {
+      window.removeEventListener('focus', onFocus);
+      if (debounceTimer) clearTimeout(debounceTimer);
+    };
   }, [platform, isDev]);
 
-  // 一键打开「系统设置 → 屏幕录制」，用户开启后返回时自动重新检测
+  // 一键打开「系统设置 → 屏幕录制」
   const openScreenRecordingSettings = useCallback(() => {
     invoke('open_screen_recording_settings').catch(() => {});
   }, []);
+
+  // 手动重新检查权限（用户在系统设置中授权后点"已授权？刷新"触发）
+  const recheckPermission = useCallback(async () => {
+    setPermissionChecking(true);
+    try {
+      const ok = await invoke<boolean>('check_screen_capture_access');
+      setPermissionNeeded(!ok);
+      if (ok) {
+        flash('权限已授予，可以开始截图了', 'success');
+      } else {
+        flash('仍未检测到权限，请确认已在系统设置中开启', 'error');
+      }
+    } catch {
+      setPermissionNeeded(true);
+    } finally {
+      setPermissionChecking(false);
+    }
+  }, [flash]);
 
   // 打开透明覆盖层：region（拖选）/ window（点击取窗）。
   // macOS 多屏：覆盖层铺满所有显示器并集，并把全局原点 (ox,oy) 传给覆盖层，
@@ -345,16 +395,31 @@ export const EnhancedScreenshotApp = () => {
           /* ignore */
         }
       }
-      new WebviewWindow('capture-overlay', opts as any);
+      try {
+        new WebviewWindow('capture-overlay', opts as any);
+      } catch (e) {
+        // 覆盖层创建失败：恢复主窗口并报错，避免窗口永久隐藏
+        const win = getCurrentWindow();
+        await win.show();
+        await win.setFocus();
+        setBusy(false);
+        flash('截图覆盖层启动失败：' + String(e), 'error');
+      }
     },
-    [platform, displays]
+    [platform, displays, flash]
   );
 
   // 多屏选择器：点选具体显示器后执行全屏截取该屏
   const pickDisplay = useCallback(
     async (displayId: number | null) => {
       setShowDisplayPicker(false);
-      if (busy) return;
+      // displayId === null 表示用户点了「取消」
+      if (displayId === null) {
+        flash('已取消截图', 'success');
+        return;
+      }
+      if (busyRef.current) return;
+      busyRef.current = true;
       setBusy(true);
       const win = getCurrentWindow();
       await win.hide();
@@ -363,25 +428,32 @@ export const EnhancedScreenshotApp = () => {
         await onCaptured(dataUrl);
       } catch (e) {
         const msg = String(e);
-        if (msg.includes('屏幕录制')) {
-          setPermissionNeeded(true);
+        if (msg.includes('屏幕录制') || msg.includes('permission') || msg.includes('denied') || msg.includes('not authorized')) {
+          if (platform === 'macos') {
+            invoke<boolean>('check_screen_capture_access').then((ok) => {
+              if (!ok) setPermissionNeeded(true);
+            });
+          }
           return;
         }
-        if (!msg.includes('截图已取消') && !msg.toLowerCase().includes('cancelled')) {
+        if (msg.includes('截图已取消') || msg.toLowerCase().includes('cancelled')) {
+          flash('已取消截图', 'success');
+        } else {
           flash('截图失败：' + msg, 'error');
         }
       } finally {
         await win.show();
         await win.setFocus();
+        busyRef.current = false;
         setBusy(false);
       }
     },
-    [onCaptured, flash, busy, setPermissionNeeded]
+    [onCaptured, flash, platform, setPermissionNeeded]
   );
 
   const doCapture = useCallback(
     async (kind: 'screen' | 'region' | 'window') => {
-      if (busy) return; // 防止 busy 期间（窗口隐藏前）重复点击 / 快捷键再次触发
+      if (busyRef.current) return; // 防重入：用 ref 而非 state，避免作为 useCallback 依赖
       // macOS 多显示器：全屏截图先让用户选具体显示器
       if (kind === 'screen' && platform === 'macos' && displays.length > 1) {
         const win = getCurrentWindow();
@@ -390,6 +462,7 @@ export const EnhancedScreenshotApp = () => {
         setShowDisplayPicker(true);
         return;
       }
+      busyRef.current = true;
       setBusy(true);
       const win = getCurrentWindow();
       // 隐藏自身窗口，避免截到工具界面
@@ -400,6 +473,19 @@ export const EnhancedScreenshotApp = () => {
         if (kind === 'region' || (kind === 'window' && platform === 'macos')) {
           await openRegionOverlay(kind);
           overlayOpened = true;
+          // 超时保护：覆盖层 60 秒未返回结果则自动恢复主窗口，避免永久卡死
+          overlayTimeoutRef.current = setTimeout(async () => {
+            const overlay = await WebviewWindow.getByLabel('capture-overlay').catch(() => null);
+            if (overlay) {
+              try { await overlay.close(); } catch { /* ignore */ }
+              const win = getCurrentWindow();
+              await win.show();
+              await win.setFocus();
+              busyRef.current = false;
+              setBusy(false);
+              flash('截图超时已自动取消', 'error');
+            }
+          }, 60_000);
           return; // 结果由 region-captured / region-cancelled 事件收尾
         }
         // Windows / Linux 窗口截图 / 全屏（单屏或主屏）
@@ -410,9 +496,14 @@ export const EnhancedScreenshotApp = () => {
         await onCaptured(dataUrl);
       } catch (e) {
         const msg = String(e);
-        // 权限被拒：弹出引导页，不再用吓人的技术报错
-        if (msg.includes('屏幕录制')) {
-          setPermissionNeeded(true);
+        // 权限被拒：自动重检权限状态，弹出引导页
+        if (msg.includes('屏幕录制') || msg.includes('permission') || msg.includes('denied') || msg.includes('not authorized')) {
+          if (platform === 'macos') {
+            // 后台重检权限，若确实没权限则弹出引导页
+            invoke<boolean>('check_screen_capture_access').then((ok) => {
+              if (!ok) setPermissionNeeded(true);
+            });
+          }
           return;
         }
         if (msg.includes('截图已取消') || msg.toLowerCase().includes('cancelled')) {
@@ -424,33 +515,54 @@ export const EnhancedScreenshotApp = () => {
         if (!overlayOpened) {
           await win.show();
           await win.setFocus();
+          busyRef.current = false;
           setBusy(false);
         }
       }
     },
-    [onCaptured, flash, platform, openRegionOverlay, busy, setPermissionNeeded, displays]
+    [onCaptured, flash, platform, openRegionOverlay, setPermissionNeeded, displays]
   );
 
   // ===== 全局快捷键监听 =====
+  // 依赖数组不含 doCapture（doCapture 用 busyRef 防重入，不再依赖 busy state），
+  // 避免截图过程中 busy 变化导致监听器注销/重注册产生事件丢失竞态
   useEffect(() => {
+    const cleanupOverlayTimeout = () => {
+      if (overlayTimeoutRef.current) {
+        clearTimeout(overlayTimeoutRef.current);
+        overlayTimeoutRef.current = null;
+      }
+    };
+    const restoreWindow = async () => {
+      cleanupOverlayTimeout();
+      const win = getCurrentWindow();
+      await win.show();
+      await win.setFocus();
+      busyRef.current = false;
+      setBusy(false);
+    };
     const un: Promise<UnlistenFn>[] = [
       listen('capture-screen', () => doCapture('screen')),
       listen('capture-region', () => doCapture('region')),
       listen('capture-window', () => doCapture('window')),
-      // Windows / Linux 区域截图由覆盖层回传结果
+      // 覆盖层回传截图结果
       listen('region-captured', (e) => {
-        const win = getCurrentWindow();
-        onCaptured(e.payload as string).then(() => {
-          win.show();
-          win.setFocus();
-          setBusy(false);
-        });
+        const payload = e.payload as string;
+        // 校验 payload 有效性：必须是 data URL 字符串
+        if (!payload || typeof payload !== 'string' || payload.length < 100) {
+          restoreWindow();
+          flash('截图数据异常，请重试', 'error');
+          return;
+        }
+        onCaptured(payload)
+          .then(() => restoreWindow())
+          .catch(async (err) => {
+            await restoreWindow();
+            flash('截图处理失败：' + String(err), 'error');
+          });
       }),
       listen('region-cancelled', () => {
-        const win = getCurrentWindow();
-        win.show();
-        win.setFocus();
-        setBusy(false);
+        restoreWindow();
         flash('已取消截图', 'success');
       }),
       listen('shortcut-register-failed', (e) => {
@@ -459,8 +571,13 @@ export const EnhancedScreenshotApp = () => {
     ];
     return () => {
       un.forEach((p) => p.then((fn) => fn()));
+      // 组件卸载时清理超时定时器，避免内存泄漏
+      if (overlayTimeoutRef.current) {
+        clearTimeout(overlayTimeoutRef.current);
+        overlayTimeoutRef.current = null;
+      }
     };
-  }, [doCapture, onCaptured]);
+  }, [doCapture, onCaptured, flash]);
 
   // 保存 / 复制时若已标注，合并标注后导出（否则用原始截图）
   const getExportDataUrl = (): string => {
@@ -811,25 +928,28 @@ export const EnhancedScreenshotApp = () => {
           <div className="permission-card">
             <div className="permission-icon">📸</div>
             <div className="permission-title">需要屏幕录制权限</div>
-            {isDev ? (
-              <div className="permission-text">
-                当前以 <b>开发模式</b>（<code className="kbd">tauri dev</code>）运行，macOS 不会把
-                SnapCraft 列入「屏幕录制」权限列表，所以这里无法直接授权。请执行{' '}
-                <code className="kbd">pnpm tauri build</code> 并运行打包好的{' '}
-                <b>SnapCraft.app</b>，系统才会登记本应用，届时按提示一键授权即可。
-              </div>
-            ) : (
-              <div className="permission-text">
-                SnapCraft 需要「屏幕录制」权限才能为你截图。点击下方按钮打开系统设置，
-                在列表中找到 <b>SnapCraft</b> 并打开开关即可，无需其他操作。
-              </div>
-            )}
-            <div className="permission-actions">
-              {!isDev && (
-                <button className="permission-btn" onClick={openScreenRecordingSettings}>
-                  打开系统设置
-                </button>
+            <div className="permission-text">
+              {isDev ? (
+                <>
+                  当前以 <b>开发模式</b> 运行，macOS 可能尚未将 SnapCraft 登记到权限列表。
+                  请先尝试打开系统设置查看；若列表中没有 SnapCraft，请执行{' '}
+                  <code className="kbd">pnpm tauri build</code> 后运行打包好的{' '}
+                  <b>SnapCraft.app</b>。
+                </>
+              ) : (
+                <>
+                  SnapCraft 需要「屏幕录制」权限才能截取屏幕。点击下方按钮打开系统设置，
+                  在列表中找到 <b>SnapCraft</b> 并打开开关，然后返回点「已授权？刷新」即可。
+                </>
               )}
+            </div>
+            <div className="permission-actions">
+              <button className="permission-btn" onClick={openScreenRecordingSettings}>
+                打开系统设置
+              </button>
+              <button className="permission-btn" onClick={recheckPermission} disabled={permissionChecking}>
+                {permissionChecking ? '检查中…' : '已授权？刷新'}
+              </button>
               <button
                 className="permission-btn ghost"
                 onClick={() => setPermissionNeeded(false)}

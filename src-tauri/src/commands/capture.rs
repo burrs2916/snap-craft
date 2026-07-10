@@ -45,7 +45,10 @@ fn capture_to_data_url(args: &[&str]) -> Result<String, String> {
 
     // 成功：生成了 PNG 文件
     if path.exists() {
-        return store::file_to_data_url(&path);
+        let result = store::file_to_data_url(&path);
+        // 清理临时文件，避免 /tmp 堆积
+        let _ = std::fs::remove_file(&path);
+        return result;
     }
 
     // 未生成文件：区分「用户取消」「权限被拒」「其他真实错误」
@@ -82,13 +85,17 @@ pub async fn capture_screen(_app: AppHandle, display_id: Option<u32>) -> Result<
     #[cfg(target_os = "macos")]
     {
         // 等待窗口隐藏完成，避免截到自身窗口（macOS 隐藏存在极短过渡）
-        std::thread::sleep(std::time::Duration::from_millis(200));
+        tauri::async_runtime::sleep(std::time::Duration::from_millis(200)).await;
 
         // 如果指定了 display_id，用 -R 全局坐标精确截取该显示器
         // （-D 期望的是 1 基序号但序号与 CGGetActiveDisplayList 顺序不对应，多屏时不可靠）
         if let Some(did) = display_id {
             // 查询该 display 的全局边界
             let bounds = unsafe { CGDisplayBounds(did) };
+            // 校验 bounds 有效性：显示器断开时 CGDisplayBounds 返回全零
+            if bounds.size.width < 1.0 || bounds.size.height < 1.0 {
+                return Err("指定的显示器不可用，可能已断开连接".into());
+            }
             let rarg = format!(
                 "{},{},{},{}",
                 bounds.origin.x as i32,
@@ -144,11 +151,17 @@ pub async fn capture_region(_app: AppHandle, rect: Option<CaptureRect>) -> Resul
 pub async fn capture_window(_app: AppHandle) -> Result<String, String> {
     #[cfg(target_os = "macos")]
     {
-        // 窗口截图是交互式（-w）。覆盖层（我们的窗口）刚被隐藏时 App 可能不再是前台，
+        // 等待覆盖层窗口完全隐藏（与 capture_screen 一致），避免截到正在消失的覆盖层
+        tauri::async_runtime::sleep(std::time::Duration::from_millis(200)).await;
+
+        // 窗口截图是交互式（-w）。覆盖层刚被 hide() 时 App 可能不再是前台，
         // 这里主动把 SnapCraft 提到前台，确保 screencapture 的取窗 UI 能接收点击。
+        // 用 bundle identifier 而非 App 名称，避免不同构建方式下名称不一致的问题
         let _ = Command::new("osascript")
-            .args(["-e", "activate application \"SnapCraft\""])
+            .args(["-e", "tell application id \"com.snap-craft.app\" to activate"])
             .output();
+        // 给 activate 一点时间生效
+        tauri::async_runtime::sleep(std::time::Duration::from_millis(150)).await;
         capture_to_data_url(&["-w"])
     }
     #[cfg(not(target_os = "macos"))]
