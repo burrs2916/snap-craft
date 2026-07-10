@@ -1,4 +1,5 @@
 use crate::store;
+#[cfg(target_os = "macos")]
 use std::process::Command;
 use tauri::AppHandle;
 #[cfg(not(target_os = "macos"))]
@@ -96,7 +97,7 @@ pub async fn capture_screen(_app: AppHandle, display_id: Option<u32>) -> Result<
     #[cfg(not(target_os = "macos"))]
     {
         let _ = display_id;
-        capture_xcap_screen()
+        xcap_capture::capture_xcap_screen()
     }
 }
 
@@ -125,7 +126,7 @@ pub async fn capture_region(_app: AppHandle, rect: Option<CaptureRect>) -> Resul
             let _ = w.hide();
         }
         std::thread::sleep(std::time::Duration::from_millis(200));
-        capture_xcap_region(rect)
+        xcap_capture::capture_xcap_region(rect)
     }
 }
 
@@ -142,7 +143,7 @@ pub async fn capture_window(_app: AppHandle) -> Result<String, String> {
     }
     #[cfg(not(target_os = "macos"))]
     {
-        capture_xcap_window()
+        xcap_capture::capture_xcap_window()
     }
 }
 
@@ -152,7 +153,7 @@ mod xcap_capture {
     use super::*;
     use xcap::{Monitor, Window};
 
-    fn save_and_encode(image: xcap::image::Image) -> Result<String, String> {
+    fn save_and_encode(image: image::RgbaImage) -> Result<String, String> {
         let path = store::temp_png_path();
         let path_str = path.to_str().ok_or("无效的临时路径")?.to_string();
         image
@@ -173,7 +174,7 @@ mod xcap_capture {
         let rect = rect.ok_or("区域截屏需要先选择区域")?;
         let monitor = Monitor::from_point(0, 0).map_err(|e| format!("获取主显示器失败: {}", e))?;
         let image = monitor
-            .capture_region(rect.x, rect.y, rect.width, rect.height)
+            .capture_region(rect.x as u32, rect.y as u32, rect.width, rect.height)
             .map_err(|e| format!("区域截屏失败: {}", e))?;
         save_and_encode(image)
     }
