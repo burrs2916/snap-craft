@@ -69,11 +69,11 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: Cargo check
-        run: cargo check
+        run: cargo check --locked
         working-directory: src-tauri
 
       - name: Cargo clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --locked --all-targets -- -D warnings
         working-directory: src-tauri
 
   # ============================================================

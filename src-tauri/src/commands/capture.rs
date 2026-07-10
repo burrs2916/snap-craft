@@ -85,7 +85,7 @@ pub async fn capture_screen(_app: AppHandle, display_id: Option<u32>) -> Result<
     #[cfg(target_os = "macos")]
     {
         // 等待窗口隐藏完成，避免截到自身窗口（macOS 隐藏存在极短过渡）
-        tauri::async_runtime::sleep(std::time::Duration::from_millis(200)).await;
+        std::thread::sleep(std::time::Duration::from_millis(200));
 
         // 如果指定了 display_id，用 -R 全局坐标精确截取该显示器
         // （-D 期望的是 1 基序号但序号与 CGGetActiveDisplayList 顺序不对应，多屏时不可靠）
@@ -152,7 +152,7 @@ pub async fn capture_window(_app: AppHandle) -> Result<String, String> {
     #[cfg(target_os = "macos")]
     {
         // 等待覆盖层窗口完全隐藏（与 capture_screen 一致），避免截到正在消失的覆盖层
-        tauri::async_runtime::sleep(std::time::Duration::from_millis(200)).await;
+        std::thread::sleep(std::time::Duration::from_millis(200));
 
         // 窗口截图是交互式（-w）。覆盖层刚被 hide() 时 App 可能不再是前台，
         // 这里主动把 SnapCraft 提到前台，确保 screencapture 的取窗 UI 能接收点击。
@@ -161,7 +161,7 @@ pub async fn capture_window(_app: AppHandle) -> Result<String, String> {
             .args(["-e", "tell application id \"com.snap-craft.app\" to activate"])
             .output();
         // 给 activate 一点时间生效
-        tauri::async_runtime::sleep(std::time::Duration::from_millis(150)).await;
+        std::thread::sleep(std::time::Duration::from_millis(150));
         capture_to_data_url(&["-w"])
     }
     #[cfg(not(target_os = "macos"))]
