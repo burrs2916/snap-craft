@@ -415,7 +415,9 @@ export const EnhancedScreenshotApp = () => {
           setPermissionNeeded(true);
           return;
         }
-        if (!msg.includes('截图已取消') && !msg.toLowerCase().includes('cancelled')) {
+        if (msg.includes('截图已取消') || msg.toLowerCase().includes('cancelled')) {
+          flash('已取消截图', 'success');
+        } else {
           flash('截图失败：' + msg, 'error');
         }
       } finally {
@@ -449,6 +451,7 @@ export const EnhancedScreenshotApp = () => {
         win.show();
         win.setFocus();
         setBusy(false);
+        flash('已取消截图', 'success');
       }),
       listen('shortcut-register-failed', (e) => {
         flash(String(e.payload), 'error');

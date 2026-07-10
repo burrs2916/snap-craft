@@ -29,12 +29,30 @@ export const AnnotationToolbar = () => {
     setCurrentColor,
     currentStrokeWidth,
     setCurrentStrokeWidth,
+    annotations,
+    updateAnnotation,
   } = useScreenshotStore();
 
   const handleDelete = () => {
     if (selectedId) {
       deleteAnnotation(selectedId);
       setSelectedId(null);
+    }
+  };
+
+  // 选中标注时改颜色：同步更新选中标注的颜色，而非仅影响新建标注
+  const handleColorChange = (c: string) => {
+    setCurrentColor(c);
+    if (selectedId) {
+      updateAnnotation(selectedId, { color: c });
+    }
+  };
+
+  // 选中标注时改线宽：同步更新选中标注的线宽
+  const handleWidthChange = (w: number) => {
+    setCurrentStrokeWidth(w);
+    if (selectedId) {
+      updateAnnotation(selectedId, { lineWidth: w });
     }
   };
 
@@ -65,7 +83,7 @@ export const AnnotationToolbar = () => {
             title={c}
             aria-label={`颜色 ${c}`}
             aria-pressed={currentColor === c}
-            onClick={() => setCurrentColor(c)}
+            onClick={() => handleColorChange(c)}
           />
         ))}
       </div>
@@ -81,7 +99,7 @@ export const AnnotationToolbar = () => {
             title={`线宽 ${w}px`}
             aria-label={`线宽 ${w} 像素`}
             aria-pressed={currentStrokeWidth === w}
-            onClick={() => setCurrentStrokeWidth(w)}
+            onClick={() => handleWidthChange(w)}
           >
             <span
               style={{

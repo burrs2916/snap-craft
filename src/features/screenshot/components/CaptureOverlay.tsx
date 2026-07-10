@@ -28,6 +28,8 @@ export const CaptureOverlay = () => {
   const start = useRef<{ x: number; y: number } | null>(null);
   // 已提交的选区：mouseup 时定型，避免确认按钮/双击的 mousedown 把 sel 重置成零尺寸导致 finish 提前返回
   const committedRef = useRef<Rect | null>(null);
+  // resize 手柄拖拽状态
+  const [resizing, setResizing] = useState<string | null>(null);
 
   const closeSelf = useCallback(async () => {
     const w = getCurrentWindow();
@@ -97,6 +99,80 @@ export const CaptureOverlay = () => {
     return () => window.removeEventListener('keydown', onKey);
   }, [cancel, finish]);
 
+  // ===== resize 手柄：八方向微调选区 =====
+  // handle 标识：nw(north-west / 左上), n(上), ne(右上), e(右), se(右下), s(下), sw(左下), w(左)
+  const HANDLES = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'] as const;
+
+  const handleResizeStart = (e: React.MouseEvent, handle: string) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!sel) return;
+    setResizing(handle);
+  };
+
+  const handleResizeMove = (e: React.MouseEvent) => {
+    if (!resizing || !sel) return;
+    const { clientX: mx, clientY: my } = e;
+    let { x, y, w, h } = sel;
+    const right = x + w;
+    const bottom = y + h;
+
+    if (resizing.includes('w')) {
+      const nx = Math.min(mx, right - 5);
+      w = right - nx;
+      x = nx;
+    }
+    if (resizing.includes('e')) {
+      w = Math.max(5, mx - x);
+    }
+    if (resizing.includes('n')) {
+      const ny = Math.min(my, bottom - 5);
+      h = bottom - ny;
+      y = ny;
+    }
+    if (resizing.includes('s')) {
+      h = Math.max(5, my - y);
+    }
+    setSel({ x, y, w, h });
+  };
+
+  const handleResizeEnd = () => {
+    if (resizing && sel && sel.w > 0 && sel.h > 0) {
+      committedRef.current = sel;
+    }
+    setResizing(null);
+  };
+
+  // 手柄位置计算
+  const getHandleStyle = (handle: string): React.CSSProperties => {
+    if (!sel) return { display: 'none' };
+    const HS = 12; // 手柄尺寸
+    const half = HS / 2;
+    const base: React.CSSProperties = {
+      position: 'fixed',
+      width: HS,
+      height: HS,
+      background: '#ff3b30',
+      border: '2px solid #fff',
+      borderRadius: 3,
+      pointerEvents: 'auto',
+      cursor: '',
+      zIndex: 10,
+    };
+    const { x, y, w, h } = sel;
+    switch (handle) {
+      case 'nw': return { ...base, left: x - half, top: y - half, cursor: 'nwse-resize' };
+      case 'n':  return { ...base, left: x + w / 2 - half, top: y - half, cursor: 'ns-resize' };
+      case 'ne': return { ...base, left: x + w - half, top: y - half, cursor: 'nesw-resize' };
+      case 'e':  return { ...base, left: x + w - half, top: y + h / 2 - half, cursor: 'ew-resize' };
+      case 'se': return { ...base, left: x + w - half, top: y + h - half, cursor: 'nwse-resize' };
+      case 's':  return { ...base, left: x + w / 2 - half, top: y + h - half, cursor: 'ns-resize' };
+      case 'sw': return { ...base, left: x - half, top: y + h - half, cursor: 'nesw-resize' };
+      case 'w':  return { ...base, left: x - half, top: y + h / 2 - half, cursor: 'ew-resize' };
+      default:   return { display: 'none' };
+    }
+  };
+
   const onDown = (e: React.MouseEvent) => {
     if (MODE === 'window') {
       // 窗口模式：点击即取窗（默认行为已阻止，避免文字选中）
@@ -104,12 +180,19 @@ export const CaptureOverlay = () => {
       captureWindow();
       return;
     }
+    // 拖选新区域：先清除已有选区
     setStarted(true);
     start.current = { x: e.clientX, y: e.clientY };
     setSel({ x: e.clientX, y: e.clientY, w: 0, h: 0 });
+    committedRef.current = null;
   };
   const onMove = (e: React.MouseEvent) => {
-    if (MODE === 'window' || !start.current) return;
+    if (MODE === 'window') return;
+    if (resizing) {
+      handleResizeMove(e);
+      return;
+    }
+    if (!start.current) return;
     const x = Math.min(start.current.x, e.clientX);
     const y = Math.min(start.current.y, e.clientY);
     const w = Math.abs(e.clientX - start.current.x);
@@ -117,8 +200,13 @@ export const CaptureOverlay = () => {
     setSel({ x, y, w, h });
   };
   const onUp = () => {
+    if (resizing) {
+      handleResizeEnd();
+      return;
+    }
     if (sel && sel.w > 0 && sel.h > 0) committedRef.current = sel;
     start.current = null;
+    setStarted(false);
   };
 
   return (
@@ -168,6 +256,14 @@ export const CaptureOverlay = () => {
           >
             {Math.round(sel.w)} × {Math.round(sel.h)}
           </div>
+          {/* 八方向 resize 手柄 */}
+          {HANDLES.map((h) => (
+            <div
+              key={h}
+              style={getHandleStyle(h)}
+              onMouseDown={(e) => handleResizeStart(e, h)}
+            />
+          ))}
         </>
       )}
 
@@ -187,7 +283,7 @@ export const CaptureOverlay = () => {
             whiteSpace: 'nowrap',
           }}
         >
-          拖动选择区域 · Enter 确认 · Esc 取消
+          拖动选择区域 · 拖手柄微调 · Enter 确认 · Esc 取消
         </div>
       )}
 

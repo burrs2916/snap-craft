@@ -120,15 +120,19 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, AnnotationCanvasProp
         setActiveTool(TOOL_KEYS[e.key]);
         return;
       }
-      // [ / ] 调节线宽
+      // [ / ] 调节线宽（选中标注时同步更新其线宽）
       if (e.key === '[') {
         e.preventDefault();
-        setCurrentStrokeWidth(Math.max(2, currentStrokeWidth - 2));
+        const nw = Math.max(2, currentStrokeWidth - 2);
+        setCurrentStrokeWidth(nw);
+        if (selectedId) updateAnnotation(selectedId, { lineWidth: nw });
         return;
       }
       if (e.key === ']') {
         e.preventDefault();
-        setCurrentStrokeWidth(Math.min(8, currentStrokeWidth + 2));
+        const nw = Math.min(8, currentStrokeWidth + 2);
+        setCurrentStrokeWidth(nw);
+        if (selectedId) updateAnnotation(selectedId, { lineWidth: nw });
         return;
       }
       if (e.key === 'Delete' || e.key === 'Backspace') {
@@ -142,7 +146,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, AnnotationCanvasProp
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [selectedId, deleteAnnotation, setSelectedId, undo, redo, setActiveTool, setCurrentStrokeWidth, currentStrokeWidth]);
+  }, [selectedId, deleteAnnotation, setSelectedId, undo, redo, setActiveTool, setCurrentStrokeWidth, currentStrokeWidth, updateAnnotation]);
 
   // 提交画布内文字（Enter 或失焦触发），用 ref 防止重复提交
   // 若带 id 则是编辑已有文字（走 updateAnnotation），否则新增（走 onAnnotationAdd）
@@ -332,10 +336,12 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, AnnotationCanvasProp
             fill={ann.color}
             onDblClick={(ev) => {
               ev.cancelBubble = true;
+              committedRef.current = false;
               setEditing({ x: ann.geometry.points[0].x, y: ann.geometry.points[0].y, id: ann.id, text: ann.geometry.text || '' });
             }}
             onDblTap={(ev) => {
               ev.cancelBubble = true;
+              committedRef.current = false;
               setEditing({ x: ann.geometry.points[0].x, y: ann.geometry.points[0].y, id: ann.id, text: ann.geometry.text || '' });
             }}
           />
