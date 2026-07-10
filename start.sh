@@ -34,6 +34,13 @@ APP_NAME="SnapCraft"
 APP_BUNDLE="$SCRIPT_DIR/src-tauri/target/release/bundle/macos/$APP_NAME.app"
 APP_IDENTIFIER="com.snap-craft.app"
 
+# 本地自签名证书名（可选）。创建方式见 README：
+#   钥匙串访问 → 证书助理 → 创建证书 → 名称任意（如 SnapCraft Local）
+#   / 身份类型「自签名根证书」/ 证书类型「代码签名」→ 创建后选「始终信任」。
+# 设置后 ./start.sh app / sign 会自动用该证书对 .app 重签，使其被 Gatekeeper 信任，
+# 开发期验收屏幕录制权限时可直接打开。不设置则走 ad-hoc + 手动放行。
+SNAP_SIGN_ID="${SNAP_SIGN_ID:-}"
+
 # 日志函数
 log_info() {
     echo -e "${GREEN}[$(date '+%Y-%m-%d %H:%M:%S')] [INFO]${NC} $1"
@@ -243,6 +250,8 @@ build_app_local() {
         exit 1
     fi
     log_info "本地 .app 构建成功"
+    # 若本机存在自签名证书，重签 .app 以被 Gatekeeper 信任（无需 Apple 开发者账号）
+    codesign_app_local
     log_info "产物: $APP_BUNDLE"
 }
 
@@ -276,6 +285,45 @@ reset_permissions() {
     log_info "已重置。下次打开 .app 截图会重新请求授权。"
 }
 
+# 检查本机钥匙串是否存在指定名称的代码签名证书
+cert_exists() {
+    local name="$1"
+    [ -z "$name" ] && return 1
+    command -v security >/dev/null 2>&1 || return 1
+    security find-identity -v -p codesigning 2>/dev/null | grep -q "\"$name\""
+}
+
+# 用本地自签名证书对构建出的 .app 重签，使其被 Gatekeeper 信任（无需 Apple 开发者账号）
+codesign_app_local() {
+    [ -d "$APP_BUNDLE" ] || return 0
+    if [ -n "$SNAP_SIGN_ID" ] && cert_exists "$SNAP_SIGN_ID"; then
+        log_info "用本机自签名证书「$SNAP_SIGN_ID」对 .app 重新签名（Gatekeeper 信任）..."
+        if codesign --force --deep --sign "$SNAP_SIGN_ID" "$APP_BUNDLE" 2>&1; then
+            log_info "✅ 重签名完成，可直接打开，无需「右键→打开」。"
+        else
+            log_warn "⚠️ 重签名失败：证书可能已被钥匙串锁定，请先解锁「登录」钥匙串后重试。"
+        fi
+        # 兜底去除隔离属性（若 .app 曾从 CI 下载）
+        xattr -dr com.apple.quarantine "$APP_BUNDLE" 2>/dev/null || true
+    else
+        log_warn "未设置 SNAP_SIGN_ID 或未找到本机证书，走默认 ad-hoc 签名。"
+        log_warn "首次打开需：右键 SnapCraft.app → 打开（一次性放行）；或 sudo xattr -dr com.apple.quarantine \"$APP_BUNDLE\""
+    fi
+}
+
+# 仅对已有 .app 重新签名（用于重签 CI 下载的包 / 切换证书）
+sign_app_local() {
+    if [ ! -d "$APP_BUNDLE" ]; then
+        log_error "未找到 $APP_BUNDLE，请先用 './start.sh app' 构建。"
+        exit 1
+    fi
+    if [ -z "$SNAP_SIGN_ID" ]; then
+        log_error "请先设置 SNAP_SIGN_ID（你的证书名，如 SnapCraft Local）后再执行。"
+        exit 1
+    fi
+    codesign_app_local
+}
+
 # 停止服务
 stop_services() {
     log_info "SnapCraft 停止脚本"
@@ -294,9 +342,14 @@ show_help() {
     echo "  stop             停止所有相关进程"
     echo "  build            构建前端"
     echo "  build-tauri      构建 Tauri 应用（不打开）"
-    echo "  app              构建并打开 SnapCraft.app（开发期验收屏幕录制权限）"
+    echo "  app              构建并打开 SnapCraft.app（开发期验收屏幕录制权限，自动用本地证书签名）"
+    echo "  sign             用本地自签名证书重签已构建的 .app（无需 Apple 开发者账号）"
     echo "  reset            重置 SnapCraft 的屏幕录制权限"
     echo "  help, -h, --help 显示此帮助信息"
+    echo ""
+    echo "环境变量:"
+    echo "  SNAP_SIGN_ID     本地自签名证书名（如 SnapCraft Local）；设置后 app/sign 自动用其签名，"
+    echo "                   使 .app 被 Gatekeeper 信任，开发期可直接打开验收屏幕录制权限。"
     echo ""
     echo "示例:"
     echo "  $0               # 启动开发模式（前后端同时启动）"
@@ -335,6 +388,11 @@ main() {
             ;;
         reset)
             reset_permissions
+            ;;
+        sign)
+            log_info "SnapCraft 重新签名（本地自签名证书）"
+            echo "========================================"
+            sign_app_local
             ;;
         help|-h|--help)
             show_help
