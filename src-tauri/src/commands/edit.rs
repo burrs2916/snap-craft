@@ -1,7 +1,6 @@
-#[cfg(target_os = "macos")]
+use crate::store;
 use std::process::Command;
 use tauri::AppHandle;
-use crate::store;
 
 /// 将 data URL 写入指定文件路径
 #[tauri::command]
@@ -36,8 +35,6 @@ pub async fn copy_to_clipboard(_app: AppHandle, image_data: String) -> Result<()
             .arg(&script)
             .status()
             .map_err(|e| format!("无法运行 osascript: {}", e))?;
-        // 清理临时 PNG，避免每次复制泄漏一个文件
-        let _ = std::fs::remove_file(&tmp);
         if !status.success() {
             return Err("复制到剪贴板失败".into());
         }
@@ -51,21 +48,19 @@ pub async fn copy_to_clipboard(_app: AppHandle, image_data: String) -> Result<()
         let tmp = store::temp_png_path();
         store::write_bytes(&tmp, &bytes)?;
 
-        let img = image::open(&tmp)
+        let img = image::open(tmp)
             .map_err(|e| format!("解码图片失败: {}", e))?
             .to_rgba8();
-        // 清理临时 PNG
-        let _ = std::fs::remove_file(&tmp);
         let (w, h) = (img.width() as usize, img.height() as usize);
         let rgba = img.into_raw();
 
-        let mut clipboard = arboard::Clipboard::new()
-            .map_err(|e| format!("剪贴板初始化失败: {}", e))?;
+        let mut clipboard =
+            arboard::Clipboard::new().map_err(|e| format!("剪贴板初始化失败: {}", e))?;
         clipboard
             .set_image(arboard::ImageData {
                 width: w,
                 height: h,
-                bytes: rgba.into(),
+                bytes: rgba,
             })
             .map_err(|e| format!("复制到剪贴板失败: {}", e))?;
         Ok(())

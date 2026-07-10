@@ -1,4 +1,4 @@
-import { Stage, Layer, Image as KonvaImage, Line, Rect, Ellipse, Text, Circle, Group } from 'react-konva';
+import { Stage, Layer, Image as KonvaImage, Line, Rect, Ellipse, Text } from 'react-konva';
 import { useEffect, useRef, useState, forwardRef, useImperativeHandle } from 'react';
 import type Konva from 'konva';
 import { useScreenshotStore } from '../store/screenshotStore';
@@ -31,18 +31,11 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, AnnotationCanvasProp
   const wrapRef = useRef<HTMLDivElement>(null);
   const committedRef = useRef(false);
   const selBoxRef = useRef<Konva.Rect | null>(null);
-  // 缓存原图像素，供取色器快速采样（避免每次 mousemove 都 getImageData）
-  const imageDataCache = useRef<Uint8ClampedArray | null>(null);
-  const imgSize = useRef<{ w: number; h: number }>({ w: 0, h: 0 });
   const [image, setImage] = useState<HTMLImageElement | null>(null);
   const [draft, setDraft] = useState<{ type: AnnotationGeometry['type']; points: Point[] } | null>(null);
   const [selBox, setSelBox] = useState<{ x: number; y: number; width: number; height: number } | null>(null);
   const [box, setBox] = useState({ w: 0, h: 0 });
   const [editing, setEditing] = useState<{ x: number; y: number; id?: string; text?: string } | null>(null);
-  const [imageError, setImageError] = useState(false);
-  // 取色器：光标下像素色 + 浮窗位置
-  const [pickerColor, setPickerColor] = useState<string | null>(null);
-  const [pickerPos, setPickerPos] = useState<{ x: number; y: number } | null>(null);
 
   const {
     selectedId,
@@ -52,35 +45,13 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, AnnotationCanvasProp
     undo,
     redo,
     currentColor,
-    setCurrentColor,
     currentStrokeWidth,
-    layers,
-    activeLayerId,
   } = useScreenshotStore();
 
   useEffect(() => {
     if (!imageData) return;
     const img = new Image();
-    img.onload = () => {
-      setImage(img);
-      setImageError(false);
-      // 缓存像素供取色器快速采样
-      try {
-        const c = document.createElement('canvas');
-        c.width = img.width;
-        c.height = img.height;
-        const ctx = c.getContext('2d', { willReadFrequently: true });
-        if (ctx) {
-          ctx.drawImage(img, 0, 0);
-          imageDataCache.current = ctx.getImageData(0, 0, img.width, img.height).data;
-          imgSize.current = { w: img.width, h: img.height };
-        }
-      } catch {
-        imageDataCache.current = null;
-      }
-    };
-    // 损坏 dataUrl 时给错误态，否则永远"加载中…"无反馈
-    img.onerror = () => { setImage(null); setImageError(true); };
+    img.onload = () => setImage(img);
     img.src = imageData;
   }, [imageData]);
 
@@ -128,8 +99,6 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, AnnotationCanvasProp
       }
       if (e.key === 'Delete' || e.key === 'Backspace') {
         if (selectedId) {
-          // Backspace 在 Tauri webview 可能触发后退导航，必须拦截
-          e.preventDefault();
           deleteAnnotation(selectedId);
           setSelectedId(null);
         }
@@ -156,7 +125,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, AnnotationCanvasProp
         onAnnotationAdd({
           id: genId(),
           geometry: { type: 'text', points: [{ x: pos.x, y: pos.y }], text: t, fontSize: 22 },
-          layerId: activeLayerId || 'default',
+          layerId: 'default',
           color: currentColor,
           lineWidth: currentStrokeWidth,
           opacity: 1,
@@ -179,24 +148,6 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, AnnotationCanvasProp
       return;
     }
 
-    if (activeTool === 'color') {
-      // 取色：点击把光标下像素色设为当前标注色（可连续取）
-      const p = stage.getRelativePointerPosition();
-      if (p && imageDataCache.current && imgSize.current.w > 0) {
-        const x = Math.max(0, Math.min(imgSize.current.w - 1, Math.round(p.x)));
-        const y = Math.max(0, Math.min(imgSize.current.h - 1, Math.round(p.y)));
-        const idx = (y * imgSize.current.w + x) * 4;
-        const d = imageDataCache.current;
-        const hex =
-          '#' +
-          [d[idx], d[idx + 1], d[idx + 2]]
-            .map((v) => v.toString(16).padStart(2, '0'))
-            .join('');
-        setCurrentColor(hex);
-      }
-      return;
-    }
-
     if (activeTool === 'text') {
       // 画布内文字输入框，替代原生 window.prompt
       committedRef.current = false;
@@ -204,20 +155,6 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, AnnotationCanvasProp
       return;
     }
 
-    if (activeTool === 'number') {
-      // 序号标注：点击即放一个，数字 = 当前序号标注数 + 1（自动递增）
-      const count = annotations.filter((a) => a.geometry.type === 'number').length + 1;
-      onAnnotationAdd({
-        id: genId(),
-        geometry: { type: 'number', points: [pos], text: String(count) },
-        layerId: activeLayerId || 'default',
-        color: currentColor,
-        lineWidth: currentStrokeWidth,
-        opacity: 1,
-        properties: {},
-      });
-      return;
-    }
     if (activeTool === 'freehand') {
       setDraft({ type: 'freehand', points: [pos] });
     } else {
@@ -226,27 +163,9 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, AnnotationCanvasProp
   };
 
   const handleMouseMove = (e: Konva.KonvaEventObject<MouseEvent>) => {
+    if (!draft) return;
     const stage = e.target.getStage();
     if (!stage) return;
-    // 取色器：实时读光标下像素色 + 跟随浮窗
-    if (activeTool === 'color') {
-      const pos = stage.getRelativePointerPosition();
-      if (pos && imageDataCache.current && imgSize.current.w > 0) {
-        const x = Math.max(0, Math.min(imgSize.current.w - 1, Math.round(pos.x)));
-        const y = Math.max(0, Math.min(imgSize.current.h - 1, Math.round(pos.y)));
-        const idx = (y * imgSize.current.w + x) * 4;
-        const d = imageDataCache.current;
-        const hex =
-          '#' +
-          [d[idx], d[idx + 1], d[idx + 2]]
-            .map((v) => v.toString(16).padStart(2, '0'))
-            .join('');
-        setPickerColor(hex);
-        setPickerPos({ x: e.evt.clientX, y: e.evt.clientY });
-      }
-      return;
-    }
-    if (!draft) return;
     const pos = stage.getRelativePointerPosition();
     if (!pos) return;
     if (draft.type === 'freehand') {
@@ -269,7 +188,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, AnnotationCanvasProp
       onAnnotationAdd({
         id: genId(),
         geometry: { type: draft.type, points: pts },
-        layerId: activeLayerId || 'default',
+        layerId: 'default',
         color: currentColor,
         lineWidth: currentStrokeWidth,
         opacity: 1,
@@ -379,113 +298,13 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, AnnotationCanvasProp
             fill={ann.color}
             onDblClick={(ev) => {
               ev.cancelBubble = true;
-              // 重置提交锁，否则首次新建后 commitText 直接 return，编辑内容丢失
-              committedRef.current = false;
               setEditing({ x: ann.geometry.points[0].x, y: ann.geometry.points[0].y, id: ann.id, text: ann.geometry.text || '' });
             }}
             onDblTap={(ev) => {
               ev.cancelBubble = true;
-              committedRef.current = false;
               setEditing({ x: ann.geometry.points[0].x, y: ann.geometry.points[0].y, id: ann.id, text: ann.geometry.text || '' });
             }}
           />
-        );
-      }
-      case 'highlight': {
-        const [a, b] = ann.geometry.points;
-        const x = Math.min(a.x, b.x);
-        const y = Math.min(a.y, b.y);
-        const w = Math.abs(b.x - a.x);
-        const h = Math.abs(b.y - a.y);
-        // 荧光笔：半透明填充模拟马克笔高亮，不遮挡文字
-        return (
-          <Rect
-            {...baseProps}
-            x={x}
-            y={y}
-            width={w}
-            height={h}
-            fill={ann.color}
-            opacity={0.3}
-            cornerRadius={2}
-          />
-        );
-      }
-      case 'mosaic': {
-        const [a, b] = ann.geometry.points;
-        const x = Math.min(a.x, b.x);
-        const y = Math.min(a.y, b.y);
-        const w = Math.abs(b.x - a.x);
-        const h = Math.abs(b.y - a.y);
-        if (w < 1 || h < 1) return null;
-        // 真像素化：按块采样底图像素，块内统一色 = 经典马赛克打码效果。
-        // 复用取色器已缓存的整图自然像素（imageDataCache），避免每帧 getImageData。
-        const cache = imageDataCache.current;
-        const scale = stageRef.current?.scaleX() ?? 1;
-        const imgW = imgSize.current.w;
-        const imgH = imgSize.current.h;
-        const bs = 10; // 画布坐标下每块边长
-        const cols = Math.max(1, Math.ceil(w / bs));
-        const rows = Math.max(1, Math.ceil(h / bs));
-        const cw = w / cols;
-        const ch = h / rows;
-        return (
-          <Group {...baseProps}>
-            {Array.from({ length: rows * cols }).map((_, i) => {
-              const r = Math.floor(i / cols);
-              const c = i % cols;
-              const bx = x + c * cw;
-              const by = y + r * ch;
-              let fill = '#6e6e73';
-              // 底图可用时采样块中心像素作为块色；否则回退网格
-              if (cache && imgW > 0 && imgH > 0) {
-                const nx = Math.min(imgW - 1, Math.max(0, Math.round((bx + cw / 2) / scale)));
-                const ny = Math.min(imgH - 1, Math.max(0, Math.round((by + ch / 2) / scale)));
-                const idx = (ny * imgW + nx) * 4;
-                fill = `rgb(${cache[idx]},${cache[idx + 1]},${cache[idx + 2]})`;
-              }
-              return (
-                <Rect key={i} x={bx} y={by} width={cw} height={ch} fill={fill} listening={false} />
-              );
-            })}
-          </Group>
-        );
-      }
-      case 'number': {
-        const p = ann.geometry.points[0];
-        const num = ann.geometry.text || '1';
-        // 序号：圆形背景 + 白色数字，点击工具自动递增
-        return (
-          <Group {...baseProps}>
-            <Circle x={p.x} y={p.y} radius={16} fill={ann.color} />
-            <Text
-              x={p.x - 16}
-              y={p.y - 16}
-              width={32}
-              height={32}
-              text={num}
-              fontSize={18}
-              fontStyle="bold"
-              fill="#fff"
-              align="center"
-              verticalAlign="middle"
-            />
-          </Group>
-        );
-      }
-      case 'ruler': {
-        const [a, b] = ann.geometry.points;
-        const flat = [a.x, a.y, b.x, b.y];
-        const len = Math.round(Math.hypot(b.x - a.x, b.y - a.y));
-        const mx = (a.x + b.x) / 2;
-        const my = (a.y + b.y) / 2;
-        // 量尺：两点线 + 中点像素数标签
-        return (
-          <Group {...baseProps}>
-            <Line points={flat} stroke={ann.color} strokeWidth={ann.lineWidth} lineCap="round" />
-            <Rect x={mx - 30} y={my - 12} width={60} height={20} fill={ann.color} opacity={0.9} cornerRadius={4} />
-            <Text x={mx - 30} y={my - 12} width={60} height={20} text={`${len}px`} fontSize={12} fill="#fff" align="center" verticalAlign="middle" />
-          </Group>
         );
       }
       case 'freehand': {
@@ -541,14 +360,13 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, AnnotationCanvasProp
     [scale]
   );
 
-  if (imageError) return <div className="canvas-loading">图片加载失败（数据可能损坏）</div>;
   if (!image) return <div className="canvas-loading">加载中…</div>;
 
   const draftAnn: AnnotationObject = draft
     ? {
         id: '__draft',
         geometry: { type: draft.type, points: draft.points },
-        layerId: activeLayerId || 'default',
+        layerId: 'default',
         color: currentColor,
         lineWidth: currentStrokeWidth,
         opacity: 1,
@@ -620,9 +438,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, AnnotationCanvasProp
           <KonvaImage image={image} />
         </Layer>
         <Layer ref={layerRef}>
-          {annotations
-            .filter((ann) => layers.find((l) => l.id === ann.layerId)?.visible !== false)
-            .map((ann) => renderShape(ann, false))}
+          {annotations.map((ann) => renderShape(ann, false))}
           {draft && renderShape(draftAnn, true)}
           {selBox && (
             <Rect
@@ -640,39 +456,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, AnnotationCanvasProp
         </Layer>
       </Stage>
       {textEditor}
-      {pickerColor && pickerPos && activeTool === 'color' && (
-        <div
-          style={{
-            position: 'fixed',
-            left: pickerPos.x + 14,
-            top: pickerPos.y + 14,
-            background: 'rgba(0,0,0,0.82)',
-            color: '#fff',
-            padding: '4px 8px',
-            borderRadius: 6,
-            fontSize: 12,
-            pointerEvents: 'none',
-            display: 'flex',
-            alignItems: 'center',
-            gap: 6,
-            zIndex: 20,
-            fontFamily: 'var(--font-mono, monospace)',
-          }}
-        >
-          <span
-            style={{
-              width: 14,
-              height: 14,
-              borderRadius: 3,
-              background: pickerColor,
-              border: '1px solid rgba(255,255,255,0.4)',
-              display: 'inline-block',
-            }}
-          />
-          {pickerColor.toUpperCase()}
-        </div>
-      )}
-    </div>
+      </div>
   );
 });
 

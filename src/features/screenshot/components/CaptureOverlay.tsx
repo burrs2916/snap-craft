@@ -10,10 +10,8 @@ interface Rect {
   h: number;
 }
 
-// 从 URL 读取覆盖层模式与坐标参数（主窗口通过 query 传入，因覆盖层是独立 JS 上下文）。
-// 参数挂在 hash 的 query 段（`/#capture-overlay?mode=region&...`），location.search 为空，
-// 必须从 hash 切出 query 再解析，否则 MODE 恒为 region、PLATFORM 恒 other、ORIGIN 恒 0。
-const params = new URLSearchParams(window.location.hash.split('?')[1] || '');
+// 从 URL 读取覆盖层模式与坐标参数（主窗口通过 query 传入，因覆盖层是独立 JS 上下文）
+const params = new URLSearchParams(window.location.search);
 const MODE: 'region' | 'window' = params.get('mode') === 'window' ? 'window' : 'region';
 const PLATFORM = params.get('platform') || 'other';
 const ORIGIN_X = Number(params.get('ox') || 0);
@@ -30,12 +28,6 @@ export const CaptureOverlay = () => {
   const start = useRef<{ x: number; y: number } | null>(null);
   // 已提交的选区：mouseup 时定型，避免确认按钮/双击的 mousedown 把 sel 重置成零尺寸导致 finish 提前返回
   const committedRef = useRef<Rect | null>(null);
-
-  // 让覆盖层窗口对截屏「隐形」：避免拖选时这层暗色遮罩被截进区域图
-  // （mac 用 NSWindow.sharingType=.none，Windows 用 WDA_EXCLUDEFROMCAPTURE）
-  useEffect(() => {
-    invoke('apply_window_stealth', { label: getCurrentWindow().label }).catch(() => {});
-  }, []);
 
   const closeSelf = useCallback(async () => {
     const w = getCurrentWindow();
@@ -64,17 +56,9 @@ export const CaptureOverlay = () => {
   };
 
   const finish = useCallback(async () => {
-    // 有选区用选区；没有（直接 Enter / 点确认）则截整屏——
-    // 覆盖层铺满的范围即选中屏，window.innerWidth/Height 正好是整屏逻辑尺寸
-    const s =
-      sel && sel.w >= 5 && sel.h >= 5
-        ? sel
-        : committedRef.current && committedRef.current.w >= 5 && committedRef.current.h >= 5
-          ? committedRef.current
-          : { x: 0, y: 0, w: window.innerWidth, h: window.innerHeight };
-    // 先隐藏覆盖层自身（含暗色遮罩），否则它会被截进区域截图里
-    const w = getCurrentWindow();
-    await w.hide();
+    // 优先用当前 sel；若被确认按钮/双击的 mousedown 冲掉，则回退到已提交的选区
+    const s = sel && sel.w >= 5 && sel.h >= 5 ? sel : committedRef.current;
+    if (!s || s.w < 5 || s.h < 5) return;
     try {
       const dataUrl = await invoke<string>('capture_region', { rect: toBackendRect(s) });
       await emit('region-captured', dataUrl);
@@ -145,10 +129,6 @@ export const CaptureOverlay = () => {
         cursor: 'crosshair',
         userSelect: 'none',
         WebkitUserSelect: 'none',
-        // 一打开就给选中屏蒙一层淡阴影（符合「选屏后整体变暗」的预期）；
-        // 开始拖选后改透明，由选区 boxShadow 接管蒙版（选区亮、区外暗）。
-        background:
-          sel && sel.w > 0 && sel.h > 0 ? 'transparent' : 'rgba(0,0,0,0.35)',
       }}
       onMouseDown={onDown}
       onMouseMove={onMove}

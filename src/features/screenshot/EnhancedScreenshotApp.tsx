@@ -1,12 +1,11 @@
-import { memo, useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { listen, emit, once, type UnlistenFn } from '@tauri-apps/api/event';
+import { listen, emit, type UnlistenFn } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { save } from '@tauri-apps/plugin-dialog';
 import { AnnotationToolbar } from './components/AnnotationToolbar';
 import AnnotationCanvas, { AnnotationCanvasHandle } from './components/AnnotationCanvas';
-import { LayerPanel } from './components/LayerPanel';
 import { useScreenshotStore } from './store/screenshotStore';
 
 type Theme = 'light' | 'dark' | 'system';
@@ -19,27 +18,19 @@ interface HistoryEntry {
   height: number;
 }
 
-// macOS 显示器信息（list_displays 返回：逻辑点坐标 + 真实物理像素 + 缩放比）
+// macOS 显示器信息（list_displays 返回，全局逻辑点坐标）
 interface DisplayInfo {
   id: number;
   is_main: boolean;
   x: number;
   y: number;
-  width: number; // 逻辑点宽（系统设置里「看起来」的分辨率）
-  height: number; // 逻辑点高
-  scale: number; // 缩放比 = 物理像素 / 逻辑点
-  physical_width: number; // 真实物理像素宽（截图实际抓到的像素数）
-  physical_height: number; // 真实物理像素高
+  width: number;
+  height: number;
+  scale: number;
 }
 
-// 把缩放比格式化成「2×」/「1.5×」这类易读标签
-const fmtScale = (s: number): string => {
-  const r = Math.round(s * 100) / 100;
-  return (Number.isInteger(r) ? `${r}` : r.toFixed(2)) + '×';
-};
-
 // 多屏选择器：点选具体显示器后由 pickDisplay 执行截取
-const DisplayPicker = memo(({
+const DisplayPicker = ({
   displays,
   onPick,
   onCancel,
@@ -66,8 +57,7 @@ const DisplayPicker = memo(({
         <div className="permission-icon">🖥️</div>
         <div className="permission-title">选择要截取的显示器</div>
         <div className="permission-text">
-          你的 Mac 外接了 {displays.length} 块显示器。每张卡片标注了「真实物理像素 ·
-          缩放比」，点选后将以该屏的原生分辨率截图。
+          你的 Mac 外接了 {displays.length} 块显示器，点选其中一块即可只截取该屏。
         </div>
         <div
           className="display-picker-grid"
@@ -85,15 +75,9 @@ const DisplayPicker = memo(({
                 height: `${(d.height / uh) * 100}%`,
               }}
             >
-              <div className="display-pick-name">
-                {d.is_main ? '主屏' : `显示器 ${i + 1}`}
-                <span className="display-pick-scale">{fmtScale(d.scale)}</span>
-              </div>
+              <div className="display-pick-name">{d.is_main ? '主屏' : `显示器 ${i + 1}`}</div>
               <div className="display-pick-res">
-                {d.physical_width} × {d.physical_height}
-              </div>
-              <div className="display-pick-sub">
-                逻辑 {d.width} × {d.height}
+                {d.width} × {d.height}
               </div>
             </button>
           ))}
@@ -106,47 +90,36 @@ const DisplayPicker = memo(({
       </div>
     </div>
   );
-});
+};
 
-// 历史缩略图：滚入视口才取图，避免一次性解码全部大图。
-// 历史条目图片存独立 PNG 文件，按需 invoke get_history_image 拉取（不在列表内联 base64）。
-const LazyHistoryThumb = memo(
-  ({ id, dataUrl, alt }: { id: string; dataUrl?: string; alt: string }) => {
-    const ref = useRef<HTMLImageElement>(null);
-    const [src, setSrc] = useState('');
-    useEffect(() => {
-      const el = ref.current;
-      if (!el) return;
-      const io = new IntersectionObserver((entries) => {
-        entries.forEach((e) => {
-          if (e.isIntersecting) {
-            if (dataUrl) {
-              // 内存中已持有（如刚截完的条目）：直接用
-              setSrc(dataUrl);
-            } else {
-              // 历史条目图片存独立文件，滚入视口才按需拉取
-              invoke<string>('get_history_image', { id })
-                .then(setSrc)
-                .catch(() => {});
-            }
-            io.disconnect();
-          }
-        });
+// 历史缩略图：滚入视口才把 dataUrl 设为 src，避免一次性解码全部大图
+const LazyHistoryThumb = ({ dataUrl, alt }: { dataUrl: string; alt: string }) => {
+  const ref = useRef<HTMLImageElement>(null);
+  const [src, setSrc] = useState('');
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const io = new IntersectionObserver((entries) => {
+      entries.forEach((e) => {
+        if (e.isIntersecting) {
+          setSrc(dataUrl);
+          io.disconnect();
+        }
       });
-      io.observe(el);
-      return () => io.disconnect();
-    }, [id, dataUrl]);
-    return (
-      <img
-        ref={ref}
-        src={src || undefined}
-        alt={alt}
-        loading="lazy"
-        style={src ? undefined : { backgroundColor: 'var(--surface-strong)' }}
-      />
-    );
-  }
-);
+    });
+    io.observe(el);
+    return () => io.disconnect();
+  }, [dataUrl]);
+  return (
+    <img
+      ref={ref}
+      src={src || undefined}
+      alt={alt}
+      loading="lazy"
+      style={src ? undefined : { backgroundColor: 'var(--surface-strong)' }}
+    />
+  );
+};
 
 export const EnhancedScreenshotApp = () => {
   const [theme, setTheme] = useState<Theme>(
@@ -162,20 +135,12 @@ export const EnhancedScreenshotApp = () => {
   const [displays, setDisplays] = useState<DisplayInfo[]>([]);
   const [showDisplayPicker, setShowDisplayPicker] = useState(false);
   const [permissionNeeded, setPermissionNeeded] = useState(false);
-  // 截图后快捷选择栏：截完不直接进编辑，先弹一排（复制/钉图/保存/编辑/重截）
-  const [capturedPreview, setCapturedPreview] = useState<{ dataUrl: string; width: number; height: number } | null>(null);
-  const [lastCaptureKind, setLastCaptureKind] = useState<'screen' | 'region' | 'window'>('screen');
   // 开发模式（tauri dev）跑的是裸二进制，macOS 不会把它列入 TCC「屏幕录制」列表，
   // 因此无法在系统设置里出现/授权；只有 build 出的 .app 才会被系统登记到权限列表。
   const isDev = (import.meta as any).env?.DEV === true;
 
-  // 让本窗口对截屏「隐形」：避免工具自身被截进画面
-  // （mac 用 NSWindow.sharingType=.none，Windows 用 WDA_EXCLUDEFROMCAPTURE）
-  useEffect(() => {
-    invoke('apply_window_stealth', { label: getCurrentWindow().label }).catch(() => {});
-  }, []);
-
   const {
+    currentScreenshot,
     setCurrentScreenshot,
     clearAnnotations,
     annotations,
@@ -205,20 +170,11 @@ export const EnhancedScreenshotApp = () => {
     }
   }, [theme]);
 
-  // flash 计时器用 ref 持有：连续调用时清掉上一次定时器，组件卸载也清理，避免内存泄漏/陈旧 toast
-  const flashTimer = useRef<number | null>(null);
   const flash = useCallback((msg: string, type: 'success' | 'error' = 'success') => {
     setToast(msg);
     setToastType(type);
-    if (flashTimer.current !== null) window.clearTimeout(flashTimer.current);
-    flashTimer.current = window.setTimeout(() => setToast(null), 1800);
+    window.setTimeout(() => setToast(null), 1800);
   }, []);
-  useEffect(
-    () => () => {
-      if (flashTimer.current !== null) window.clearTimeout(flashTimer.current);
-    },
-    []
-  );
 
   // ===== 启动加载历史记录 =====
   useEffect(() => {
@@ -229,7 +185,7 @@ export const EnhancedScreenshotApp = () => {
           setHistory(
             raw.map((i) => ({
               id: i.id,
-              dataUrl: i.data_url ?? '',
+              dataUrl: i.data_url,
               createdAt: i.created_at,
               width: i.width,
               height: i.height,
@@ -245,11 +201,9 @@ export const EnhancedScreenshotApp = () => {
   const onCaptured = useCallback(
     async (dataUrl: string) => {
       const { width, height } = await new Promise<{ width: number; height: number }>(
-        (res, rej) => {
+        (res) => {
           const img = new Image();
           img.onload = () => res({ width: img.width, height: img.height });
-          // 损坏 dataUrl 时 reject，否则 Promise 永挂 → 主窗口永久隐藏 + busy 卡死
-          img.onerror = () => rej(new Error('截图数据损坏，无法解码'));
           img.src = dataUrl;
         }
       );
@@ -277,8 +231,7 @@ export const EnhancedScreenshotApp = () => {
         updatedAt: createdAt,
       });
       clearAnnotations();
-      // 不直接进编辑页：先弹快捷选择栏（复制/钉图/保存/编辑/重截），用户选「编辑」才进编辑器
-      setCapturedPreview({ dataUrl, width, height });
+      setCurrentView('edit');
     },
     [setCurrentScreenshot, clearAnnotations]
   );
@@ -376,63 +329,38 @@ export const EnhancedScreenshotApp = () => {
     [platform, displays]
   );
 
-  // 选屏后进入该屏的区域选择覆盖层：屏上蒙阴影、可拖选区域或确认截整屏。
-  // 之前回退因覆盖层乱跳，根因是 App.tsx hash 匹配 + CaptureOverlay search 解析两个 P0
-  // （batch 3 已修）。现恢复，加 macOSPrivateApi（macOS 透明窗口必需）+ 30s 超时兜底。
+  // 多屏选择器：点选具体显示器后执行全屏截取该屏
   const pickDisplay = useCallback(
     async (displayId: number | null) => {
       setShowDisplayPicker(false);
-      if (busy || displayId == null) return;
-      const d = displays.find((x) => x.id === displayId);
-      if (!d) return;
+      if (busy) return;
       setBusy(true);
       const win = getCurrentWindow();
       await win.hide();
-      // 覆盖层只铺在选中屏上：位置/尺寸即该屏的全局逻辑矩形
-      const q = new URLSearchParams({
-        mode: 'region',
-        platform: 'macos',
-        ox: String(d.x),
-        oy: String(d.y),
-      });
-      const opts: Record<string, unknown> = {
-        title: 'SnapCraft 截图选择',
-        transparent: true,
-        decorations: false,
-        alwaysOnTop: true,
-        resizable: false,
-        visible: true,
-        x: d.x,
-        y: d.y,
-        width: d.width,
-        height: d.height,
-        // macOS 透明窗口需要 private API；Tauri 2.11 类型未暴露，运行时支持
-        macOSPrivateApi: true,
-        url: `/#capture-overlay?${q.toString()}`,
-      };
-      const existing = await WebviewWindow.getByLabel('capture-overlay');
-      if (existing) {
-        try {
-          await existing.close();
-        } catch {
-          /* ignore */
+      try {
+        const dataUrl = await invoke<string>('capture_screen', { display_id: displayId });
+        await onCaptured(dataUrl);
+      } catch (e) {
+        const msg = String(e);
+        if (msg.includes('屏幕录制')) {
+          setPermissionNeeded(true);
+          return;
         }
-      }
-      new WebviewWindow('capture-overlay', opts as any);
-      // 兜底：覆盖层若崩溃不发事件，30s 后强制恢复主窗口，避免永久隐藏 + busy 卡死
-      window.setTimeout(() => {
-        getCurrentWindow().show();
+        if (!msg.includes('截图已取消') && !msg.toLowerCase().includes('cancelled')) {
+          flash('截图失败：' + msg, 'error');
+        }
+      } finally {
+        await win.show();
+        await win.setFocus();
         setBusy(false);
-      }, 30000);
-      // 结果由 region-captured / region-cancelled 事件收尾
+      }
     },
-    [busy, displays]
+    [onCaptured, flash, busy, setPermissionNeeded]
   );
 
   const doCapture = useCallback(
     async (kind: 'screen' | 'region' | 'window') => {
       if (busy) return; // 防止 busy 期间（窗口隐藏前）重复点击 / 快捷键再次触发
-      setLastCaptureKind(kind);
       // macOS 多显示器：全屏截图先让用户选具体显示器
       if (kind === 'screen' && platform === 'macos' && displays.length > 1) {
         const win = getCurrentWindow();
@@ -451,11 +379,6 @@ export const EnhancedScreenshotApp = () => {
         if (kind === 'region' || (kind === 'window' && platform === 'macos')) {
           await openRegionOverlay(kind);
           overlayOpened = true;
-          // 兜底：覆盖层若崩溃/不发事件，30s 后强制恢复主窗口，避免永久隐藏 + busy 卡死
-          window.setTimeout(() => {
-            getCurrentWindow().show();
-            setBusy(false);
-          }, 30000);
           return; // 结果由 region-captured / region-cancelled 事件收尾
         }
         // Windows / Linux 窗口截图 / 全屏（单屏或主屏）
@@ -485,27 +408,16 @@ export const EnhancedScreenshotApp = () => {
     [onCaptured, flash, platform, openRegionOverlay, busy, setPermissionNeeded, displays]
   );
 
-  // 用 ref 持有最新 doCapture / onCaptured，快捷键监听只注册一次，
-  // 避免 busy 翻转（捕获进行中）时反复注销/重注册监听器导致快捷键偶发丢失
-  const doCaptureRef = useRef(doCapture);
-  useEffect(() => {
-    doCaptureRef.current = doCapture;
-  });
-  const onCapturedRef = useRef(onCaptured);
-  useEffect(() => {
-    onCapturedRef.current = onCaptured;
-  });
-
-  // ===== 全局快捷键监听（只注册一次，内部通过 ref 读最新函数）=====
+  // ===== 全局快捷键监听 =====
   useEffect(() => {
     const un: Promise<UnlistenFn>[] = [
-      listen('capture-screen', () => doCaptureRef.current('screen')),
-      listen('capture-region', () => doCaptureRef.current('region')),
-      listen('capture-window', () => doCaptureRef.current('window')),
+      listen('capture-screen', () => doCapture('screen')),
+      listen('capture-region', () => doCapture('region')),
+      listen('capture-window', () => doCapture('window')),
       // Windows / Linux 区域截图由覆盖层回传结果
       listen('region-captured', (e) => {
         const win = getCurrentWindow();
-        onCapturedRef.current(e.payload as string).then(() => {
+        onCaptured(e.payload as string).then(() => {
           win.show();
           win.setFocus();
           setBusy(false);
@@ -521,15 +433,13 @@ export const EnhancedScreenshotApp = () => {
     return () => {
       un.forEach((p) => p.then((fn) => fn()));
     };
-  }, []);
+  }, [doCapture, onCaptured]);
 
   // 保存 / 复制时若已标注，合并标注后导出（否则用原始截图）
   const getExportDataUrl = (): string => {
     if (annotations.length > 0 && canvasRef.current) {
       const merged = canvasRef.current.getMergedImageDataUrl();
       if (merged) return merged;
-      // 合并失败（stage/layer 未就绪）静默回退原图会让标注丢失，这里明确提示
-      flash('标注合并失败，已导出原图（标注未包含）', 'error');
     }
     return current!.dataUrl;
   };
@@ -559,73 +469,52 @@ export const EnhancedScreenshotApp = () => {
     }
   };
 
-  // 钉图到桌面：通用版，接受任意 dataUrl（编辑页按钮 + 快捷栏都用它）
-  const pinImage = useCallback(async (dataUrl: string, width: number, height: number) => {
-    const label = `pin-${Date.now()}`;
-    const w = Math.min(width, 1400);
-    const h = Math.min(height, 900) + 28;
-    let pinWin: WebviewWindow | null = null;
-    // 握手：pin 窗口 mount 后 emit('pin-ready')，主窗口收到再 emit('pin-data')，避免竞态
-    const un = await once<{ label: string }>('pin-ready', async (e) => {
-      if (e.payload?.label === label && pinWin) {
-        await pinWin.emit('pin-data', { dataUrl, width, height });
-        un();
+  // 删除单条历史：后端按 id 移除并整体重写 history.json（图内联其中，删条目即删图，无孤儿文件）
+  const handleDeleteHistory = async (id: string) => {
+    if (!id) return;
+    try {
+      await invoke('delete_history', { id });
+      // 同步清掉前端内存里的对应条目，避免界面残留已删的脏数据
+      setHistory((h) => h.filter((x) => x.id !== id));
+      // 若被删的正是编辑视图当前引用的那条，连带清空当前态，杜绝脏引用
+      if (currentScreenshot?.id === id) {
+        setCurrentScreenshot(null);
+        setCurrent(null);
+        if (currentView === 'edit') setCurrentView('home');
       }
-    });
-    pinWin = new WebviewWindow(label, {
-      title: 'SnapCraft 钉图',
-      url: '/#pin',
-      width: w,
-      height: h,
-      transparent: true,
-      decorations: false,
-      alwaysOnTop: true,
-      resizable: true,
-      skipTaskbar: true,
-      center: true,
-      // macOS 透明窗口需要 private API；Tauri 2.11 类型未暴露该字段，运行时支持
-      macOSPrivateApi: true,
-    } as any);
-  }, []);
+      flash('已删除该截图', 'success');
+    } catch (e) {
+      flash('删除失败：' + String(e), 'error');
+    }
+  };
 
-  const pinToDesktop = useCallback(async () => {
-    if (!current) return;
-    await pinImage(getExportDataUrl(), current.width, current.height);
-  }, [current, getExportDataUrl, pinImage]);
+  // 清空全部历史：先二次确认，再清后端 + 前端状态，确保彻底清理
+  const handleClearHistory = async () => {
+    if (!window.confirm('确定清空全部截图历史？此操作不可恢复。')) return;
+    try {
+      await invoke('clear_history');
+      setHistory([]);
+      // 彻底清理：清空后不应残留任何已删截图的引用
+      setCurrentScreenshot(null);
+      setCurrent(null);
+      if (currentView === 'edit') setCurrentView('home');
+      flash('已清空全部历史', 'success');
+    } catch (e) {
+      flash('清空失败：' + String(e), 'error');
+    }
+  };
 
   const cycleTheme = () =>
     setTheme((t) => (t === 'light' ? 'dark' : t === 'dark' ? 'system' : 'light'));
   const themeIcon = theme === 'light' ? '☀️' : theme === 'dark' ? '🌙' : '🖥️';
   const themeLabel = theme === 'light' ? '浅色' : theme === 'dark' ? '深色' : '跟随系统';
 
-  // 快捷选择栏按钮统一样式
-  const cabBtn = {
-    background: 'rgba(255,255,255,0.12)',
-    color: '#fff',
-    border: 'none',
-    borderRadius: 8,
-    padding: '8px 12px',
-    cursor: 'pointer',
-    fontSize: 13,
-    whiteSpace: 'nowrap',
-  } as const;
-
-  const openHistory = async (h: HistoryEntry) => {
-    // 历史条目图片按需从磁盘拉取（不在列表里内联 base64）
-    let dataUrl = h.dataUrl;
-    if (!dataUrl) {
-      try {
-        dataUrl = await invoke<string>('get_history_image', { id: h.id });
-      } catch {
-        flash('无法加载该历史截图', 'error');
-        return;
-      }
-    }
-    setCurrent({ dataUrl, width: h.width, height: h.height });
+  const openHistory = (h: HistoryEntry) => {
+    setCurrent({ dataUrl: h.dataUrl, width: h.width, height: h.height });
     setCurrentScreenshot({
       id: h.id,
       filePath: '',
-      dataUrl,
+      dataUrl: h.dataUrl,
       width: h.width,
       height: h.height,
       annotations: [],
@@ -636,16 +525,6 @@ export const EnhancedScreenshotApp = () => {
     clearAnnotations();
     setCurrentView('edit');
   };
-
-  // 删除一条历史截图：本地立即移除（响应快）+ 后端持久化（防刷新复活）
-  const deleteHistory = useCallback(async (id: string) => {
-    setHistory((h) => h.filter((x) => x.id !== id));
-    try {
-      await invoke('delete_history', { id });
-    } catch {
-      /* 本地已删，忽略后端错误 */
-    }
-  }, []);
 
   // ===== 编辑视图 =====
   if (currentView === 'edit' && current) {
@@ -676,17 +555,13 @@ export const EnhancedScreenshotApp = () => {
             <button className="toolbar-btn" onClick={handleCopy}>
               📋 复制
             </button>
-            <button className="toolbar-btn" onClick={pinToDesktop} title="钉到桌面（置顶显示，可拖动缩放）">
-              📌 钉图
-            </button>
             <button className="toolbar-btn save-btn" onClick={handleSave}>
               💾 保存
             </button>
           </div>
         </div>
-        <div className="editor-canvas-area" style={{ display: 'flex' }}>
-          <LayerPanel />
-          <div className="editor-canvas" style={{ flex: 1 }}>
+        <div className="editor-canvas-area">
+          <div className="editor-canvas">
             <AnnotationCanvas
               ref={canvasRef}
               imageData={current.dataUrl}
@@ -800,6 +675,15 @@ export const EnhancedScreenshotApp = () => {
           <div className="history-title">
             <span>📸</span>
             <span>历史截图</span>
+            {history.length > 0 && (
+              <button
+                className="history-clear-btn"
+                onClick={handleClearHistory}
+                title="清空全部历史"
+              >
+                清空
+              </button>
+            )}
           </div>
           {history.length === 0 ? (
             <div className="empty-history">
@@ -812,7 +696,6 @@ export const EnhancedScreenshotApp = () => {
                 <div
                   key={h.id}
                   className="history-item"
-                  style={{ position: 'relative' }}
                   role="button"
                   tabIndex={0}
                   aria-label={`查看截图 ${new Date(h.createdAt).toLocaleString()}`}
@@ -824,37 +707,27 @@ export const EnhancedScreenshotApp = () => {
                     }
                   }}
                 >
-                  <LazyHistoryThumb id={h.id} dataUrl={h.dataUrl || undefined} alt="screenshot" />
+                  <LazyHistoryThumb dataUrl={h.dataUrl} alt="screenshot" />
                   <div className="history-item-overlay">
                     <span>{new Date(h.createdAt).toLocaleString()}</span>
                   </div>
                   <button
+                    className="history-del-btn"
+                    title="删除该截图"
+                    aria-label="删除该截图"
                     onClick={(e) => {
                       e.stopPropagation();
-                      deleteHistory(h.id);
+                      handleDeleteHistory(h.id);
                     }}
-                    title="删除此截图"
-                    aria-label="删除此截图"
-                    style={{
-                      position: 'absolute',
-                      top: 6,
-                      right: 6,
-                      width: 26,
-                      height: 26,
-                      borderRadius: 6,
-                      border: 'none',
-                      background: 'rgba(0,0,0,0.65)',
-                      color: '#fff',
-                      fontSize: 14,
-                      cursor: 'pointer',
-                      padding: 0,
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      zIndex: 5,
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.stopPropagation();
+                        e.preventDefault();
+                        handleDeleteHistory(h.id);
+                      }
                     }}
                   >
-                    ✕
+                    🗑
                   </button>
                 </div>
               ))}
@@ -881,98 +754,6 @@ export const EnhancedScreenshotApp = () => {
         <div className={`toast toast-${toastType}`}>
           <span className="toast-icon">{toastType === 'error' ? '!' : '✓'}</span>
           <span className="toast-msg">{toast}</span>
-        </div>
-      )}
-      {capturedPreview && (
-        <div
-          style={{
-            position: 'fixed',
-            bottom: 24,
-            left: '50%',
-            transform: 'translateX(-50%)',
-            display: 'flex',
-            alignItems: 'center',
-            gap: 12,
-            background: 'rgba(28,28,30,0.92)',
-            backdropFilter: 'blur(20px)',
-            WebkitBackdropFilter: 'blur(20px)',
-            padding: '10px 14px',
-            borderRadius: 14,
-            boxShadow: '0 8px 32px rgba(0,0,0,0.35)',
-            zIndex: 80,
-            border: '1px solid rgba(255,255,255,0.1)',
-          }}
-        >
-          <img
-            src={capturedPreview.dataUrl}
-            alt="captured"
-            style={{ height: 48, borderRadius: 6, border: '1px solid rgba(255,255,255,0.15)' }}
-          />
-          <div style={{ display: 'flex', gap: 6 }}>
-            <button
-              onClick={async () => {
-                try {
-                  await invoke('copy_to_clipboard', { image_data: capturedPreview.dataUrl });
-                  flash('已复制', 'success');
-                } catch (e) {
-                  flash('复制失败：' + String(e), 'error');
-                }
-              }}
-              style={cabBtn}
-            >
-              📋 复制
-            </button>
-            <button
-              onClick={() => pinImage(capturedPreview.dataUrl, capturedPreview.width, capturedPreview.height)}
-              style={cabBtn}
-            >
-              📌 钉图
-            </button>
-            <button
-              onClick={async () => {
-                const p = await save({
-                  defaultPath: `snapcraft-${Date.now()}.png`,
-                  filters: [{ name: 'PNG Image', extensions: ['png'] }],
-                });
-                if (!p) return;
-                try {
-                  await invoke('save_screenshot', { image_data: capturedPreview.dataUrl, file_path: p });
-                  flash('已保存', 'success');
-                } catch (e) {
-                  flash('保存失败：' + String(e), 'error');
-                }
-              }}
-              style={cabBtn}
-            >
-              💾 保存
-            </button>
-            <button
-              onClick={() => {
-                setCapturedPreview(null);
-                setCurrentView('edit');
-              }}
-              style={cabBtn}
-            >
-              ✏️ 编辑
-            </button>
-            <button
-              onClick={() => {
-                setCapturedPreview(null);
-                doCapture(lastCaptureKind);
-              }}
-              style={cabBtn}
-            >
-              🔄 重截
-            </button>
-            <button
-              onClick={() => setCapturedPreview(null)}
-              title="丢弃"
-              aria-label="丢弃"
-              style={{ ...cabBtn, width: 32, padding: 0 }}
-            >
-              ✕
-            </button>
-          </div>
         </div>
       )}
       {permissionNeeded && (

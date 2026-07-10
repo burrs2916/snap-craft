@@ -236,6 +236,62 @@ body {
   gap: 8px;
 }
 
+.history-clear-btn {
+  margin-left: auto;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-sub);
+  background: var(--surface-strong);
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  padding: 5px 12px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.history-clear-btn:hover {
+  color: #ff453a;
+  border-color: #ff453a;
+  background: rgba(255, 69, 58, 0.08);
+}
+
+.history-del-btn {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  line-height: 1;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.55);
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  opacity: 0;
+  transform: translateY(-2px);
+  transition: all 0.2s ease;
+  z-index: 2;
+}
+
+.history-item:hover .history-del-btn,
+.history-del-btn:focus-visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.history-del-btn:hover {
+  background: #ff453a;
+}
+
+.history-del-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
 .history-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
@@ -772,31 +828,10 @@ body {
 .display-pick-name {
   font-size: 14px;
   font-weight: 600;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.display-pick-scale {
-  font-size: 11px;
-  font-weight: 600;
-  padding: 1px 7px;
-  border-radius: 999px;
-  background: var(--accent);
-  color: var(--accent-contrast, #fff);
-  font-variant-numeric: tabular-nums;
 }
 
 .display-pick-res {
-  font-size: 15px;
-  font-weight: 700;
-  color: var(--text);
-  font-variant-numeric: tabular-nums;
-  letter-spacing: 0.3px;
-}
-
-.display-pick-sub {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--text-sub);
   font-variant-numeric: tabular-nums;
 }

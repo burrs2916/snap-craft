@@ -3,9 +3,7 @@ mod commands;
 mod store;
 
 use tauri::Emitter;
-use tauri_plugin_global_shortcut::{
-    Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState,
-};
+use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
 /// 将快捷键映射为对应的截图事件名（无匹配则返回 None）
 fn shortcut_to_event(key: Code, mods: Modifiers) -> Option<&'static str> {
@@ -73,13 +71,11 @@ pub fn run() {
             commands::edit::copy_to_clipboard,
             commands::history::get_history,
             commands::history::add_history,
-            commands::history::get_history_image,
             commands::history::delete_history,
             commands::history::clear_history,
             get_platform,
             commands::capture::check_screen_capture_access,
             commands::capture::open_screen_recording_settings,
-            commands::capture::apply_window_stealth,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
