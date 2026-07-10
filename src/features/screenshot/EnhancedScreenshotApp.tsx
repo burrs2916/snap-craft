@@ -137,8 +137,11 @@ export const EnhancedScreenshotApp = () => {
   const [permissionNeeded, setPermissionNeeded] = useState(false);
   // 权限检查中：platform 未确定或正在 check/request 期间，避免 UI 闪烁
   const [permissionChecking, setPermissionChecking] = useState(true);
-  // 开发模式（tauri dev）跑的是裸二进制，macOS 不会把它列入 TCC「屏幕录制」列表，
-  // 因此无法在系统设置里出现/授权；只有 build 出的 .app 才会被系统登记到权限列表。
+  // 前端构建模式：vite dev 提供前端时 import.meta.env.DEV 为 true。
+  // 注意：此前 tauri dev 跑裸二进制、进不了 TCC；现已改为 start.sh dev
+  // 把 dev 编译的二进制包成真正的 .app（Bundle ID com.snap-craft.app.dev，
+  // 显示名「SnapCraft (dev)」），因此同样能进 TCC 列表、能授权屏幕录制，
+  // 与 release 的权限流程完全一致。isDev 仅用于文案提示，不再决定"能否授权"。
   const isDev = (import.meta as any).env?.DEV === true;
 
   const {
@@ -931,10 +934,10 @@ export const EnhancedScreenshotApp = () => {
             <div className="permission-text">
               {isDev ? (
                 <>
-                  当前以 <b>开发模式</b> 运行，macOS 可能尚未将 SnapCraft 登记到权限列表。
-                  请先尝试打开系统设置查看；若列表中没有 SnapCraft，请执行{' '}
-                  <code className="kbd">pnpm tauri build</code> 后运行打包好的{' '}
-                  <b>SnapCraft.app</b>。
+                  当前以 <b>开发模式（dev .app）</b> 运行，已具备完整 .app 结构，
+                  与正式版一样可直接授权屏幕录制。点一次「全屏截图」系统会弹出
+                  授权请求（允许即可），或在下方打开系统设置找到{' '}
+                  <b>SnapCraft（dev）</b> 打开开关，然后点「已授权？刷新」。
                 </>
               ) : (
                 <>

@@ -248,7 +248,7 @@ start_dev() {
 ────────────────────────────────────────────
 ✅ 已以 .app 形式打开（开发模式：前端走 vite HMR，改 UI 即时生效）
 👉 首次使用请点一次「全屏截图」，会弹出系统「屏幕录制」授权，点「允许」。
-👉 之后去 系统设置 → 隐私与安全性 → 屏幕录制，即可看到 SnapCraft 且开关已开。
+👉 之后去 系统设置 → 隐私与安全性 → 屏幕录制，即可看到 SnapCraft（dev）且开关已开。
 👉 改了 Rust 代码需重跑 ./start.sh dev；改前端走 vite HMR，无需重开。
 👉 截屏问题查 logs/dev.log（已注入全链路诊断日志）。
 👉 重置 dev .app 权限：tccutil reset All com.snap-craft.app.dev
@@ -325,7 +325,7 @@ open_snapcraft_app() {
 ────────────────────────────────────────────
 ✅ 已打开 SnapCraft.app
 👉 首次使用请点一次「全屏截图」，会弹出系统「屏幕录制」授权请求，点「允许」。
-👉 之后去 系统设置 → 隐私与安全性 → 屏幕录制，就能看到 SnapCraft 且开关已开。
+👉 之后去 系统设置 → 隐私与安全性 → 屏幕录制，就能看到 SnapCraft（dev）且开关已开。
 👉 若之前卡住：bash start.sh reset  再重新截图授权。
 ────────────────────────────────────────────
 EOF
@@ -354,8 +354,8 @@ build_dev_app_bundle() {
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleName</key><string>SnapCraft</string>
-    <key>CFBundleDisplayName</key><string>SnapCraft</string>
+    <key>CFBundleName</key><string>SnapCraft (dev)</string>
+    <key>CFBundleDisplayName</key><string>SnapCraft (dev)</string>
     <key>CFBundleIdentifier</key><string>$id</string>
     <key>CFBundleExecutable</key><string>SnapCraft</string>
     <key>CFBundlePackageType</key><string>APPL</string>
