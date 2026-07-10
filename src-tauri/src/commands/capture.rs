@@ -545,8 +545,7 @@ pub fn list_displays() -> Vec<DisplayInfo> {
         }
         let main = unsafe { CGMainDisplayID() };
         let mut out = Vec::new();
-        for i in 0..count as usize {
-            let d = displays[i];
+        for (i, &d) in displays.iter().take(count as usize).enumerate() {
             let b = unsafe { CGDisplayBounds(d) };
             // 真实物理像素（截图实际抓到的分辨率）
             let px_w = unsafe { CGDisplayPixelsWide(d) } as u32;
@@ -638,7 +637,7 @@ pub fn apply_window_stealth(app: tauri::AppHandle, label: String) -> Result<(), 
         let ns_win = window
             .ns_window()
             .map_err(|e| format!("获取 NSWindow 失败: {}", e))?;
-        set_nswindow_sharing_none(ns_win as *mut std::ffi::c_void);
+        set_nswindow_sharing_none(ns_win);
     }
 
     #[cfg(windows)]

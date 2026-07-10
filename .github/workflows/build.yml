@@ -25,6 +25,7 @@ jobs:
   typecheck:
     name: TypeScript Check
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
@@ -49,22 +50,30 @@ jobs:
   # ============================================================
   cargo-check:
     name: Cargo Check
-    runs-on: windows-latest
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install Linux system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev \
+            build-essential curl wget file libssl-dev \
+            libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
 
-      - name: Cache Cargo registry
+      - name: Cache Cargo
         uses: actions/cache@v4
         with:
           path: |
-            C:\Users\runneradmin\.cargo\registry
-            C:\Users\runneradmin\.cargo\git
-            src-tauri\target
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
           key: ${{ runner.os }}-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-
@@ -73,8 +82,8 @@ jobs:
         run: cargo check
         working-directory: src-tauri
 
-      - name: Cargo clippy (warnings only)
-        run: cargo clippy --all-targets -- -W clippy::all
+      - name: Cargo clippy
+        run: cargo clippy --all-targets -- -D warnings
         working-directory: src-tauri
 
   # ============================================================
@@ -102,6 +111,7 @@ jobs:
             artifact: windows-x64
 
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -125,7 +135,7 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Cache Cargo registry (non-Windows)
+      - name: Cache Cargo (non-Windows)
         if: runner.os != 'Windows'
         uses: actions/cache@v4
         with:
@@ -137,7 +147,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-${{ matrix.target }}-cargo-
 
-      - name: Cache Cargo registry (Windows)
+      - name: Cache Cargo (Windows)
         if: runner.os == 'Windows'
         uses: actions/cache@v4
         with:
@@ -149,25 +159,11 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-${{ matrix.target }}-cargo-
 
-      # ---- Linux system deps ----
-      - name: Install Linux system dependencies
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev \
-            build-essential curl wget file libssl-dev \
-            libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev
-
-      # ---- Windows: Strawberry Perl (needed to build OpenSSL) ----
-      - name: Install Strawberry Perl (Windows)
-        if: runner.os == 'Windows'
-        run: choco install strawberryperl -y
-
       # ---- Build & Bundle with tauri-action ----
       # macOS uses ad-hoc signing (tauri.conf.json: signingIdentity: "-"),
       # so NO Apple certificate / notarization is required in CI.
-      # ⚠️ Do NOT set APPLE_* env vars here — empty values trigger notarization
-      #    and break the DMG bundling step (same trap we hit locally).
+      # Do NOT set APPLE_* env vars here - empty values trigger notarization
+      # and break the DMG bundling step.
       - name: Build Tauri App
         uses: tauri-apps/tauri-action@v0
         env:
@@ -176,30 +172,25 @@ jobs:
           tagName: v__VERSION__
           releaseName: 'SnapCraft v__VERSION__'
           releaseBody: |
-            ## 📦 SnapCraft v__VERSION__
+            ## SnapCraft v__VERSION__
 
-            ### 🍎 macOS (Apple Silicon)
+            ### macOS (Apple Silicon)
             Download `SnapCraft_*.dmg`, double-click to mount, then drag
-            **SnapCraft** into the Applications folder. Done — no unzip needed.
-            First launch may be blocked by Gatekeeper (ad-hoc signed, no paid cert):
-            right-click → **Open**, or run once:
+            **SnapCraft** into the Applications folder.
+            First launch may be blocked by Gatekeeper (ad-hoc signed):
+            right-click -> **Open**, or run once:
             `sudo xattr -dr com.apple.quarantine /Applications/SnapCraft.app`
             On first screenshot, grant **Screen Recording** in
-            System Settings › Privacy & Security.
+            System Settings > Privacy & Security.
 
-            ### 🪟 Windows
+            ### Windows
             Download `SnapCraft_*.msi` and double-click to install. Unsigned build,
-            so SmartScreen may warn — choose "More info → Run anyway" for testing.
-
-            ### 🐧 Linux
-            Not built in CI (Windows + macOS only, per project scope).
-          # Only publish a GitHub Release when a version tag is pushed,
-          # so the Release page holds clean, un-wrapped .dmg / .msi files.
+            so SmartScreen may warn - choose "More info -> Run anyway".
           releaseDraft: ${{ startsWith(github.ref, 'refs/tags/v') }}
           prerelease: ${{ !startsWith(github.ref, 'refs/tags/v') }}
           args: --target ${{ matrix.target }}
 
-      # ---- Upload build artifacts (one installable file per platform) ----
+      # ---- Upload build artifacts ----
       - name: Upload artifacts (macOS)
         if: startsWith(matrix.platform, 'macOS')
         uses: actions/upload-artifact@v4
@@ -215,12 +206,3 @@ jobs:
           name: ${{ matrix.artifact }}
           path: |
             src-tauri/target/${{ matrix.target }}/release/bundle/msi/*.msi
-
-      - name: Upload artifacts (Linux)
-        if: matrix.platform == 'Linux'
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.artifact }}
-          path: |
-            src-tauri/target/${{ matrix.target }}/release/bundle/deb/*.deb
-            src-tauri/target/${{ matrix.target }}/release/bundle/appimage/*.AppImage
