@@ -182,7 +182,7 @@ xcrun notarytool store-credentials "snapcraft-notary" \
 {
   "bundle": {
     "macOS": {
-      "entitlements": "Entitlements.plist",
+      "entitlements": "entitlements/app.entitlements",
       "infoPlist": "Info.plist",
       "signingIdentity": "Apple Distribution: 你的名字 (TEAMID)",
       "providerShortName": "TEAMID",
@@ -192,6 +192,8 @@ xcrun notarytool store-credentials "snapcraft-notary" \
   }
 }
 ```
+
+> **注**:M1-06 起,entitlements 路径已从 `Entitlements.plist`(项目根)改为 `entitlements/app.entitlements`(标准化目录)。Helper 进程的 entitlements 由 `entitlements/helper.entitlements` 自动识别,**无需在 `tauri.conf.json` 写两次**——详见 §9。
 
 > ⚠️ `signingIdentity` **只在 App Store 上架构建时**才设;dev 构建(`./start.sh dev`)仍用本地自签名(`-` 或 `SnapCraft Local`)。
 
@@ -258,3 +260,78 @@ xcrun notarytool store-credentials "snapcraft-notary" \
 - App Store Connect 帮助:https://developer.apple.com/help/app-store-connect/
 - 证书管理:https://developer.apple.com/help/account/manage-certificates/
 - Notarization 流程:https://developer.apple.com/documentation/security/notarizing_macos_software_before_distribution
+
+---
+
+## 9. Helper 进程沙箱说明（M1.5 增补）
+
+Tauri 2 在 macOS 上把**主 App** 和**辅助进程（Helper）** 拆成两个独立的 Mach-O 二进制：
+
+| 进程 | 作用 | 入口可执行文件 | 沙箱 |
+|------|------|----------------|------|
+| **主 App** | UI / 截屏 / 编辑 / 设置面板 | `SnapCraft.app/Contents/MacOS/SnapCraft` | **开启**（App Store 强制） |
+| **Helper**（`snap-craft-helper`） | 全局快捷键（`global-shortcut` 插件） / 托盘菜单 / IPC 桥 | `SnapCraft.app/Contents/MacOS/snap-craft-helper` | **关闭**（见下） |
+
+### 9.1 为什么 Helper 不能开 App Sandbox
+
+Tauri 2 的 `tauri-plugin-global-shortcut` 需要在 Helper 进程内注册 **Carbon `RegisterEventHotKey`**（macOS 14+）或调用 **CGEventPost** 来派发全局快捷键。这两类 API 都需要进程：
+
+- 拥有 **Input Monitoring** 权限（TCC `Privacy_ListenEvent`）
+- 能直接读 / 写 **用户会话级 Mach 端口**（WindowServer / launchd）
+
+> **App Sandbox 会**:
+> 1. 拒绝 `RegisterEventHotKey`(无 Input Monitoring 即报错 -50)
+> 2. 把 Helper 进程困在沙箱容器内,无法跨进程边界派发系统级快捷键事件
+>
+> 这是 Tauri 官方已知问题,见 [tauri-apps/tauri#4840](https://github.com/tauri-apps/tauri/issues/4840) 与 [tauri-apps/plugins-workspace#1357](https://github.com/tauri-apps/plugins-workspace/issues/1357)。
+
+### 9.2 Helper 进程的 entitlements 在哪里
+
+```
+src-tauri/
+├── entitlements/
+│   ├── app.entitlements         # 主 App 沙箱 + 5 项权限
+│   └── helper.entitlements      # Helper: 无沙箱 + com.apple.security.cs.allow-jit + ...
+└── tauri.conf.json
+        # bundle.macOS.entitlements → entitlements/app.entitlements
+        # (Helper 的 entitlements 由 tauri build 自动从 helper.entitlements 读取,无需在 conf 写两次)
+```
+
+`helper.entitlements` 当前内容(完整):
+
+```xml
+<dict>
+    <key>com.apple.security.cs.allow-jit</key><true/>
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key><true/>
+    <key>com.apple.security.cs.disable-library-validation</key><true/>
+    <key>com.apple.security.network.client</key><true/>
+    <key>com.apple.security.files.user-selected.read-write</key><true/>
+</dict>
+```
+
+| key | 用途 |
+|-----|------|
+| `cs.allow-jit` | 让 V8 引擎(若用 Node 插件)能 JIT 编译代码 |
+| `cs.allow-unsigned-executable-memory` | 允许 W^X 内存(同上) |
+| `cs.disable-library-validation` | 允许加载未签名 dylib(开发期常用,正式版可关) |
+| `network.client` | AI 助手的出站 HTTP(用户启用 AI 时才用) |
+| `files.user-selected.read-write` | 用户通过 NSOpenPanel 选中的文件 |
+
+### 9.3 提交 App Store 审核时如何说明
+
+Apple 审核员看到 Helper **不开启 App Sandbox** 会触发 Guideline 2.4.5 警告(必须**主动说明**,否则可能拒批)。建议在 App Store Connect 的 **App Review Information → Notes** 字段里写:
+
+> SnapCraft uses a Tauri 2 helper process (`snap-craft-helper`) to register global keyboard shortcuts (`⌘⇧1` / `⌘⇧2` / `⌘⇧3` / `⌘⇧4`) and manage the macOS menu bar tray icon. The helper intentionally runs **without** the App Sandbox because:
+>
+> 1. macOS Carbon `RegisterEventHotKey` API requires Input Monitoring entitlement, which conflicts with the App Sandbox container.
+> 2. The Tauri project tracks this as a known limitation: [tauri-apps/tauri#4840](https://github.com/tauri-apps/tauri/issues/4840).
+> 3. The helper has no user-facing UI of its own and is fully controlled by the main sandboxed app via XPC.
+>
+> Hardened Runtime (`--options runtime`) is enabled on both the main app and the helper, and the helper is notarized together with the main app. The helper's entitlements are minimal (`allow-jit` / `allow-unsigned-executable-memory` / `disable-library-validation` / `network.client` / `files.user-selected.read-write`) — no `app-sandbox`, no TCC bypasses, no system-wide file access.
+
+### 9.4 历史说明:为什么删了 `src-tauri/Entitlements.plist`
+
+M1-06 之前,整个项目只有一个 `src-tauri/Entitlements.plist`(root 级别),内容是早期 dev 模式临时写的 `app-sandbox = false`。M1-06 改为 `src-tauri/entitlements/app.entitlements` + `helper.entitlements` 双文件结构后,**旧 `Entitlements.plist` 已被 `tauri build` 忽略**(它在 `bundle.macOS.entitlements` 路径下找不到),但留在仓库里容易让维护者混淆"哪个才是真的"。
+
+M1.5 (Patch-2) 删除该文件以消除歧义。如果回退到 M1-06 之前,需用 `git log --diff-filter=D -- src-tauri/Entitlements.plist` 找回。
+
