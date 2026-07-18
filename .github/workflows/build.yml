@@ -175,7 +175,6 @@ jobs:
           #  check lives here instead of in the `if:` condition)
           if [ -z "${CERT_BASE64:-}" ]; then
             echo "APPLE_CERTIFICATE_BASE64 not set - skipping certificate import; build will use ad-hoc signing."
-            printf 'RESOLVED_SIGNING_IDENTITY=\n' >> "$GITHUB_ENV"
             exit 0
           fi
 
@@ -247,20 +246,26 @@ jobs:
 
       # ==========================================================
       # macOS: 直接构建 (签名走自建 keychain, 不再依赖 tauri-action)
-      # 当 APPLE_CERTIFICATE_BASE64 缺失时 RESOLVED_SIGNING_IDENTITY 为空,
-      # tauri-bundler 自动 ad-hoc 签名, 保证出包不崩。
+      # 无证书时导入步骤不写 RESOLVED_SIGNING_IDENTITY（变量保持 unset）,
+      # 本步据此「不导出 APPLE_SIGNING_IDENTITY」→ tauri-bundler 自动 ad-hoc 签名,
+      # 保证出包不崩。有证书时导入步骤写出真实 identity, 本步据以导出。
       # ==========================================================
       - name: Build Tauri App (macOS)
         if: ${{ startsWith(matrix.platform, 'macOS') }}
         shell: bash
         env:
-          APPLE_SIGNING_IDENTITY: ${{ env.APPLE_SIGNING_IDENTITY }}
+          RESOLVED_SIGNING_IDENTITY: ${{ env.RESOLVED_SIGNING_IDENTITY }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           set -euo pipefail
-          echo "Building for aarch64-apple-darwin (signing identity: '${APPLE_SIGNING_IDENTITY:-<ad-hoc>}')"
+          if [ -n "${RESOLVED_SIGNING_IDENTITY:-}" ]; then
+            echo "Using signing identity: ${RESOLVED_SIGNING_IDENTITY}"
+            export APPLE_SIGNING_IDENTITY="${RESOLVED_SIGNING_IDENTITY}"
+          else
+            echo "No signing identity resolved — tauri will ad-hoc sign (unsigned for distribution)."
+          fi
           pnpm tauri build --target aarch64-apple-darwin
 
       # ==========================================================
@@ -348,13 +353,18 @@ jobs:
       # 使用 @choochmeque/tauri-windows-bundle 从已编译的 exe 生成 MSIX 包
       - name: Build MSIX package (Windows)
         if: matrix.platform == 'Windows'
+        continue-on-error: true   # 仅微软商城用；当前无 Store 证书/未 init,本步会失败,但不阻塞主产物(MSI/NSIS/portable)
         shell: pwsh
         run: |
-          Write-Host "=== Building MSIX package ==="
-          # 安装 msixbundle-cli（若未安装）
-          cargo install msixbundle-cli 2>&1 | Out-Null
-          # 使用 tauri-windows-bundle 生成 MSIX
-          npx @choochmeque/tauri-windows-bundle@latest build --runner pnpm 2>&1
+          Write-Host "=== Building MSIX package (best-effort, Microsoft Store submission only) ==="
+          # 安装 msixbundle-cli（若未安装）。保留输出现场以便排查,不静默丢弃。
+          cargo install msixbundle-cli 2>&1 | Out-Host
+          # 使用 tauri-windows-bundle 生成 MSIX（固定版本,避免 @latest 供应链漂移）
+          npx @choochmeque/tauri-windows-bundle@0.1.28 build --runner pnpm 2>&1
+          if ($LASTEXITCODE -ne 0) {
+            echo "::warning::MSIX build failed (needs 'tauri-windows-bundle init' + Microsoft Store cert). Non-fatal — MSI/NSIS/portable artifacts are unaffected."
+            exit 0
+          }
           # 列出 MSIX 产物
           Write-Host "=== MSIX output ==="
           Get-ChildItem -Path "src-tauri/target" -Recurse -Include "*.msix","*.msixbundle" -ErrorAction SilentlyContinue | ForEach-Object {
