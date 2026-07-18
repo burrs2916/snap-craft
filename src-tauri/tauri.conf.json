@@ -45,9 +45,18 @@
     "shortDescription": "AI-first cross-platform screenshot tool with editor, OCR, and document generation",
     "longDescription": "SnapCraft is a privacy-first screenshot tool that combines full screen / region / window / scrolling capture with an editor-grade annotation suite, system-native OCR, and an AI assistant that turns your screenshots into Markdown, DOCX, PPTX, XLSX, HTML, or PDF documents — entirely on your machine by default.",
     "icon": [
+      "icons/16x16.png",
+      "icons/16x16@2x.png",
       "icons/32x32.png",
+      "icons/32x32@2x.png",
+      "icons/64x64.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
+      "icons/256x256.png",
+      "icons/256x256@2x.png",
+      "icons/512x512.png",
+      "icons/512x512@2x.png",
+      "icons/1024x1024.png",
       "icons/icon.icns",
       "icons/icon.ico"
     ],
