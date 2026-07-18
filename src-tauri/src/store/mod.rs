@@ -12,6 +12,25 @@ pub struct HistoryItem {
     pub created_at: String,
     pub width: u32,
     pub height: u32,
+    // 来源标记：'capture'=本机截图，'clipboard'=从系统剪贴板读取的图片。
+    // serde(default) 保证旧 history.json（无此字段）仍能安全加载，不会清空历史。
+    #[serde(default)]
+    pub source: String,
+    // 标注 JSON（AnnotationObject[] 的 JSON 字符串）。空字符串=无标注。
+    // serde(default) 保证旧 history.json 缺此字段也能安全加载。
+    #[serde(default)]
+    pub annotations: String,
+    // OCR 识别文字（纯文本）。空字符串=尚未识别或识别无结果。
+    // serde(default) 保证旧 history.json 缺此字段也能安全加载，且独立编辑窗重开时可直接回显，
+    // 避免「剪贴板图片 OCR 后关窗重开文字丢失、必须重识别」的体验断层。
+    #[serde(default)]
+    pub ocr_text: String,
+    // OCR 完整结果（含每块归一化 bbox 与置信度，JSON 字符串）。
+    // 与 ocr_text 平级：纯文本是「快读/搜索」用，本字段是「重开取字/二次编辑」用。
+    // 空字符串 = 旧版本未持久化 / 旧截图未带坐标；前端用「全幅占位」回退。
+    // serde(default) 保证向后兼容。
+    #[serde(default)]
+    pub ocr_blocks_json: String,
 }
 
 const DATA_URL_PREFIX: &str = "data:image/png;base64,";

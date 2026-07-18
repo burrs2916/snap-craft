@@ -1,118 +1,114 @@
 # SnapCraft
 
-A premium cross-platform screenshot tool built with Tauri 2, React, and Konva.js.
+A premium cross-platform screenshot tool built with **Tauri 2 + React 18 + Konva.js**, with system-native capture and OCR. macOS is the primary target (Windows / Linux supported).
 
 ## ✨ Features
 
-- **Multiple Capture Modes**: Full screen, region, window, and scrolling capture
-- **Annotation Tools**: Arrow, text, mosaic, crop, and more
-- **OCR Recognition**: Extract text from screenshots with Tesseract.js
-- **Screenshot History**: Manage and search your screenshot history
-- **Keyboard Shortcuts**: Global shortcuts for quick capture
-- **Cross-Platform**: Runs on macOS, Windows, and Linux
-- **Premium Experience**: Smooth animations, glass morphism, and premium UI design
+- **Multiple Capture Modes**: Full screen (multi-display picker), region, window, and scrolling long-capture
+- **Rich Annotation**: 10 tools — select, arrow, line, rectangle, ellipse, text, pen, highlighter, mosaic, numbered step
+- **System-Native OCR**: Extract text using the OS engine — Apple Vision on macOS, WinRT `Windows.Media.Ocr` on Windows. Zero JS/OCR runtime dependency.
+- **Screenshot History**: Add / view / delete / clear your capture history
+- **Pin to Screen**: Pin any capture as a floating always-on-top window
+- **Global Shortcuts**: System-wide hotkeys for instant capture
+- **Cross-Platform**: macOS, Windows, and Linux
+- **Theme**: Light / Dark / Follow-system, with no-flash (FOUC-free) initial paint
 
 ## 🎯 Core Features
 
-### Screenshot Modes
-- **Full Screen**: Capture the entire screen
-- **Region**: Select a custom region to capture
-- **Window**: Capture a specific window
-- **Scrolling**: Capture long scrolling content
+### Capture Modes
+- **Full Screen**: Capture an entire display; on multi-monitor setups an in-app centered picker appears
+- **Region**: Interactive crosshair selection
+- **Window**: Click a target window to capture it
+- **Scrolling**: Capture long scrolling content with automatic frame stitching
+
+> On macOS, capture uses the system-native `screencapture` (`-x` full / `-i` region / `-w` window) — no custom transparent overlay, which proved unreliable across multi-display + negative-coordinate layouts. Windows / Linux use `xcap` with dedicated region/window overlays.
 
 ### Annotation Tools
-- **Arrow**: Draw arrows to point out important areas
-- **Text**: Add text annotations
-- **Mosaic**: Blur sensitive information
-- **Crop**: Crop the screenshot
-- **Shape**: Draw rectangles, circles, and other shapes
+Select · Arrow · Line · Rectangle · Ellipse · Text · Pen · Highlighter · Mosaic · Numbered step.
+Styling: 6-color palette, 4 stroke widths, text size / bold / background plate, and privacy masking (mosaic or Gaussian blur with adjustable strength). Full undo / redo (snapshot stack, up to 50 steps).
 
-### Additional Features
-- **OCR**: Recognize text from screenshots
-- **Copy to Clipboard**: Quick copy to clipboard
-- **Save Locally**: Save to custom path
-- **History Management**: Search and manage screenshot history
-- **Keyboard Shortcuts**: Customizable global shortcuts
+### Export & More
+- **Copy to Clipboard**
+- **Save Locally** (path picker)
+- **Pin Window** — floating, borderless, always-on-top, draggable, proportional resize
+- **OCR** — one-click text recognition via the OS-native engine
+- **History Management**
 
 ## 🛠️ Tech Stack
 
 ### Frontend
 - React 18 + TypeScript
-- Vite 6
-- Konva.js (Canvas editing)
-- Zustand (state management)
-- MUI (UI components)
+- Vite 6 (build split into `index` / `vendor-react` / `vendor-konva` chunks)
+- Konva.js + react-konva (annotation canvas)
+- Zustand (state management + undo/redo)
+- Hand-written CSS (no UI framework)
 
-### Backend
-- Tauri 2 (Rust)
-- Global shortcuts plugin
-- File system plugin
-- Clipboard plugin
+### Backend (Rust · Tauri 2)
+- `tauri-plugin-global-shortcut` — global hotkeys
+- `tauri-plugin-dialog` — native file dialogs
+- `xcap` — cross-platform capture (Windows / Linux)
+- `apple-vision` — macOS OCR (compile-time bound; zero user setup)
+- Windows OCR via system PowerShell 5.1 → WinRT `Windows.Media.Ocr` (no `windows` crate)
 
 ## 📦 Installation
 
 ### Prerequisites
-
 - Node.js 20+
 - pnpm 8+
 - Rust stable
-- Tauri 2 prerequisites (see [Tauri docs](https://tauri.app/v2/guides/getting-started/prerequisites))
+- Tauri 2 prerequisites (see [Tauri docs](https://tauri.app/start/prerequisites/))
 
 ### Development
+
+> **macOS note**: run via `./start.sh dev`, **not** `pnpm tauri dev`. The dev binary is bundled into a real `.app` and code-signed with a local certificate so it registers in the macOS TCC "Screen Recording" list and **retains permission across rebuilds** (an ad-hoc-signed bare binary loses permission on every recompile).
 
 ```bash
 # Install dependencies
 pnpm install
 
-# Run development server
-pnpm tauri dev
+# macOS — recommended dev flow (bundles + signs a dev .app)
+./start.sh dev
 
-# Build for production
-pnpm tauri build
-```
+# One-time: create a local signing certificate (no Apple Developer account needed)
+./start.sh cert
+# then: export SNAP_SIGN_ID="SnapCraft Local"
 
-### Build for Specific Platform
+# Frontend-only dev server (no Tauri shell)
+pnpm dev
 
-```bash
-# macOS
-pnpm tauri build
-
-# Windows
-pnpm tauri build
-
-# Linux
-pnpm tauri build
+# Production build
+pnpm build          # tsc && vite build (frontend)
+pnpm app            # bundle the app via start.sh
+pnpm build:local    # scripts/build-local.sh
 ```
 
 ## 📝 Usage
 
-1. **Launch SnapCraft**
-2. **Use keyboard shortcut** (default: `Cmd/Ctrl + Shift + S`) to start capture
-3. **Select capture mode** from the toolbar
-4. **Annotate** your screenshot with the annotation tools
-5. **Save or copy** your screenshot
+1. **Launch SnapCraft** (grant Screen Recording permission on first run — a system prompt appears before the window hides)
+2. **Press a global shortcut** to start capture
+3. **Pick a mode** or use the mode-specific shortcut
+4. **Annotate** with the toolbar tools
+5. **Save / Copy / Pin / OCR** the result
 
-## ⌨️ Default Keyboard Shortcuts
+## ⌨️ Default Global Shortcuts
 
-- **Capture**: `Cmd/Ctrl + Shift + S`
-- **Full Screen**: `Cmd/Ctrl + Shift + 1`
-- **Region**: `Cmd/Ctrl + Shift + 2`
-- **Window**: `Cmd/Ctrl + Shift + 3`
-- **Save**: `Cmd/Ctrl + S`
-- **Copy**: `Cmd/Ctrl + C`
+| Action | macOS | Windows / Linux |
+|---|---|---|
+| Capture (default mode) | ⌘⇧S | Ctrl+Shift+S |
+| Full Screen | ⌘⇧1 | Ctrl+Shift+1 |
+| Region | ⌘⇧2 | Ctrl+Shift+2 |
+| Window | ⌘⇧3 | Ctrl+Shift+3 |
+| Scrolling | ⌘⇧4 | Ctrl+Shift+4 |
+| Quit | ⌘Q | Ctrl+Q |
 
 ## 🎨 UI Design
 
-SnapCraft features a premium UI design with:
-- **Glass morphism effects**
-- **Smooth animations** (60fps)
-- **Dark/Light/System theme toggle**
-- **Magnetic hover effects**
-- **Responsive design**
+- **Light / Dark / Follow-system** theme with no-flash initial paint
+- Smooth animations and refined micro-interactions
+- System-tray resident with quick actions
 
 ## 🚀 Roadmap
 
-- [ ] Advanced annotation tools (pen, highlighter)
 - [ ] Cloud sync for screenshot history
 - [ ] Video recording
 - [ ] GIF creation

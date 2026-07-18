@@ -1,12 +1,17 @@
 {
   "identifier": "main-window",
   "description": "Capabilities for the main window and region-selection overlay",
-  "windows": ["main", "capture-overlay"],
+  "windows": ["main", "pin-*", "region-overlay", "window-overlay", "editor-*", "ai-panel"],
   "permissions": [
     "core:default",
     "core:event:allow-emit",
+    "core:event:allow-emit-to",
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
     "core:window:allow-create",
     "core:window:allow-close",
+    "core:window:allow-destroy",
+    "core:window:allow-start-dragging",
     "core:window:allow-set-fullscreen",
     "core:window:allow-set-title",
     "core:window:allow-set-focus",
@@ -22,6 +27,7 @@
     "core:window:allow-unmaximize",
     "core:webview:allow-create-webview-window",
     "opener:default",
+    "opener:allow-open-path",
     "dialog:default",
     "global-shortcut:default"
   ]

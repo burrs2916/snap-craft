@@ -11,6 +11,21 @@ interface ScreenshotState {
   activeTool: string | null;
   currentColor: string;
   currentStrokeWidth: number;
+  // 文字样式（新建文字标注时使用；选中文字时同步更新）
+  currentFontSize: number;
+  currentBold: boolean;
+  currentItalic: boolean;
+  currentAlign: 'left' | 'center' | 'right';
+  currentFontFamily: string;
+  currentTextBg: boolean;
+  currentBgColor: string;
+  currentBgOpacity: number;
+  currentTextStroke: boolean;
+  // 打码设置：模式（马赛克/高斯模糊/涂黑遮挡）、强度、画笔半径
+  maskBlur: boolean;
+  maskStrength: number;
+  maskSolid: boolean; // 涂黑遮挡模式
+  maskBrushSize: number; // 画笔打码的笔刷半径
   past: AnnotationObject[][];
   future: AnnotationObject[][];
 
@@ -35,6 +50,19 @@ interface ScreenshotState {
   setActiveTool: (tool: string | null) => void;
   setCurrentColor: (c: string) => void;
   setCurrentStrokeWidth: (w: number) => void;
+  setCurrentFontSize: (s: number) => void;
+  setCurrentBold: (b: boolean) => void;
+  setCurrentItalic: (b: boolean) => void;
+  setCurrentAlign: (a: 'left' | 'center' | 'right') => void;
+  setCurrentFontFamily: (f: string) => void;
+  setCurrentTextBg: (b: boolean) => void;
+  setCurrentBgColor: (c: string) => void;
+  setCurrentBgOpacity: (n: number) => void;
+  setCurrentTextStroke: (b: boolean) => void;
+  setMaskBlur: (b: boolean) => void;
+  setMaskStrength: (s: number) => void;
+  setMaskSolid: (b: boolean) => void;
+  setMaskBrushSize: (s: number) => void;
   clearAnnotations: () => void;
 }
 
@@ -63,6 +91,20 @@ export const useScreenshotStore = create<ScreenshotState>((set, get) => ({
   activeTool: null,
   currentColor: '#ff3b30',
   currentStrokeWidth: 3,
+  currentFontSize: 22,
+  currentBold: false,
+  currentItalic: false,
+  currentAlign: 'left',
+  currentFontFamily:
+    "-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif",
+  currentTextBg: false,
+  currentBgColor: '#1d1d1f',
+  currentBgOpacity: 1,
+  currentTextStroke: false,
+  maskBlur: false,
+  maskStrength: 12,
+  maskSolid: false,
+  maskBrushSize: 20,
   past: [],
   platform: '',
   setPlatform: (p) => set({ platform: p }),
@@ -129,6 +171,19 @@ export const useScreenshotStore = create<ScreenshotState>((set, get) => ({
 
   setCurrentColor: (c) => set({ currentColor: c }),
   setCurrentStrokeWidth: (w) => set({ currentStrokeWidth: w }),
+  setCurrentFontSize: (s) => set({ currentFontSize: s }),
+  setCurrentBold: (b) => set({ currentBold: b }),
+  setCurrentItalic: (b) => set({ currentItalic: b }),
+  setCurrentAlign: (a) => set({ currentAlign: a }),
+  setCurrentFontFamily: (f) => set({ currentFontFamily: f }),
+  setCurrentTextBg: (b) => set({ currentTextBg: b }),
+  setCurrentBgColor: (c) => set({ currentBgColor: c }),
+  setCurrentBgOpacity: (n) => set({ currentBgOpacity: n }),
+  setCurrentTextStroke: (b) => set({ currentTextStroke: b }),
+  setMaskBlur: (b) => set({ maskBlur: b }),
+  setMaskStrength: (s) => set({ maskStrength: s }),
+  setMaskSolid: (b) => set({ maskSolid: b }),
+  setMaskBrushSize: (s) => set({ maskBrushSize: s }),
 
   clearAnnotations: () => set((s) => ({
     annotations: [],

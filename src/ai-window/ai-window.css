@@ -1,0 +1,143 @@
+/* AI 助手独立窗口 —— 布局覆盖层
+   复用 index.css 中 .ai-panel 的全部内部样式，仅把「右侧抽屉」改为「占满整窗」，
+   让 AI 助手在独立窗口里获得完整大空间（原侧边抽屉局促问题的根因修复）。 */
+
+.ai-panel {
+  position: relative;
+  top: auto;
+  right: auto;
+  bottom: auto;
+  left: auto;
+  width: 100%;
+  height: 100%;
+  border-left: none;
+  box-shadow: none;
+}
+
+/* 独立窗口里宽度可以更宽，给长文档/多截图成稿更舒适的空间 */
+.ai-panel-scroll {
+  padding-right: 0;
+}
+
+/* 加载态：上下文从主窗口经临时文件送达前的轻量占位 */
+.aiwin-loading {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  background: var(--surface-solid, #fff);
+  color: var(--text-sub, #888);
+  cursor: grab;
+}
+
+.aiwin-loading:active {
+  cursor: grabbing;
+}
+
+.aiwin-spinner {
+  width: 28px;
+  height: 28px;
+  border: 3px solid var(--border, #ddd);
+  border-top-color: var(--accent, #0a84ff);
+  border-radius: 50%;
+  animation: aiwin-spin 0.8s linear infinite;
+}
+
+.aiwin-loading-text {
+  font-size: 13px;
+}
+
+/* 加载态关闭按钮（decorations:false 下提供窗口关闭出口，避免上下文未达时卡死） */
+.aiwin-loading-close {
+  position: absolute;
+  top: 10px;
+  right: 12px;
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-sub, #888);
+  font-size: 15px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.aiwin-loading-close:hover {
+  background: var(--danger-soft, rgba(255, 59, 48, 0.12));
+  color: var(--danger, #ff3b30);
+}
+
+@keyframes aiwin-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* 独立窗口下，流式弹出框默认不强制铺满（用户已有大空间）；
+   保留可钉住体验，但初始不遮挡主体聊天区 */
+.ai-stream-popup {
+  z-index: 400;
+}
+
+/* ── AI 窗口标题栏（decorations:false 时由 AIPanel 头部充当）──
+   把抽屉头部升级为窗口级标题栏：更舒展的高度、底部细分隔线、不可选中。
+   拖动改用 mousedown → getCurrentWindow().startDragging()（data-tauri-drag-region
+   在 macOS 无边框窗口下常失效，与 PinWindow 一致改手动调用）。 */
+.ai-panel-head--win {
+  height: 46px;
+  padding: 0 14px;
+  border-bottom: 1px solid var(--border, #e3e3e8);
+  background: linear-gradient(180deg, var(--surface-solid, #fff) 0%, var(--surface, #fafafa) 100%);
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: grab;
+}
+
+.ai-panel-head--win:active {
+  cursor: grabbing;
+}
+
+.ai-panel-head--win .ai-panel-title {
+  cursor: default;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+}
+
+/* 深色主题下标题栏背景过渡（复用主题变量，无需改 tauri.conf） */
+:root.dark .ai-panel-head--win,
+.dark .ai-panel-head--win {
+  background: linear-gradient(180deg, #1c1c1e 0%, #161618 100%);
+}
+
+/* 实时联动状态点：绿色脉冲，表明本窗口正与主截图上下文同步 */
+.ai-live-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 8px;
+  border-radius: 50%;
+  background: #34c759;
+  box-shadow: 0 0 0 0 rgba(52, 199, 89, 0.6);
+  animation: ai-live-pulse 1.8s ease-out infinite;
+  vertical-align: middle;
+}
+
+@keyframes ai-live-pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(52, 199, 89, 0.55);
+  }
+  70% {
+    box-shadow: 0 0 0 7px rgba(52, 199, 89, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(52, 199, 89, 0);
+  }
+}
+

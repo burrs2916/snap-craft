@@ -2,8 +2,6 @@ use crate::store;
 #[cfg(target_os = "macos")]
 use std::process::Command;
 use tauri::AppHandle;
-#[cfg(not(target_os = "macos"))]
-use tauri::Manager;
 
 /// 区域截图时前端传来的矩形（设备像素，相对主显示器左上角）
 #[derive(serde::Deserialize)]
@@ -15,7 +13,21 @@ pub struct CaptureRect {
     pub height: u32,
 }
 
-/// macOS 显示器信息（全局坐标 + 是否主屏 + scale）
+/// 窗口信息（供前端窗口点选覆盖层）。坐标为全局物理像素（Windows/Linux）。
+#[derive(serde::Serialize)]
+pub struct WindowInfo {
+    pub id: u32,
+    pub title: String,
+    pub app_name: String,
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    /// z 序，越大越靠前（前台）
+    pub z: i32,
+}
+
+/// macOS 显示器信息（全局坐标 + 是否主屏 + scale + 物理像素）
 #[derive(serde::Serialize)]
 pub struct DisplayInfo {
     pub id: u32,
@@ -25,6 +37,42 @@ pub struct DisplayInfo {
     pub width: u32,
     pub height: u32,
     pub scale: f64,
+    /// 物理像素宽（CGDisplayPixelsWide，已含 scale）
+    pub physical_width: u32,
+    /// 物理像素高（CGDisplayPixelsHigh，已含 scale）
+    pub physical_height: u32,
+}
+
+/// 判断一张 PNG 是否「近乎全黑」（非黑像素占比极低）。
+/// 用于甄别 macOS 原生全屏 Space 退出过渡期间截到的黑场——
+/// 此时 screencapture 静默成功（不报错、非权限问题），但整屏是黑的。
+#[cfg(target_os = "macos")]
+fn is_png_near_black(path: &std::path::Path) -> bool {
+    let img = match image::open(path) {
+        Ok(i) => i,
+        Err(_) => return false,
+    };
+    let rgba = img.to_rgba8();
+    let (w, h) = rgba.dimensions();
+    if w == 0 || h == 0 {
+        return false;
+    }
+    // 24×24 网格稀疏采样，足够判断整屏是否全黑，同时避免逐像素解码开销
+    let sx = (w / 24).max(1);
+    let sy = (h / 24).max(1);
+    let mut checked = 0u32;
+    let mut non_black = 0u32;
+    for y in (0..h).step_by(sy as usize) {
+        for x in (0..w).step_by(sx as usize) {
+            let p = rgba.get_pixel(x, y);
+            // 阈值 8：纯黑或极暗（过渡残影）算黑
+            if p[0] > 8 || p[1] > 8 || p[2] > 8 {
+                non_black += 1;
+            }
+            checked += 1;
+        }
+    }
+    checked > 0 && (non_black as f64 / checked as f64) < 0.01
 }
 
 /// macOS 原生截图（全屏/区域/窗口），返回 PNG 的 data URL
@@ -55,7 +103,7 @@ fn capture_to_data_url(args: &[&str]) -> Result<String, String> {
         }
     };
 
-    let file_exists = path.exists();
+    let mut file_exists = path.exists();
     let stdout_str = String::from_utf8_lossy(&output.stdout);
     let stderr_raw = String::from_utf8_lossy(&output.stderr);
     clog!(
@@ -69,17 +117,39 @@ fn capture_to_data_url(args: &[&str]) -> Result<String, String> {
         stderr_raw.trim()
     );
 
+    // ⚠️ 全屏过渡黑屏兜底（仅非交互式 -x/-R）：
+    // macOS 原生全屏(Space)退出过渡动画期间截屏会静默得到整屏黑图（非权限问题、不报错）。
+    // 检测到「近乎全黑」时，等过渡结束再截一次，规避该竞态。最多重试 1 次。
+    if file_exists && !is_interactive && is_png_near_black(&path) {
+        clog!(
+            "capture",
+            "⚠️ 截到近乎全黑图 → 疑似全屏 Space 过渡黑屏；等待 600ms 后重试一次"
+        );
+        let _ = std::fs::remove_file(&path);
+        std::thread::sleep(std::time::Duration::from_millis(600));
+        let _ = Command::new("screencapture").args(args).arg(path_str).output();
+        file_exists = path.exists();
+        if file_exists {
+            clog!("capture", "重试后重新生成文件，继续编码");
+        } else {
+            clog!("capture", "重试后仍未生成文件，按失败流程处理");
+        }
+    }
+
     // 成功：生成了 PNG 文件
     if file_exists {
         let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        // 读取实际 PNG 像素尺寸（IHDR），确认「截到的到底是多少像素」
+        let dims = image::image_dimensions(&path).ok();
         let result = store::file_to_data_url(&path);
         // 清理临时文件，避免 /tmp 堆积
         let _ = std::fs::remove_file(&path);
         match &result {
             Ok(d) => clog!(
                 "capture",
-                "截图成功: PNG {} 字节, data_url {} 字符, 总耗时={}ms",
+                "截图成功: PNG {} 字节, 实际像素尺寸={:?}px, data_url {} 字符, 总耗时={}ms",
                 size,
+                dims,
                 d.len(),
                 started.elapsed().as_millis()
             ),
@@ -90,34 +160,52 @@ fn capture_to_data_url(args: &[&str]) -> Result<String, String> {
 
     // 未生成文件：区分「用户取消」「权限被拒」「其他真实错误」
     let stderr = stderr_raw.to_lowercase();
+    // 权限相关的若干特征串：TCC 拒绝时报 denied/permission/not authorized；
+    // 而 screencapture -x 在无权限时常常只报 "could not create image from display"，同样是无权限。
     let looks_denied = stderr.contains("denied")
         || stderr.contains("permission")
-        || stderr.contains("not authorized");
+        || stderr.contains("not authorized")
+        || stderr.contains("could not create image from display");
 
     if looks_denied {
         clog!(
             "capture",
-            "判定=权限被拒(屏幕录制未授权); stderr={:?}",
+            "判定=权限被拒/未授权(无屏幕录制权限); stderr={:?}",
             stderr_raw.trim()
         );
+        // 兜底：若走到这里仍无权限（理论上已被 ensure_screen_capture_access 提前拦截），
+        // 再主动触发一次系统授权弹窗，确保用户有机会授权。
+        #[cfg(target_os = "macos")]
+        {
+            if !mac_has_screen_capture_access() {
+                let _ = request_screen_capture_access();
+            }
+        }
         return Err(
-            "截图失败：SnapCraft 没有「屏幕录制」权限。请打开 系统设置 → 隐私与安全性 → 屏幕录制，\
-             找到 SnapCraft 并开启开关，然后重试。\n\
-             提示：用 `tauri dev` 每次重编都会变更签名，权限可能不生效；建议执行 `pnpm tauri build` \
-            后运行打包好的 SnapCraft.app（签名稳定，权限才能被系统记住）。"
+            "SnapCraft 没有「屏幕录制」权限，所以截不到画面。\n\
+             👉 系统应该已经弹出「屏幕录制」授权窗口，请点「允许」，然后再次点击截图。\n\
+             （如果没看到弹窗：打开 系统设置 → 隐私与安全性 → 屏幕录制，\
+             找到「SnapCraft (dev)」把开关打开，再回到 App 点「已授权？刷新」。）"
                 .into(),
         );
     }
 
-    // 交互式截图（区域/窗口）按 Esc 或点空白取消：stderr 多为空或含 cancel
-    if is_interactive && (stderr.trim().is_empty() || stderr.contains("cancel")) {
-        clog!("capture", "判定=用户取消(交互式, stderr 空或含 cancel)");
+    // 交互式截图（区域/窗口）无文件产出：绝大多数是用户按 Esc / 点空白取消。
+    // 不再靠 stderr 是否为空来猜（不同 macOS 版本取消时 stderr 表现不一，
+    // 曾导致 Esc 取消被误报成「截图失败」）。交互式无文件一律判为取消，
+    // 真实 stderr 仅记日志备查，不弹给用户。
+    if is_interactive {
+        clog!(
+            "capture",
+            "判定=用户取消(交互式无文件产出); stderr={:?}",
+            stderr_raw.trim()
+        );
         return Err("截图已取消".into());
     }
 
-    // 其它情况（含 -R 矩形非法、-w 启动失败等）如实上报，不再被静默吞掉
+    // 非交互式（-x / -R）无文件且非权限问题：如实上报真实错误，不静默吞掉。
     if !stderr.trim().is_empty() {
-        clog!("capture", "判定=其它错误; stderr={:?}", stderr_raw.trim());
+        clog!("capture", "判定=其它错误(非交互式); stderr={:?}", stderr_raw.trim());
         return Err(format!("截图失败：{}", stderr.trim()));
     }
 
@@ -126,12 +214,34 @@ fn capture_to_data_url(args: &[&str]) -> Result<String, String> {
 }
 
 #[tauri::command]
-pub async fn capture_screen(_app: AppHandle, display_id: Option<u32>) -> Result<String, String> {
-    clog!("capture", "命令=capture_screen display_id={:?}", display_id);
+pub async fn capture_screen(
+    _app: AppHandle,
+    display_id: Option<u32>,
+    delay_secs: Option<u32>,
+) -> Result<String, String> {
+    clog!(
+        "capture",
+        "命令=capture_screen display_id={:?} delay_secs={:?}",
+        display_id,
+        delay_secs
+    );
+    // 延时截图：等待 delay_secs 秒后再截。用于等待菜单/悬浮态等瞬时 UI 就绪。
+    // macOS 的 screencapture -T 只对交互式/-x 全屏有效，但 -x -R 精确截屏时 -T 表现不稳，
+    // 因此统一用后端 sleep 实现延时，跨平台一致、行为可预期。
+    if let Some(d) = delay_secs {
+        if d > 0 {
+            let d = d.min(60); // 上限 60s，防误传
+            clog!("capture", "延时截图: 先等待 {} 秒", d);
+            std::thread::sleep(std::time::Duration::from_secs(d as u64));
+        }
+    }
     #[cfg(target_os = "macos")]
     {
-        // 等待窗口隐藏完成，避免截到自身窗口（macOS 隐藏存在极短过渡）
-        std::thread::sleep(std::time::Duration::from_millis(200));
+        // 等待窗口隐藏完成，避免截到自身窗口 / 截到未重绘的黑屏（macOS 隐藏+重绘需时间）
+        std::thread::sleep(std::time::Duration::from_millis(400));
+
+        // 权限闸门：无屏幕录制权限就主动弹授权窗并给出指引，避免 -x 静默失败
+        ensure_screen_capture_access()?;
 
         // 如果指定了 display_id，用 -R 全局坐标精确截取该显示器
         // （-D 期望的是 1 基序号但序号与 CGGetActiveDisplayList 顺序不对应，多屏时不可靠）
@@ -143,6 +253,40 @@ pub async fn capture_screen(_app: AppHandle, display_id: Option<u32>) -> Result<
                 clog!("capture", "display_id={} 的 bounds 无效(可能已断开): {:?}x{:?}", did, bounds.size.width, bounds.size.height);
                 return Err("指定的显示器不可用，可能已断开连接".into());
             }
+            // 物理像素与 scale（用于日志精确呈现这台显示器的真实分辨率）
+            let (px_w, px_h) = display_backing_pixels(did, bounds.size.width, bounds.size.height);
+            let scale = if bounds.size.width > 0.0 && bounds.size.height > 0.0 {
+                ((px_w as f64 / bounds.size.width)
+                    + (px_h as f64 / bounds.size.height))
+                    / 2.0
+            } else {
+                1.0
+            };
+            let is_main = did == unsafe { CGMainDisplayID() };
+            if is_main {
+                // 主屏：不带 -R（app 窗口隐藏后，-R 0,0,W,H 可能截到未重绘的黑屏；
+                // screencapture -x 不带 -R 时截取主屏，行为更可靠）
+                clog!(
+                    "capture",
+                    "→ 截取主显示器: id={} 物理像素={}x{} → 使用 -x（不带 -R，避免黑屏）",
+                    did, px_w, px_h
+                );
+                return capture_to_data_url(&["-x"]);
+            }
+            clog!(
+                "capture",
+                "→ 截取指定显示器: id={} 主屏=false 全局坐标=({},{},{}x{}) scale={:.2} 逻辑尺寸={}x{}pt 物理像素={}x{} → 使用 -x -R 精确截取",
+                did,
+                bounds.origin.x as i32,
+                bounds.origin.y as i32,
+                bounds.size.width as i32,
+                bounds.size.height as i32,
+                scale,
+                bounds.size.width as i32,
+                bounds.size.height as i32,
+                px_w,
+                px_h
+            );
             let rarg = format!(
                 "{},{},{},{}",
                 bounds.origin.x as i32,
@@ -155,13 +299,25 @@ pub async fn capture_screen(_app: AppHandle, display_id: Option<u32>) -> Result<
             return capture_to_data_url(&refs);
         }
 
-        // 无 display_id：截取全部显示器（-x 无参数 = 全屏所有显示器）
+        // 无 display_id：截取主显示器。
+        // 主屏不带 -R（app 窗口隐藏后，-R 0,0,W,H 可能截到未重绘的黑屏；
+        // screencapture -x 不带 -R 时截取主屏，此系统上验证过行为可靠）。
+        let main = unsafe { CGMainDisplayID() };
+        let mb = unsafe { CGDisplayBounds(main) };
+        let (px_w, px_h) = display_backing_pixels(main, mb.size.width, mb.size.height);
+        clog!(
+            "capture",
+            "→ 截取主显示器: id={} 物理像素={}x{} → 使用 -x（不带 -R，避免黑屏）",
+            main, px_w, px_h
+        );
         capture_to_data_url(&["-x"])
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = display_id;
-        xcap_capture::capture_xcap_screen()
+        match display_id {
+            Some(did) => xcap_capture::capture_xcap_display(did),
+            None => xcap_capture::capture_xcap_screen(),
+        }
     }
 }
 
@@ -173,28 +329,54 @@ pub async fn capture_region(_app: AppHandle, rect: Option<CaptureRect>) -> Resul
     }
     #[cfg(target_os = "macos")]
     {
-        // 收到 rect（来自透明覆盖层）：用非交互 -R 按全局坐标截取，彻底绕开
-        // 交互式 screencapture -i 在「App 非前台」时选框起不来的问题，且支持跨屏。
-        // rect 已是全局 Quartz 坐标（points），与 screencapture -R 同坐标系。
-        if let Some(r) = rect {
-            if r.width >= 5 && r.height >= 5 {
-                let rarg = format!("{},{},{},{}", r.x, r.y, r.width, r.height);
-                let parts = ["-x".to_string(), "-R".to_string(), rarg];
-                let refs: Vec<&str> = parts.iter().map(|s| s.as_str()).collect();
-                return capture_to_data_url(&refs);
-            }
-        }
-        // 兜底：无 rect 时退回交互式（理论上覆盖层总会传 rect）
+        // 权限闸门：无屏幕录制权限就主动弹授权窗并给出指引
+        ensure_screen_capture_access()?;
+
+        // macOS 区域截图统一走系统原生交互式 -i（等同 Cmd+Shift+4）：
+        //  - 输出 Retina 全精度（-R 只接受逻辑点、输出 1x，会丢一半清晰度）；
+        //  - 系统 WindowServer 自行处理跨屏拖选 / 负坐标 / 空格切窗 / Esc 取消，最可靠。
+        // 前端 macOS 分支从不传 rect，此处 rect 恒为 None；保留参数仅为跨平台命令签名一致。
+        // （历史上曾有自建覆盖层传 rect 走 -R 的分支，随覆盖层方案废弃已移除。）
+        let _ = &rect;
+        clog!(
+            "capture",
+            "→ 区域截图: 使用 -i（系统交互式十字选区，Retina 全精度；支持跨屏，Esc 取消）"
+        );
         capture_to_data_url(&["-i"])
     }
     #[cfg(not(target_os = "macos"))]
     {
-        // 区域由应用内覆盖层选择；截图前先隐藏覆盖层，避免被截入画面
-        if let Some(w) = _app.get_webview_window("capture-overlay") {
-            let _ = w.hide();
-        }
-        std::thread::sleep(std::time::Duration::from_millis(200));
+        // Windows/Linux：rect 为覆盖层输出的全局物理像素坐标，直接交给 xcap 区域截图。
+        // 覆盖层窗口由前端在 invoke 前关闭/隐藏，无需后端处理。
         xcap_capture::capture_xcap_region(rect)
+    }
+}
+
+/// 滚动长截图专用：按固定矩形【非交互】截取同一块区域，供滚动多帧捕获反复调用。
+/// 与 capture_region（macOS 走交互式 -i）不同——这里必须能重复无 UI 地截同一块。
+/// macOS 用 screencapture -x -R（非交互精确矩形，输出 1x 逻辑像素；滚动拼接只找纵向
+/// 偏移、每帧尺寸一致，1x 足够且更快）；Windows/Linux 复用 xcap 区域截图。
+#[tauri::command]
+pub async fn capture_region_fixed(_app: AppHandle, rect: CaptureRect) -> Result<String, String> {
+    clog!(
+        "capture",
+        "命令=capture_region_fixed rect=({},{},{}x{})",
+        rect.x, rect.y, rect.width, rect.height
+    );
+    if rect.width < 1 || rect.height < 1 {
+        return Err("选区太小".into());
+    }
+    #[cfg(target_os = "macos")]
+    {
+        ensure_screen_capture_access()?;
+        let rarg = format!("{},{},{},{}", rect.x, rect.y, rect.width, rect.height);
+        let parts = ["-x".to_string(), "-R".to_string(), rarg];
+        let refs: Vec<&str> = parts.iter().map(|s| s.as_str()).collect();
+        capture_to_data_url(&refs)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        xcap_capture::capture_xcap_region(Some(rect))
     }
 }
 
@@ -206,11 +388,31 @@ pub async fn capture_window(_app: AppHandle) -> Result<String, String> {
         // 等待覆盖层窗口完全隐藏（与 capture_screen 一致），避免截到正在消失的覆盖层
         std::thread::sleep(std::time::Duration::from_millis(200));
 
+        // 权限闸门：无屏幕录制权限就主动弹授权窗并给出指引
+        ensure_screen_capture_access()?;
+
         // 窗口截图是交互式（-w）。覆盖层刚被 hide() 时 App 可能不再是前台，
-        // 这里主动把 SnapCraft 提到前台，确保 screencapture 的取窗 UI 能接收点击。
-        // 用 bundle identifier 而非 App 名称，避免不同构建方式下名称不一致的问题
+        // 这里主动把「当前进程」提到前台，确保 screencapture 的取窗 UI 能接收点击。
+        //
+        // ⚠️ 关键修复：绝不能用 `tell application id "com.snap-craft.app" to activate`。
+        // dev 模式运行的 bundle id 是 com.snap-craft.app.dev，硬编码 release 的
+        // com.snap-craft.app 会让 LaunchServices 去启动/唤起“另一个”同名 release 包
+        // （表现为凭空多弹出一个 SnapCraft 窗口，且那个包从未授权屏幕录制 → 又提示去系统设置授权）。
+        // 改为按「当前进程 PID」激活自身，跨 dev/release、与 bundle id 无关，绝不会误启动别的 app。
+        let pid = std::process::id();
+        clog!(
+            "capture",
+            "→ 窗口截图: 先隐藏覆盖层并按 PID={} 激活当前进程到前台，随后使用 -w（交互式取窗，点击目标窗口；Esc 取消）",
+            pid
+        );
         let _ = Command::new("osascript")
-            .args(["-e", "tell application id \"com.snap-craft.app\" to activate"])
+            .args([
+                "-e",
+                &format!(
+                    "tell application \"System Events\" to set frontmost of (first process whose unix id is {}) to true",
+                    pid
+                ),
+            ])
             .output();
         // 给 activate 一点时间生效
         std::thread::sleep(std::time::Duration::from_millis(150));
@@ -218,7 +420,37 @@ pub async fn capture_window(_app: AppHandle) -> Result<String, String> {
     }
     #[cfg(not(target_os = "macos"))]
     {
+        // 兜底：无覆盖层点选时抓前台窗口。正常流程走 list_windows + capture_window_by_id。
         xcap_capture::capture_xcap_window()
+    }
+}
+
+/// 枚举可截图窗口（Windows/Linux 的窗口点选覆盖层用）。
+/// macOS 用系统原生 -w 交互点窗，无需此命令，返回空。
+#[tauri::command]
+pub fn list_windows() -> Vec<WindowInfo> {
+    #[cfg(target_os = "macos")]
+    {
+        Vec::new()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        xcap_capture::list_windows_xcap()
+    }
+}
+
+/// 按窗口 id 截取（Windows/Linux 覆盖层点选后调用）。macOS 不使用。
+#[tauri::command]
+pub async fn capture_window_by_id(_app: AppHandle, window_id: u32) -> Result<String, String> {
+    clog!("capture", "命令=capture_window_by_id window_id={}", window_id);
+    #[cfg(target_os = "macos")]
+    {
+        let _ = window_id;
+        Err("macOS 使用系统原生窗口截图，无需此命令".into())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        xcap_capture::capture_xcap_window_by_id(window_id)
     }
 }
 
@@ -234,9 +466,53 @@ mod xcap_capture {
         image
             .save(path_str)
             .map_err(|e| format!("保存截图失败: {}", e))?;
-        store::file_to_data_url(&path)
+        let result = store::file_to_data_url(&path);
+        let _ = std::fs::remove_file(&path);
+        result
     }
 
+    /// 枚举所有显示器（Windows/Linux）。xcap 的 x/y/width/height 为物理像素、正坐标系。
+    /// 映射到 DisplayInfo：逻辑尺寸与物理像素这里都填物理像素（Windows 覆盖层按物理像素工作最稳）。
+    pub fn list_displays_xcap() -> Vec<DisplayInfo> {
+        let monitors = match Monitor::all() {
+            Ok(m) => m,
+            Err(e) => {
+                clog!("capture", "xcap Monitor::all 失败: {}", e);
+                return vec![];
+            }
+        };
+        let mut out = Vec::new();
+        for m in monitors.iter() {
+            let id = m.id().unwrap_or(0);
+            let x = m.x().unwrap_or(0);
+            let y = m.y().unwrap_or(0);
+            let w = m.width().unwrap_or(0);
+            let h = m.height().unwrap_or(0);
+            let scale = m.scale_factor().unwrap_or(1.0) as f64;
+            let is_main = m.is_primary().unwrap_or(false);
+            let info = DisplayInfo {
+                id,
+                is_main,
+                x,
+                y,
+                width: w,
+                height: h,
+                scale,
+                physical_width: w,
+                physical_height: h,
+            };
+            clog!(
+                "capture",
+                "  显示器[{}]: id={} 主屏={} 全局坐标=({},{},{}x{}) scale={:.2}",
+                out.len(), info.id, info.is_main, info.x, info.y, info.width, info.height, info.scale
+            );
+            out.push(info);
+        }
+        clog!("capture", "xcap 显示器枚举完成: 共 {} 台", out.len());
+        out
+    }
+
+    /// 截取主显示器全图（无 display_id 时）
     pub fn capture_xcap_screen() -> Result<String, String> {
         let monitor = Monitor::from_point(0, 0).map_err(|e| format!("获取主显示器失败: {}", e))?;
         let image = monitor
@@ -245,20 +521,126 @@ mod xcap_capture {
         save_and_encode(image)
     }
 
+    /// 截取指定 display_id 的整屏；找不到则退回主屏
+    pub fn capture_xcap_display(display_id: u32) -> Result<String, String> {
+        let monitors = Monitor::all().map_err(|e| format!("枚举显示器失败: {}", e))?;
+        let monitor = monitors
+            .into_iter()
+            .find(|m| m.id().unwrap_or(0) == display_id)
+            .ok_or("指定的显示器不可用，可能已断开连接")?;
+        let image = monitor
+            .capture_image()
+            .map_err(|e| format!("全屏截屏失败: {}", e))?;
+        save_and_encode(image)
+    }
+
+    /// 区域截图：rect 为全局物理像素坐标（覆盖层输出）。用矩形中心定位所属显示器，
+    /// 再换算成该显示器的局部坐标做 capture_region。
     pub fn capture_xcap_region(rect: Option<CaptureRect>) -> Result<String, String> {
         let rect = rect.ok_or("区域截屏需要先选择区域")?;
-        let monitor = Monitor::from_point(0, 0).map_err(|e| format!("获取主显示器失败: {}", e))?;
+        if rect.width < 1 || rect.height < 1 {
+            return Err("选区太小".into());
+        }
+        let cx = rect.x + rect.width as i32 / 2;
+        let cy = rect.y + rect.height as i32 / 2;
+        let monitor = Monitor::from_point(cx, cy)
+            .or_else(|_| Monitor::from_point(rect.x, rect.y))
+            .map_err(|e| format!("定位显示器失败: {}", e))?;
+        // 换算为显示器局部坐标（xcap capture_region 期望相对该显示器原点的像素）
+        let local_x = (rect.x - monitor.x().unwrap_or(0)).max(0) as u32;
+        let local_y = (rect.y - monitor.y().unwrap_or(0)).max(0) as u32;
+        clog!(
+            "capture",
+            "→ 区域截图(xcap): 全局矩形=({},{},{}x{}) 命中显示器 id={} 原点=({},{}) 局部=({},{})",
+            rect.x, rect.y, rect.width, rect.height,
+            monitor.id().unwrap_or(0), monitor.x().unwrap_or(0), monitor.y().unwrap_or(0),
+            local_x, local_y
+        );
         let image = monitor
-            .capture_region(rect.x as u32, rect.y as u32, rect.width, rect.height)
+            .capture_region(local_x, local_y, rect.width, rect.height)
             .map_err(|e| format!("区域截屏失败: {}", e))?;
         save_and_encode(image)
     }
 
-    pub fn capture_xcap_window() -> Result<String, String> {
+    /// 枚举可截图的窗口（供前端窗口点选覆盖层）。按 z 序返回，过滤掉最小化、
+    /// 零尺寸、以及 SnapCraft 自身窗口。坐标为全局物理像素。
+    pub fn list_windows_xcap() -> Vec<WindowInfo> {
+        let windows = match Window::all() {
+            Ok(w) => w,
+            Err(e) => {
+                clog!("capture", "xcap Window::all 失败: {}", e);
+                return vec![];
+            }
+        };
+        let self_pid = std::process::id();
+        let mut out: Vec<WindowInfo> = Vec::new();
+        for w in windows.iter() {
+            if w.is_minimized().unwrap_or(true) {
+                continue;
+            }
+            let width = w.width().unwrap_or(0);
+            let height = w.height().unwrap_or(0);
+            if width < 20 || height < 20 {
+                continue; // 过滤过小/装饰性窗口
+            }
+            // 排除 SnapCraft 自身（覆盖层/主窗口），避免把自己列进去
+            if w.pid().unwrap_or(0) == self_pid {
+                continue;
+            }
+            let title = w.title().unwrap_or_default();
+            let app_name = w.app_name().unwrap_or_default();
+            // 完全无标题且无应用名的多半是系统装饰层，跳过
+            if title.is_empty() && app_name.is_empty() {
+                continue;
+            }
+            out.push(WindowInfo {
+                id: w.id().unwrap_or(0),
+                title,
+                app_name,
+                x: w.x().unwrap_or(0),
+                y: w.y().unwrap_or(0),
+                width,
+                height,
+                z: w.z().unwrap_or(0),
+            });
+        }
+        // z 值大的在上层（前台），按 z 降序，覆盖层优先高亮命中最上层窗口
+        out.sort_by(|a, b| b.z.cmp(&a.z));
+        clog!("capture", "xcap 窗口枚举完成: 共 {} 个可截图窗口", out.len());
+        out
+    }
+
+    /// 按窗口 id 截取指定窗口（覆盖层点选后调用）。
+    pub fn capture_xcap_window_by_id(window_id: u32) -> Result<String, String> {
         let windows = Window::all().map_err(|e| format!("枚举窗口失败: {}", e))?;
         let window = windows
             .into_iter()
-            .find(|w| !w.is_minimized().unwrap_or(true))
+            .find(|w| w.id().unwrap_or(0) == window_id)
+            .ok_or("目标窗口已不存在（可能已关闭）")?;
+        clog!(
+            "capture",
+            "→ 窗口截图(xcap by id): id={} title={:?}",
+            window_id,
+            window.title().unwrap_or_default()
+        );
+        let image = window
+            .capture_image()
+            .map_err(|e| format!("窗口截屏失败: {}", e))?;
+        save_and_encode(image)
+    }
+
+    /// 窗口截图：优先截取当前前台窗口（z-order 最靠前的可见、非最小化窗口）。
+    /// 仅作为无覆盖层点选时的兜底（前端正常会走 list_windows + capture_window_by_id）。
+    pub fn capture_xcap_window() -> Result<String, String> {
+        let windows = Window::all().map_err(|e| format!("枚举窗口失败: {}", e))?;
+        // Window::all 通常按 z-order 返回，取第一个可见、非最小化、有尺寸的窗口
+        let window = windows
+            .into_iter()
+            .find(|w| {
+                !w.is_minimized().unwrap_or(true)
+                    && w.width().unwrap_or(0) > 0
+                    && w.height().unwrap_or(0) > 0
+            })
             .ok_or("未找到可截图的窗口")?;
         let image = window
             .capture_image()
@@ -278,10 +660,33 @@ extern "C" {
     ) -> i32;
     fn CGDisplayBounds(display: u32) -> CGRect;
     fn CGMainDisplayID() -> u32;
-    // CGDisplayScaleFactor 在较新 macOS SDK 中已从 CoreGraphics 移除（链接报 undefined symbol），
-    // 改用物理像素 CGDisplayPixelsWide/High 除以逻辑点 CGDisplayBounds 反推 scale。
-    fn CGDisplayPixelsWide(display: u32) -> usize;
-    fn CGDisplayPixelsHigh(display: u32) -> usize;
+    // ⚠️ CGDisplayPixelsWide/High 在 HiDPI「缩放」显示器上返回的是逻辑点数而非真实 backing 像素
+    //   （实测某台 4K 屏用 1080p 缩放模式时，PixelsWide 返回 1920，但 screencapture 实际输出 3840）。
+    //   这会让 scale 被误算成 1.0，前端按 1x 处理 2x 的图 → 缩放不对/显示不全。
+    //   正确来源：CGDisplayCopyDisplayMode + CGDisplayModeGetPixelWidth/Height（真实 backing 像素）。
+    fn CGDisplayCopyDisplayMode(display: u32) -> *mut std::ffi::c_void;
+    fn CGDisplayModeGetPixelWidth(mode: *mut std::ffi::c_void) -> usize;
+    fn CGDisplayModeGetPixelHeight(mode: *mut std::ffi::c_void) -> usize;
+    fn CGDisplayModeRelease(mode: *mut std::ffi::c_void);
+}
+
+/// 获取显示器真实 backing 像素尺寸（宽, 高）。
+/// 优先用 CGDisplayCopyDisplayMode 的 PixelWidth/Height（对 HiDPI 缩放屏也准确）；
+/// 拿不到则退回逻辑点尺寸（等价 scale=1）。
+#[cfg(target_os = "macos")]
+fn display_backing_pixels(display: u32, logical_w: f64, logical_h: f64) -> (u32, u32) {
+    unsafe {
+        let mode = CGDisplayCopyDisplayMode(display);
+        if !mode.is_null() {
+            let pw = CGDisplayModeGetPixelWidth(mode) as u32;
+            let ph = CGDisplayModeGetPixelHeight(mode) as u32;
+            CGDisplayModeRelease(mode);
+            if pw > 0 && ph > 0 {
+                return (pw, ph);
+            }
+        }
+    }
+    (logical_w.max(0.0) as u32, logical_h.max(0.0) as u32)
 }
 
 #[cfg(target_os = "macos")]
@@ -321,15 +726,15 @@ pub fn list_displays() -> Vec<DisplayInfo> {
         let mut out = Vec::new();
         for &d in displays.iter().take(count as usize) {
             let b = unsafe { CGDisplayBounds(d) };
-            let px_w = unsafe { CGDisplayPixelsWide(d) } as u32;
-            let px_h = unsafe { CGDisplayPixelsHigh(d) } as u32;
+            // 真实 backing 像素（对 HiDPI 缩放屏也准确，修复 scale 被误算成 1.0 的老 bug）
+            let (px_w, px_h) = display_backing_pixels(d, b.size.width, b.size.height);
             // scale = 物理像素 / 逻辑点（Retina 2x → 2.0；自定义缩放如 1.5x），两轴取平均更稳健
             let scale = if b.size.width > 0.0 && b.size.height > 0.0 {
                 ((px_w as f64 / b.size.width) + (px_h as f64 / b.size.height)) / 2.0
             } else {
                 1.0
             };
-            out.push(DisplayInfo {
+            let info = DisplayInfo {
                 // 返回真实的 CoreGraphics Display ID，而非序号
                 id: d,
                 is_main: d == main,
@@ -338,13 +743,38 @@ pub fn list_displays() -> Vec<DisplayInfo> {
                 width: b.size.width as u32,
                 height: b.size.height as u32,
                 scale,
-            });
+                physical_width: px_w,
+                physical_height: px_h,
+            };
+            clog!(
+                "capture",
+                "  显示器[{}]: id={} 主屏={} 全局坐标=({},{},{}x{}) 逻辑尺寸={}x{}pt scale={:.2} 物理像素={}x{}",
+                out.len(),
+                info.id,
+                info.is_main,
+                info.x, info.y, info.width, info.height,
+                info.width, info.height,
+                info.scale,
+                info.physical_width, info.physical_height
+            );
+            out.push(info);
         }
+        clog!(
+            "capture",
+            "显示器枚举完成: 共 {} 台{}",
+            out.len(),
+            if out.is_empty() {
+                " ⚠️ 未检测到任何显示器（可能为虚拟环境或权限受限）"
+            } else {
+                ""
+            }
+        );
         out
     }
     #[cfg(not(target_os = "macos"))]
     {
-        vec![]
+        // Windows / Linux：用 xcap 枚举真实多显示器（全局坐标为物理像素，正值坐标系）
+        xcap_capture::list_displays_xcap()
     }
 }
 
@@ -361,6 +791,33 @@ extern "C" {
 #[cfg(target_os = "macos")]
 fn mac_has_screen_capture_access() -> bool {
     unsafe { CGPreflightScreenCaptureAccess() != 0 }
+}
+
+/// 截图前的权限闸门：没有屏幕录制权限就主动触发系统授权弹窗，
+/// 并返回清晰的可操作提示。这解决了之前「screencapture -x 无 UI 不弹窗、
+/// 错误被误判成『其它错误』导致权限永远拿不到」的死循环。
+#[cfg(target_os = "macos")]
+fn ensure_screen_capture_access() -> Result<(), String> {
+    if mac_has_screen_capture_access() {
+        return Ok(());
+    }
+    clog!(
+        "capture",
+        "权限预检=false → 主动触发系统授权请求(CGRequestScreenCaptureAccess)，等待用户在弹窗点击允许"
+    );
+    let granted = request_screen_capture_access();
+    if granted {
+        clog!("capture", "授权请求即时返回 true（用户已允许或此前已授权）");
+        Ok(())
+    } else {
+        Err(
+            "SnapCraft 还没有「屏幕录制」权限，所以截不到画面。\n\
+             👉 系统应该已经弹出「屏幕录制」授权窗口，请点「允许」；然后回到这里再次点击截图即可。\n\
+             （如果没看到弹窗：打开 系统设置 → 隐私与安全性 → 屏幕录制，\
+             找到「SnapCraft (dev)」把开关打开，再回到 App 点「已授权？刷新」。）"
+                .into(),
+        )
+    }
 }
 
 /// 检测当前是否已获得屏幕录制权限。非 macOS 直接返回 true（不需要）。

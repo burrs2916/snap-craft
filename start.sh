@@ -41,11 +41,18 @@ APP_IDENTIFIER="com.snap-craft.app"
 DEV_APP_BUNDLE="$SCRIPT_DIR/src-tauri/target/debug/SnapCraft-dev.app"
 DEV_APP_ID="com.snap-craft.app.dev"
 
-# 本地自签名证书名（可选）。创建方式见 README：
-#   钥匙串访问 → 证书助理 → 创建证书 → 名称任意（如 SnapCraft Local）
-#   / 身份类型「自签名根证书」/ 证书类型「代码签名」→ 创建后选「始终信任」。
-# 设置后 ./start.sh app / sign 会自动用该证书对 .app 重签，使其被 Gatekeeper 信任，
-# 开发期验收屏幕录制权限时可直接打开。不设置则走 ad-hoc + 手动放行。
+# 本地自签名代码签名证书名（强烈推荐设置，无需 Apple 开发者账号）。
+# 为什么必须用证书：macOS 屏幕录制 TCC 授权按「签名身份」匹配——
+#   · ad-hoc 签名（--sign -）身份=二进制哈希，改代码重编即变 → 每次必丢权限；
+#   · 自签名证书（--sign <cert>）身份=证书公钥，稳定不变 → 改代码重编后再用同一
+#     证书重签，TCC 仍认得是「同一个被授权的 App」，授权跨重编/重启保留，
+#     开发循环（改代码→重启→测功能）不再被打断。
+# 创建（一次性，约 3 分钟，无需 Apple ID）：
+#   钥匙串访问 → 证书助理 → 创建证书 → 名称填「SnapCraft Local」
+#   / 身份类型「自签名根证书」/ 证书类型「代码签名」→ 创建后双击设为「始终信任」。
+#   也可直接跑：./start.sh cert  （自动用 openssl+security 创建并设为信任）
+#   之后 export SNAP_SIGN_ID="SnapCraft Local"（写进 ~/.zshrc 一劳永逸）。
+# 不设置则走 ad-hoc：仅「纯重开且没改代码」能保住权限；改了代码重编权限即失效。
 SNAP_SIGN_ID="${SNAP_SIGN_ID:-}"
 
 # 日志函数
@@ -218,12 +225,12 @@ start_dev() {
         sleep 1
     done
 
-    # 2) 以 dev 配置编译 Rust 二进制（仅在必要时重建，避免反复重编导致
-    #    ad-hoc 签名漂移、系统「屏幕录制」TCC 授权丢失）
+    # 2) 以 dev 配置编译 Rust 二进制
+    #    （仅在有 Rust 改动时重编，纯为构建速度优化；与「权限是否保留」无关——
+    #     权限保留靠下面第 3 步的「自签名证书」，见该步说明）
     #    DEP_TAURI_DEV=1 → tauri-build 不启用 custom-protocol 特性，运行时 is_dev()
     #    为真、走 devUrl 连 vite；touch build.rs 强制 build script 重跑以读取该变量。
-    #    用 .dev_build_marker 标记「当前二进制确为 dev 模式」：纯重开（无 Rust 改动）
-    #    时直接复用，不重编、不重签 → ad-hoc 签名稳定 → 授权可跨重开保留。
+    #    用 .dev_build_marker 标记「当前二进制确为 dev 模式」，避免误复用 release 二进制。
     cd "$SCRIPT_DIR/src-tauri"
     BIN="$SCRIPT_DIR/src-tauri/target/debug/snap-craft"
     DEV_MARKER="$SCRIPT_DIR/src-tauri/target/debug/.dev_build_marker"
@@ -233,6 +240,12 @@ start_dev() {
     elif [ "$SCRIPT_DIR/src-tauri/build.rs" -nt "$BIN" ]; then
         NEED_REBUILD=1
     elif [ -n "$(find "$SCRIPT_DIR/src-tauri/src" -name '*.rs' -newer "$BIN" 2>/dev/null | head -1)" ]; then
+        NEED_REBUILD=1
+    # capabilities/*.json 与 tauri.conf.json 是编译期嵌入二进制的（窗口权限校验在 Rust 运行时），
+    # 改了它们必须重编，否则新窗口标签/权限（如 pin-*）不会生效 → start_dragging/close 被拒。
+    elif [ -n "$(find "$SCRIPT_DIR/src-tauri/capabilities" -name '*.json' -newer "$BIN" 2>/dev/null | head -1)" ]; then
+        NEED_REBUILD=1
+    elif [ "$SCRIPT_DIR/src-tauri/tauri.conf.json" -nt "$BIN" ]; then
         NEED_REBUILD=1
     fi
     if [ "$NEED_REBUILD" = "1" ]; then
@@ -253,7 +266,48 @@ start_dev() {
     fi
 
     # 3) 包成 .app 并签名
-    build_dev_app_bundle "$BIN"
+    #    ⚠️ 核心认知：macOS 屏幕录制 TCC 授权按「签名身份」匹配。
+    #       - ad-hoc 签名（--sign -）：身份 = 二进制哈希(CDHash)，重编即变
+    #         → 每次改代码重编后签名变 → TCC 认不出已授权 App → 必须重授权。
+    #       - 自签名证书（--sign <cert>）：身份 = 证书公钥，稳定不变
+    #         → 即便改代码重编、重新签名，TCC 仍认得是「同一个被授权的 App」
+    #         → 授权可跨重编、跨重启保留，开发循环（改代码→重开→测）不再被打断。
+    #    策略：
+    #       · 本机存在自签名证书 → 直接重建 .app 并用该证书签名（开发循环自由，权限稳）。
+    #       · 无证书 → 仅「无 Rust 改动」时复用已有 .app 及其 ad-hoc 签名以尽量保权限；
+    #         一旦改了代码就必然重签、权限失效（此时强烈建议创建自签名证书）。
+    APP_BIN="$DEV_APP_BUNDLE/Contents/MacOS/SnapCraft"
+    # 若未显式设置 SNAP_SIGN_ID，自动探测常见自签名证书名（避免每次手设环境变量）
+    if [ -z "$SNAP_SIGN_ID" ]; then
+        for cand in "SnapCraft Local" "SnapCraft Dev"; do
+            if cert_exists "$cand"; then
+                SNAP_SIGN_ID="$cand"
+                log_info "🔍 自动选用签名身份：$SNAP_SIGN_ID（写 export SNAP_SIGN_ID=\"$cand\" 到 ~/.zshrc 可固定）"
+                break
+            fi
+        done
+    fi
+    if [ -n "$SNAP_SIGN_ID" ] && cert_exists "$SNAP_SIGN_ID"; then
+        # 有稳定签名身份：改代码随便重编，权限都留得住
+        build_dev_app_bundle "$BIN"
+        log_info "✅ 用自签名证书【$SNAP_SIGN_ID】签名 dev .app：改代码重编后 TCC 屏幕录制授权可跨重启保留，开发循环不再被打断。"
+    else
+        # 无证书：ad-hoc 重签每次都会丢权限。仅在「无 Rust 改动」时复用旧 .app 保签名；
+        #         改了代码则必须重建重签（权限失效，属 ad-hoc 的固有限制）。
+        NEED_REBUNDLE=0
+        if [ ! -d "$DEV_APP_BUNDLE" ] || [ "$NEED_REBUILD" = "1" ] || [ "$BIN" -nt "$APP_BIN" ]; then
+            NEED_REBUNDLE=1
+        fi
+        if [ "$NEED_REBUNDLE" = "1" ]; then
+            if [ "$NEED_REBUILD" = "1" ]; then
+                log_warn "⚠️ 未配置自签名证书：本次改了 Rust 代码，重建 dev .app 并 ad-hoc 重签 → 屏幕录制授权已失效，需重授权一次。"
+                log_warn "   一劳永逸方案：./start.sh cert  （自动创建本机自签名证书），之后改代码也免重授权。"
+            fi
+            build_dev_app_bundle "$BIN"
+        else
+            log_info "✅ 复用已有 dev .app（无 Rust 改动，保留其 ad-hoc 签名以维持 TCC 授权）"
+        fi
+    fi
 
     # 4) 打开 dev .app（拥有 Info.plist / Bundle ID，可进入 TCC 列表）
     log_info "正在打开 $DEV_APP_BUNDLE ..."
@@ -262,9 +316,10 @@ start_dev() {
 
 ────────────────────────────────────────────
 ✅ 已以 .app 形式打开（开发模式：前端走 vite HMR，改 UI 即时生效）
-👉 首次使用请点一次「全屏截图」，会弹出系统「屏幕录制」授权，点「允许」。
-👉 之后去 系统设置 → 隐私与安全性 → 屏幕录制，即可看到 SnapCraft（dev）且开关已开。
-👉 改了 Rust 代码需重跑 ./start.sh dev；改前端走 vite HMR，无需重开。
+👉 若本机已配「自签名证书」并设 SNAP_SIGN_ID：改代码、重跑本脚本权限都留得住，开发循环不再被打断。
+👉 若未配证书（ad-hoc）：仅纯重开能保住权限；一旦改了 Rust 代码重编，需重新授权一次（建议配证书）。
+👉 首次使用若尚未授权：点一次「全屏截图」会弹系统「屏幕录制」授权，点「允许」。
+👉 系统设置 → 隐私与安全性 → 屏幕录制 里能看到 SnapCraft（dev）且开关已开。
 👉 截屏问题查 logs/dev.log（已注入全链路诊断日志）。
 👉 重置 dev .app 权限：tccutil reset All com.snap-craft.app.dev
 ────────────────────────────────────────────
@@ -409,6 +464,86 @@ cert_exists() {
     security find-identity -v -p codesigning 2>/dev/null | grep -q "\"$name\""
 }
 
+# 一键创建本机自签名代码签名证书（无需 Apple 开发者账号）
+# 让 dev .app 的 TCC 屏幕录制授权跨重编/重启保留（见 start_dev 第 3 步说明）。
+# 优先走 openssl+security CLI；失败则打印钥匙串 GUI 手动步骤兜底。
+create_dev_cert() {
+    local name="SnapCraft Local"
+    log_info "创建本机自签名代码签名证书：$name"
+    if cert_exists "$name"; then
+        log_warn "证书「$name」已存在，无需重复创建。"
+        export SNAP_SIGN_ID="$name"
+        log_info "已设 SNAP_SIGN_ID=$name"
+        return 0
+    fi
+    if ! command -v openssl >/dev/null 2>&1; then
+        log_error "未找到 openssl，无法自动创建。请改用钥匙串 GUI："
+        print_cert_gui_steps
+        return 1
+    fi
+    local tmp
+    tmp="$(mktemp -d)"
+    local key="$tmp/key.pem" cert="$tmp/cert.pem" p12="$tmp/identity.p12"
+    if ! openssl req -x509 -newkey rsa:2048 -keyout "$key" -out "$cert" -days 3650 \
+        -subj "/CN=$name" -addext "extendedKeyUsage=codeSigning" -nodes 2>/dev/null; then
+        log_error "openssl 生成证书失败，请改用钥匙串 GUI（见下方）。"
+        print_cert_gui_steps
+        rm -rf "$tmp"
+        return 1
+    fi
+    # ⚠️ macOS security 命令不兼容 OpenSSL 3.x 默认加密算法（MAC 验证失败），
+    #    必须用 -legacy 生成旧格式 p12 + 非空密码（空密码也会 MAC 失败）
+    if ! openssl pkcs12 -export -legacy -out "$p12" -inkey "$key" -in "$cert" -passout pass:snapcraft 2>/dev/null; then
+        log_error "打包 p12 失败，请改用钥匙串 GUI（见下方）。"
+        print_cert_gui_steps
+        rm -rf "$tmp"
+        return 1
+    fi
+    # 用完整钥匙串路径（-k login 在某些环境找不到钥匙串）
+    local kc="$HOME/Library/Keychains/login.keychain-db"
+    if ! security import "$p12" -k "$kc" -P snapcraft -T /usr/bin/codesign 2>/dev/null; then
+        log_error "导入钥匙串失败（可能需解锁登录钥匙串或弹了授权框被取消）。请改用钥匙串 GUI："
+        print_cert_gui_steps
+        rm -rf "$tmp"
+        return 1
+    fi
+    rm -rf "$tmp"
+    log_info "✅ 证书「$name」已导入登录钥匙串。"
+    # codesign 只能用「受信任」(valid) 的身份签名。
+    # 设信任需要管理员权限（弹 GUI 授权框），无法在脚本中静默完成——需用户手动操作。
+    if ! cert_exists "$name"; then
+        log_warn ""
+        log_warn "⚠️ 证书已导入，但还需一步：设为「始终信任」(codesign 只用受信任的身份)"
+        log_warn "   1) ⌘+Space 搜索「钥匙串访问」，打开它"
+        log_warn "   2) 左侧选「登录」钥匙串 → 上方选「证书」"
+        log_warn "   3) 双击「SnapCraft Local」→ 展开「信任」"
+        log_warn "   4) 「使用此证书时」选「始终信任」→ 关闭 → 输入密码"
+        log_warn "   5) 回到终端：export SNAP_SIGN_ID=\"$name\" && ./start.sh dev"
+        return 1
+    fi
+    export SNAP_SIGN_ID="$name"
+    log_info "✅ 证书「$name」已就绪（受信任）。已将 SNAP_SIGN_ID 指向它。"
+    log_info "👉 建议写进 ~/.zshrc：export SNAP_SIGN_ID=\"$name\""
+    log_info "👉 之后直接 ./start.sh dev，改代码重编后屏幕录制权限也保留。"
+}
+
+# 钥匙串 GUI 手动创建证书的步骤（CLI 自动创建失败时的兜底）
+print_cert_gui_steps() {
+    cat <<'EOF'
+
+──────── 钥匙串 GUI 手动创建（一次性，约 3 分钟，无需 Apple ID）────────
+1) 打开「钥匙串访问」(Keychain Access)
+2) 菜单 钥匙串访问 → 证书助理 → 创建证书...
+3) 名称填：SnapCraft Local
+4) 身份类型：自签名根证书
+5) 证书类型：代码签名
+6) 有效期按需（建议 3650 天）
+7) 创建完成后，在「我的证书」找到它，双击 → 信任 → 代码签名：始终信任
+8) 终端执行：export SNAP_SIGN_ID="SnapCraft Local"（写进 ~/.zshrc 一劳永逸）
+─────────────────────────────────────────────────────────────────────
+EOF
+}
+
 # 用本地自签名证书对构建出的 .app 重签，使其被 Gatekeeper 信任（无需 Apple 开发者账号）
 codesign_app_local() {
     [ -d "$APP_BUNDLE" ] || return 0
@@ -460,6 +595,7 @@ show_help() {
     echo "  build-tauri      构建 Tauri 应用（不打开）"
     echo "  app              构建并打开 SnapCraft.app（开发期验收屏幕录制权限，自动用本地证书签名）"
     echo "  sign             用本地自签名证书重签已构建的 .app（无需 Apple 开发者账号）"
+    echo "  cert             一键创建本机自签名代码签名证书（无需 Apple 账号；让截图权限跨重编保留）"
     echo "  reset            重置 SnapCraft 的屏幕录制权限"
     echo "  help, -h, --help 显示此帮助信息"
     echo ""
@@ -474,6 +610,7 @@ show_help() {
     echo "  $0 build         # 构建前端"
     echo "  $0 build-tauri   # 仅构建 Tauri 应用"
     echo "  $0 app           # 构建并打开 .app（截图/权限验收用）"
+    echo "  $0 cert          # 一键创建自签名证书（首次配置，让改代码也不丢截图权限）"
     echo "  $0 reset         # 重置屏幕录制权限"
     echo "  $0 help          # 查看帮助信息"
 }
@@ -509,6 +646,9 @@ main() {
             log_info "SnapCraft 重新签名（本地自签名证书）"
             echo "========================================"
             sign_app_local
+            ;;
+        cert)
+            create_dev_cert
             ;;
         help|-h|--help)
             show_help

@@ -31,3 +31,67 @@ pub async fn delete_history(app: AppHandle, id: String) -> Result<(), String> {
 pub async fn clear_history(app: AppHandle) -> Result<(), String> {
     store::save_history(&app, &[])
 }
+
+/// 按 id 取单条截图（避免独立编辑窗拉全量历史，图内联 base64 传输浪费）
+#[tauri::command]
+pub async fn get_screenshot(app: AppHandle, id: String) -> Result<Option<HistoryItem>, String> {
+    let items = store::load_history(&app);
+    Ok(items.into_iter().find(|it| it.id == id))
+}
+
+/// 按 id 更新某条截图的标注 JSON（只改该条，整文件回写。
+/// 多窗口各自编辑不同截图时，互相不会覆盖对方的标注）
+#[tauri::command]
+pub async fn update_screenshot_annotations(
+    app: AppHandle,
+    id: String,
+    annotations_json: String,
+) -> Result<(), String> {
+    let mut items = store::load_history(&app);
+    if let Some(item) = items.iter_mut().find(|it| it.id == id) {
+        item.annotations = annotations_json;
+        store::save_history(&app, &items)
+    } else {
+        Err(format!("screenshot not found: {}", id))
+    }
+}
+
+/// 按 id 写入某条截图的 OCR 识别文字（纯文本）。
+/// 与 update_screenshot_annotations 平级：前者存标注、本命令存识别结果，
+/// 关窗后从历史重开（独立编辑窗）即可直接回显文字，无需二次识别。
+/// 设计动机：剪贴板图片/截图经 OCR 后，结果应随历史持久化，消除「识别完关窗再开文字没了」的断层。
+#[tauri::command]
+pub async fn set_screenshot_ocr(
+    app: AppHandle,
+    id: String,
+    ocr_text: String,
+) -> Result<(), String> {
+    let mut items = store::load_history(&app);
+    if let Some(item) = items.iter_mut().find(|it| it.id == id) {
+        item.ocr_text = ocr_text;
+        store::save_history(&app, &items)
+    } else {
+        Err(format!("screenshot not found: {}", id))
+    }
+}
+
+/// v4：写入某条截图的 OCR 完整结果（含每块归一化 bbox + 置信度，JSON 字符串）。
+/// 与 set_screenshot_ocr 平级：后者存纯文本，本命令存「坐标 + 文本」联合。
+/// 关窗重开后能取字位置、逐行框选/编辑、按框选局部重识别（不再伪造占位 bbox）。
+/// 空字符串=清除（允许前端主动擦除坐标仅保留纯文本）。
+#[tauri::command]
+pub async fn set_screenshot_ocr_full(
+    app: AppHandle,
+    id: String,
+    ocr_text: String,
+    ocr_blocks_json: String,
+) -> Result<(), String> {
+    let mut items = store::load_history(&app);
+    if let Some(item) = items.iter_mut().find(|it| it.id == id) {
+        item.ocr_text = ocr_text;
+        item.ocr_blocks_json = ocr_blocks_json;
+        store::save_history(&app, &items)
+    } else {
+        Err(format!("screenshot not found: {}", id))
+    }
+}

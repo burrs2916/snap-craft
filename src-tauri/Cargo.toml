@@ -15,7 +15,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "=2.11.0", features = ["protocol-asset"] }
+tauri = { version = "=2.11.0", features = ["protocol-asset", "tray-icon"] }
 tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-global-shortcut = "2"
@@ -27,3 +27,8 @@ base64 = "0.22"
 xcap = "0.9"
 arboard = "3"
 image = "0.25"
+
+# macOS 系统原生 OCR：Apple Vision 框架（编译期绑定，终端用户无需任何额外工具）。
+# Windows 侧不加依赖——用系统自带 PowerShell 5.1 子进程调 WinRT Windows.Media.Ocr。
+[target.'cfg(target_os = "macos")'.dependencies]
+apple-vision = "0.16"
