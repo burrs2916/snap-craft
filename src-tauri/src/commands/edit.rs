@@ -147,12 +147,10 @@ pub async fn read_clipboard_image() -> Result<String, String> {
             let w = img.width as u32;
             let h = img.height as u32;
             let rgba = img.bytes.to_vec();
-            match image::ImageBuffer::<image::Rgba<u8>, Vec<u8>>::from_raw(w, h, rgba) {
-                Some(buf) => Some(image::DynamicImage::ImageRgba8(buf)),
-                // 极少数情况下像素尺寸与字节数不匹配、无法构建缓冲区：不在此报错，
-                // 交给下方的「文件回退 + 空判定」统一处理，避免误报。
-                None => None,
-            }
+            // 极少数情况下像素尺寸与字节数不匹配、无法构建缓冲区：不在此报错，
+            // 交给下方的「文件回退 + 空判定」统一处理，避免误报。
+            image::ImageBuffer::<image::Rgba<u8>, Vec<u8>>::from_raw(w, h, rgba)
+                .map(image::DynamicImage::ImageRgba8)
         }
         Err(_) => None,
     };
