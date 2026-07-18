@@ -456,6 +456,96 @@ PLIST
     log_info "✅ dev .app 已就绪: $app"
 }
 
+# 备份当前 dev 签名身份（公钥身份持久化所需）
+# 为什么需要备份：
+#   dev 自签名证书（默认「SnapCraft Local」）保证 TCC 屏幕录制授权跨重编保留。
+#   升级系统 / 还原 Time Machine / 重装 macOS 后，钥匙串会丢，必须从备份恢复。
+#   不备份就只能重新创建 + 重新授权（开发循环友好性倒退）。
+# 备份内容：
+#   1) 证书本身（login 钥匙串）：用 security export -k login -o <file>.p12 导出 p12
+#   2) 证书备份目录：~/.snapcraft/keys/（首次备份时创建）
+#   3) 钥匙串信任状态：需要重新「始终信任」（导出后无法保留信任设置）
+# 恢复：
+#   security import <file>.p12 -k login -P <password> -T /usr/bin/codesign
+#   钥匙串访问 → 登录 → 证书 → 双击 → 信任 → 代码签名：始终信任
+#   export SNAP_SIGN_ID="SnapCraft Local"
+# 用法：./start.sh backup-cert           # 备份当前 dev 证书到 ~/.snapcraft/keys/
+#       ./start.sh restore-cert <file>   # 从 .p12 恢复
+backup_cert() {
+    local name="${SNAP_SIGN_ID:-SnapCraft Local}"
+    local backup_dir="$HOME/.snapcraft/keys"
+    mkdir -p "$backup_dir"
+    local out="$backup_dir/${name}-$(date +%Y%m%d-%H%M%S).p12"
+    log_info "备份证书「$name」到 $out"
+    if ! cert_exists "$name"; then
+        log_error "未在登录钥匙串中找到证书「$name」。"
+        log_warn "提示：若从未创建过，先跑 ./start.sh cert 创建。"
+        return 1
+    fi
+    # 导出 p12（需输入钥匙串访问密码，弹 GUI 授权框）
+    if ! security export -k login -t identities -f pkcs12 -o "$out" -P "" -A "" 2>/dev/null; then
+        # 上述命令要求非空密码；用 -P prompt 走到 GUI 弹窗
+        if ! security export -k login -t identities -f pkcs12 -o "$out" 2>/dev/null; then
+            log_error "导出失败。请在钥匙串访问中手动导出："
+            log_warn "  1) 钥匙串访问 → 登录 → 我的证书"
+            log_warn "  2) 选中「$name」→ 菜单 文件 → 导出项目 → 格式:个人信息交换(.p12)"
+            log_warn "  3) 保存到 $backup_dir/${name}.p12（密码留空或自定）"
+            return 1
+        fi
+    fi
+    # 记录元数据（人类可读）
+    local meta="$backup_dir/${name}.meta"
+    cat > "$meta" <<META
+# SnapCraft dev 签名证书备份元数据
+# 名称: $name
+# 备份时间: $(date '+%Y-%m-%d %H:%M:%S')
+# 备份机器: $(hostname)
+# 系统版本: $(sw_vers -productVersion 2>/dev/null || echo unknown)
+# 钥匙串: login
+
+# === 恢复步骤 ===
+# 1) 把本目录拷贝到新机器（或 Time Machine 还原）
+# 2) 钥匙串访问 → 登录 → 我的证书 → 菜单 文件 → 导入项目 → 选 $(basename "$out")
+# 3) 双击「$name」→ 信任 → 代码签名：始终信任
+# 4) export SNAP_SIGN_ID="$name"  （写进 ~/.zshrc）
+# 5) ./start.sh dev 验证（无需重新授权 TCC，因公钥身份一致）
+META
+    log_info "✅ 证书已备份到: $out"
+    log_info "   元数据:        $meta"
+    log_info "   备份目录:      $backup_dir"
+    log_warn "⚠️ 信任设置未随 p12 导出，恢复后需手动在钥匙串中设为「始终信任」"
+    log_warn "⚠️ 备份文件含私钥，请妥善保管（建议存加密磁盘 / 1Password）"
+}
+
+# 从 p12 备份恢复 dev 签名证书
+# 用法：./start.sh restore-cert <file.p12> [name]
+restore_cert() {
+    local file="$1"
+    local name="${2:-SnapCraft Local}"
+    if [ -z "$file" ] || [ ! -f "$file" ]; then
+        log_error "用法: ./start.sh restore-cert <file.p12> [cert-name]"
+        return 1
+    fi
+    log_info "从 $file 恢复证书「$name」..."
+    if cert_exists "$name"; then
+        log_warn "钥匙串中已存在「$name」，将先删除旧证书避免冲突"
+        security delete-identity -c "$name" login 2>/dev/null || true
+    fi
+    if ! security import "$file" -k login -T /usr/bin/codesign 2>/dev/null; then
+        log_error "导入失败。请改用钥匙串访问 GUI 手动导入："
+        log_warn "  1) 钥匙串访问 → 登录 → 我的证书"
+        log_warn "  2) 菜单 文件 → 导入项目 → 选 $file"
+        log_warn "  3) 导入后双击「$name」→ 信任 → 代码签名：始终信任"
+        return 1
+    fi
+    log_info "✅ 证书「$name」已导入登录钥匙串"
+    if ! cert_exists "$name"; then
+        log_warn "⚠️ 证书已导入，但 codesign 需「受信任」身份才能用"
+        log_warn "   请到钥匙串访问 → 双击「$name」→ 信任 → 代码签名：始终信任"
+    fi
+    log_info "👉 写 export SNAP_SIGN_ID=\"$name\" 到 ~/.zshrc 即可长期使用"
+}
+
 # 检查本机钥匙串是否存在指定名称的代码签名证书
 cert_exists() {
     local name="$1"
@@ -596,6 +686,8 @@ show_help() {
     echo "  app              构建并打开 SnapCraft.app（开发期验收屏幕录制权限，自动用本地证书签名）"
     echo "  sign             用本地自签名证书重签已构建的 .app（无需 Apple 开发者账号）"
     echo "  cert             一键创建本机自签名代码签名证书（无需 Apple 账号；让截图权限跨重编保留）"
+    echo "  backup-cert      备份当前 dev 签名证书到 ~/.snapcraft/keys/（公钥身份持久化）"
+    echo "  restore-cert     从 .p12 备份恢复 dev 签名证书（系统升级/换机后用）"
     echo "  reset            重置 SnapCraft 的屏幕录制权限"
     echo "  help, -h, --help 显示此帮助信息"
     echo ""
@@ -611,6 +703,8 @@ show_help() {
     echo "  $0 build-tauri   # 仅构建 Tauri 应用"
     echo "  $0 app           # 构建并打开 .app（截图/权限验收用）"
     echo "  $0 cert          # 一键创建自签名证书（首次配置，让改代码也不丢截图权限）"
+    echo "  $0 backup-cert   # 备份 dev 签名证书到 ~/.snapcraft/keys/"
+    echo "  $0 restore-cert  # 从备份恢复 dev 签名证书"
     echo "  $0 reset         # 重置屏幕录制权限"
     echo "  $0 help          # 查看帮助信息"
 }
@@ -649,6 +743,12 @@ main() {
             ;;
         cert)
             create_dev_cert
+            ;;
+        backup-cert)
+            backup_cert
+            ;;
+        restore-cert)
+            restore_cert "$2" "$3"
             ;;
         help|-h|--help)
             show_help

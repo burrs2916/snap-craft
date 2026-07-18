@@ -82,6 +82,22 @@ pnpm app            # bundle the app via start.sh
 pnpm build:local    # scripts/build-local.sh
 ```
 
+### Backing up your dev signing identity
+
+Your local self-signed certificate (default name `SnapCraft Local`) is what gives the dev build a stable **public-key identity**, so the macOS "Screen Recording" TCC permission survives recompilation. **If you lose it (system upgrade, Time Machine restore, new machine) you have to re-authorize TCC.**
+
+```bash
+# One-time: back up the certificate + private key to ~/.snapcraft/keys/
+./start.sh backup-cert
+
+# Later (on a new machine, or after restoring from backup):
+./start.sh restore-cert ~/.snapcraft/keys/SnapCraft\ Local-20260718-103045.p12
+# then in Keychain Access: 双击证书 → Trust → Code Signing: Always Trust
+# then: export SNAP_SIGN_ID="SnapCraft Local"
+```
+
+The backup is a `.p12` file containing both the cert and the private key — store it somewhere safe (encrypted disk / 1Password). The trust setting does **not** survive export, so after restore you must re-check "Always Trust" in Keychain Access (one GUI step).
+
 ## 📝 Usage
 
 1. **Launch SnapCraft** (grant Screen Recording permission on first run — a system prompt appears before the window hides)
