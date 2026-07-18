@@ -58,8 +58,12 @@ TEST_REPORT-*.md
 cad_*_report.md
 cad_*_analysis.md
 
-# All documentation
-docs/
+# All documentation drafts (workspace, not shipped)
+docs/工作总结/
+docs/需求分析/
+docs/协议相关/
+deliverables/
+*.md.backup
 
 # Agent/expert framework scaffolding (not part of the app)
 AGENTS.md
