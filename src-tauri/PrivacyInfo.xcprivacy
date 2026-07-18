@@ -1,0 +1,84 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SnapCraft 隐私清单 (PrivacyInfo.xcprivacy)
+  ===========================================
+  Apple 自 2025-05-01 起强制要求所有提交到 App Store 的 macOS 应用
+  包含 PrivacyInfo.xcprivacy，用于声明：
+    1. 是否使用 Tracking（追踪）
+    2. 收集了哪些用户数据
+    3. 访问了哪些 "Required Reason API"（必须给出原因）
+
+  4 类 Required Reason API 必须覆盖：
+    - NSPrivacyAccessedAPICategoryUserDefaults      → 配置 / 偏好存储
+    - NSPrivacyAccessedAPICategoryFileTimestamp    → 历史文件按时间排序
+    - NSPrivacyAccessedAPICategoryDiskSpace        → 启动时判断存储是否充足
+    - NSPrivacyAccessedAPICategorySystemBootTime   → "上次运行距今"提示
+
+  5 类我们不需要：
+    ❌ NSPrivacyAccessedAPICategoryDeviceID          无 IDFA 使用
+    ❌ NSPrivacyAccessedAPICategoryActiveKeyboards   无输入法监控
+    ❌ NSPrivacyAccessedAPICategoryAppleIntelligence  无 Apple Intelligence
+    ❌ NSPrivacyAccessedAPICategoryPort            不扫描端口
+    ❌ NSPrivacyAccessedAPICategoryInternet       不主动访问
+
+  参考：https://developer.apple.com/documentation/bundleresources/privacy_manifest_files
+-->
+<plist version="1.0">
+<dict>
+    <!-- 1. Tracking 声明：false = 不追踪用户 -->
+    <key>NSPrivacyTracking</key>
+    <false/>
+
+    <!-- 2. 收集的数据类型：空数组 = 不收集任何用户数据 -->
+    <key>NSPrivacyCollectedDataTypes</key>
+    <array/>
+
+    <!-- 3. 跟踪域名：空（因为不追踪） -->
+    <key>NSPrivacyTrackingDomains</key>
+    <array/>
+
+    <!-- 4. 访问的 Required Reason API（必须给出 reason code） -->
+    <key>NSPrivacyAccessedAPITypes</key>
+    <array>
+        <!-- 4.1 UserDefaults：用于应用配置（启动项、最近文件、托盘状态等） -->
+        <dict>
+            <key>NSPrivacyAccessedAPIType</key>
+            <string>NSPrivacyAccessedAPICategoryUserDefaults</string>
+            <key>NSPrivacyAccessedAPITypeReasons</key>
+            <array>
+                <string>CA92.1</string>
+            </array>
+        </dict>
+
+        <!-- 4.2 FileTimestamp：用于历史截图按时间排序 -->
+        <dict>
+            <key>NSPrivacyAccessedAPIType</key>
+            <string>NSPrivacyAccessedAPICategoryFileTimestamp</string>
+            <key>NSPrivacyAccessedAPITypeReasons</key>
+            <array>
+                <string>C617.1</string>
+            </array>
+        </dict>
+
+        <!-- 4.3 DiskSpace：启动时判断磁盘空间，避免保存失败 -->
+        <dict>
+            <key>NSPrivacyAccessedAPIType</key>
+            <string>NSPrivacyAccessedAPICategoryDiskSpace</string>
+            <key>NSPrivacyAccessedAPITypeReasons</key>
+            <array>
+                <string>E174.1</string>
+            </array>
+        </dict>
+
+        <!-- 4.4 SystemBootTime：用于"上次运行距今"等时间提示 -->
+        <dict>
+            <key>NSPrivacyAccessedAPIType</key>
+            <string>NSPrivacyAccessedAPICategorySystemBootTime</string>
+            <key>NSPrivacyAccessedAPITypeReasons</key>
+            <array>
+                <string>35F9.1</string>
+            </array>
+        </dict>
+    </array>
+</dict>
+</plist>
