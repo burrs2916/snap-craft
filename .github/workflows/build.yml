@@ -78,6 +78,14 @@ jobs:
 
   # ============================================================
   # Tauri Build Matrix (macOS / Windows)
+  #
+  # macOS 签名修复 (2026-07-18):
+  #   不再用 tauri-apps/tauri-action 内部的 `security import` 来导入证书
+  #   (该路径在 CI 无头环境脆弱, 会报 "One or more parameters passed to a
+  #   function were not valid")。改为: 手动导入证书到专用 keychain +
+  #   直接 `pnpm tauri build`。Release 改为由独立的 release job 用
+  #   softprops/action-gh-release@v2 发布。
+  #   Windows 仍保留 tauri-action (仅 MSI/NSIS 签名, 未报证书错误)。
   # ============================================================
   build:
     name: Build (${{ matrix.platform }})
@@ -147,54 +155,116 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-${{ matrix.target }}-cargo-
 
-      # ---- Build Tauri App ----
-      # macOS 签名+公证：当配置了 Apple 证书 secrets 时自动启用
-      # Windows 签名：当配置了证书 secrets 时自动启用
-      - name: Build Tauri App
-        uses: tauri-apps/tauri-action@v0
+      # ==========================================================
+      # macOS: 手动导入 Apple 证书到专用 keychain
+      # 仅当配置了 APPLE_CERTIFICATE_BASE64 时运行。
+      # 绕过 tauri-action 脆弱的自动 security import。
+      # ==========================================================
+      - name: Import Apple certificate (macOS)
+        if: ${{ startsWith(matrix.platform, 'macOS') && secrets.APPLE_CERTIFICATE_BASE64 != '' }}
+        shell: bash
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # macOS 签名：tauri-action 自动检测这些环境变量并启用签名+公证
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_TEAM_ID && 'Developer ID Application' || '' }}
+          CERT_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+          CERT_PWD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN: ${{ runner.temp }}/build.keychain-db
+        run: |
+          set -euo pipefail
+          # FIX: fail fast on empty password - never hand an empty -P to `security import`
+          # (empty password is the #1 cause of "One or more parameters passed to a function were not valid")
+          : "${CERT_PWD:?APPLE_CERTIFICATE_PASSWORD secret is empty - cannot import a p12 that contains a private key}"
+
+          # Dedicated, randomly-generated keychain password, decoupled from the p12 password.
+          KEYCHAIN_PWD="$(openssl rand -base64 24)"
+
+          CERT_P12="$RUNNER_TEMP/build_certificate.p12"
+
+          echo "=== Decoding base64 -> p12 ==="
+          # Single base64 decode only (printf avoids trailing-newline/interpretation issues);
+          # if the Secret is double-encoded or corrupt, the openssl validation below will catch it.
+          printf '%s' "$CERT_BASE64" | base64 --decode -o "$CERT_P12"
+
+          echo "=== Validating p12 (cert + private key present, password correct) ==="
+          if ! openssl pkcs12 -info -in "$CERT_P12" -passin "pass:$CERT_PWD" -nokeys -passout pass: 2>/dev/null | grep -q "BEGIN CERTIFICATE"; then
+            echo "❌ APPLE_CERTIFICATE_BASE64 不是合法、可被密码解开的 PKCS#12 (.p12) 证书包。"
+            echo "   常见原因: 误存了 Apple 下载的 .cer(仅公钥)、PEM 文本、二次 base64 编码损坏, 或密码不符。"
+            echo "   请用本地脚本先自查: ./scripts/validate-apple-cert.sh build_certificate.p12 '<p12-password>'"
+            exit 1
+          fi
+          if ! openssl pkcs12 -info -in "$CERT_P12" -passin "pass:$CERT_PWD" -nocerts -passout pass: 2>/dev/null | grep -q "PRIVATE KEY"; then
+            echo "❌ p12 内未包含私钥。codesign 必须要有私钥才能签名。"
+            echo "   请从 Keychain Access 重新导出: 选中证书(展开显示私钥) -> 右键导出 .p12 -> 设置密码。"
+            exit 1
+          fi
+          echo "  ✓ p12 校验通过 (含证书 + 私钥)"
+
+          echo "=== Creating dedicated keychain ==="
+          security create-keychain -p "$KEYCHAIN_PWD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PWD" "$KEYCHAIN"
+
+          echo "=== Importing p12 (auto-detect format; DO NOT use -t cert on a cert+key aggregate) ==="
+          # FIX: dropped `-t cert -f pkcs12`. A .p12 carries BOTH cert and private key;
+          # forcing `-t cert` makes `security` mis-type it and report
+          # "One or more parameters passed to a function were not valid".
+          security import "$CERT_P12" -P "$CERT_PWD" -A -k "$KEYCHAIN"
+
+          echo "=== Registering keychain in user search list (guard against missing login.keychain-db) ==="
+          # Fresh macOS runners may not yet have a login.keychain-db; referencing a
+          # non-existent keychain in `-s` makes `security` error out.
+          SEARCH_LIST="$KEYCHAIN"
+          if [ -f "$HOME/Library/Keychains/login.keychain-db" ] || [ -f "$HOME/Library/Keychains/login.keychain" ]; then
+            SEARCH_LIST="$KEYCHAIN login.keychain-db"
+          fi
+          security list-keychains -d user -s $SEARCH_LIST
+
+          echo "=== Granting codesign headless access to private key (CRITICAL) ==="
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PWD" "$KEYCHAIN"
+
+          echo "=== Resolving signing identity ==="
+          RESOLVED=""
+          RESOLVED=$(security find-identity -v -p codesigning "$KEYCHAIN" | grep "Developer ID Application" | head -n1 | sed -E 's/.*\) +([A-Fa-f0-9]+) +"(.*)"/\2/') || true
+          if [ -z "$RESOLVED" ]; then
+            echo "  (no 'Developer ID Application' identity — falling back to first available codesigning identity)"
+            RESOLVED=$(security find-identity -v -p codesigning "$KEYCHAIN" | head -n1 | sed -E 's/.*\) +([A-Fa-f0-9]+) +"(.*)"/\2/') || true
+          fi
+          # Safe GITHUB_ENV write (printf, no newline-injection risk)
+          printf 'RESOLVED_SIGNING_IDENTITY=%s\n' "$RESOLVED" >> "$GITHUB_ENV"
+          if [ -n "$RESOLVED" ]; then
+            echo "  ✓ Signing identity: $RESOLVED"
+          else
+            echo "  (no codesigning identity found — build will fall back to ad-hoc signing)"
+          fi
+
+      # ==========================================================
+      # macOS: 直接构建 (签名走自建 keychain, 不再依赖 tauri-action)
+      # 当 APPLE_CERTIFICATE_BASE64 缺失时 RESOLVED_SIGNING_IDENTITY 为空,
+      # tauri-bundler 自动 ad-hoc 签名, 保证出包不崩。
+      # ==========================================================
+      - name: Build Tauri App (macOS)
+        if: ${{ startsWith(matrix.platform, 'macOS') }}
+        shell: bash
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ env.APPLE_SIGNING_IDENTITY }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          # Windows 签名：tauri-action 自动检测并启用
+        run: |
+          set -euo pipefail
+          echo "Building for aarch64-apple-darwin (signing identity: '${APPLE_SIGNING_IDENTITY:-<ad-hoc>}')"
+          pnpm tauri build --target aarch64-apple-darwin
+
+      # ==========================================================
+      # Windows: 保留 tauri-action (仅 MSI/NSIS 签名, 未报证书错误)
+      # 已禁用其 Release 创建 (改由独立 release job 用 action-gh-release 发布)。
+      # ==========================================================
+      - name: Build Tauri App (Windows)
+        if: ${{ matrix.platform == 'Windows' }}
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
         with:
-          tagName: v__VERSION__
-          releaseName: 'SnapCraft v__VERSION__'
-          releaseBody: |
-            ## SnapCraft v__VERSION__
-
-            ### macOS (Apple Silicon)
-            Download `SnapCraft_*.dmg`, double-click to mount, then drag
-            **SnapCraft** into the Applications folder.
-
-            如果应用使用了 Apple Developer ID 签名 + 公证（CI 配置了证书时），
-            Gatekeeper 不会拦截，可直接双击打开。否则使用 ad-hoc 签名，首次
-            打开需执行：
-            ```bash
-            sudo xattr -dr com.apple.quarantine /Applications/SnapCraft.app
-            ```
-            首次截图时会自动弹出屏幕录制权限请求，点击「允许」即可。
-
-            ### Windows (Installer)
-            Download `SnapCraft_*.msi` and double-click to install.
-            SmartScreen may warn - choose "More info -> Run anyway".
-
-            ### Windows (Standalone EXE)
-            Download `SnapCraft_*.exe` (standalone, no installer needed).
-            Frontend is embedded; requires WebView2 Runtime (pre-installed on Win10/11).
-
-            ### Windows (MSIX)
-            Download `SnapCraft_*.msix` for Microsoft Store sideloading.
-            Requires Windows 10 1809+ with Developer Mode or signed certificate.
-          releaseDraft: ${{ startsWith(github.ref, 'refs/tags/v') }}
-          prerelease: ${{ !startsWith(github.ref, 'refs/tags/v') }}
           args: --target ${{ matrix.target }}
 
       # ---- Upload build artifacts (macOS DMG) ----
@@ -356,6 +426,70 @@ jobs:
           path: |
             src-tauri/target/windows-portable.zip
           if-no-files-found: warn
+
+  # ============================================================
+  # Publish GitHub Release (only on tag push)
+  # 收集 build job 的全部产物, 用 softprops/action-gh-release 发布。
+  # 替代原先 tauri-action 内置的 Release 创建 (macOS 已不再用 tauri-action)。
+  # ============================================================
+  release:
+    name: Publish GitHub Release
+    needs: [build]
+    if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: '*'
+          merge-multiple: true
+          path: .
+          if-no-files-found: warn
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          prerelease: false
+          fail_on_unmatched_files: false
+          body: |
+            ## SnapCraft ${{ github.ref_name }}
+
+            ### macOS (Apple Silicon)
+            Download `SnapCraft_*.dmg`, double-click to mount, then drag
+            **SnapCraft** into the Applications folder.
+
+            如果应用使用了 Apple Developer ID 签名 + 公证（CI 配置了证书时），
+            Gatekeeper 不会拦截，可直接双击打开。否则使用 ad-hoc 签名，首次
+            打开需执行：
+            ```bash
+            sudo xattr -dr com.apple.quarantine /Applications/SnapCraft.app
+            ```
+            首次截图时会自动弹出屏幕录制权限请求，点击「允许」即可。
+
+            ### Windows (Installer)
+            Download `SnapCraft_*.msi` and double-click to install.
+            SmartScreen may warn - choose "More info -> Run anyway".
+
+            ### Windows (Standalone EXE)
+            Download `SnapCraft_*.exe` (standalone, no installer needed).
+            Frontend is embedded; requires WebView2 Runtime (pre-installed on Win10/11).
+
+            ### Windows (MSIX)
+            Download `SnapCraft_*.msix` for Microsoft Store sideloading.
+            Requires Windows 10 1809+ with Developer Mode or signed certificate.
+          files: |
+            src-tauri/target/**/release/bundle/**/*.dmg
+            src-tauri/target/**/release/bundle/**/*.msi
+            src-tauri/target/**/release/bundle/**/*.exe
+            src-tauri/target/**/release/bundle/**/*.app.zip
+            src-tauri/target/**/release/bundle/**/*.msix
+            src-tauri/target/**/release/bundle/**/*.msixbundle
 
   # ============================================================
   # macOS App Store submission (opt-in via vars.ENABLE_APPSTORE)
