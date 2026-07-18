@@ -281,6 +281,7 @@ export default function AIPanel({
     deleteConv,
     forkConversation,
     setOutput,
+    recordConvMeta,
   } = useAiStore();
 
   // 独立浮动窗（windowChrome）拖动：macOS 无边框窗口下 data-tauri-drag-region 自动注入常失效，
@@ -748,7 +749,9 @@ export default function AIPanel({
     setTestMsg(null);
     // 无目标时不动作，避免误清空已有对话（footgun 修复）
     if (!goal.trim()) return;
-    // 已有对话则先清空，确保「生成」始终是从截图重新起草第一稿
+    // 已有对话则先确认清空（修复前：静默清空 → 多轮打磨成果误丢，无撤销）。
+    // window.confirm 在 Tauri webview 中正常生效，零依赖。
+    if (conversation.length && !window.confirm(t('ai.confirmRegenerate'))) return;
     if (conversation.length) clearConversation();
     // P1-4：report 预设强制附带截图（与 handleMakeReport 一致），
     // 避免用户手动选 report 预设 + 取消勾选 → AI 输出 SNAP:k 标记但导出时无图。
@@ -768,6 +771,10 @@ export default function AIPanel({
       images: extraImages,
       ocrTexts: extraOcr,
     });
+    // 修复：goal 输入框生成后清空，与 follow 输入框行为对齐，
+    // 避免「上次的 goal 残留 → 误以为已有内容 → 不再输入 → 再次点击仍是旧 prompt」。
+    // 用户如需复用可从历史库点回该会话（hasOutput 路径）。
+    setGoal('');
   };
 
   // 按「当前截图 + 已选附加（选择顺序）」拼出报告章节对应的有序图片列表
@@ -925,9 +932,15 @@ export default function AIPanel({
 
   // 进入/退出「编辑文档」态：进入时把当前 output 载入草稿 textarea；
   // 完成（退出）时写回 store——setOutput 会同步对话线程末条 assistant 并落盘，保证「编辑→重导」与「重开恢复」同源。
+  // 编辑后同步刷新历史索引（preview/updatedAt），否则历史库列表仍显示旧预览。
   const handleToggleEdit = () => {
     if (isEditing) {
       setOutput(editDraft);
+      // 同步历史索引：用新 output 生成最新 preview（activePreset 维持原值，不变）
+      const st = useAiStore.getState();
+      if (st.convKey && st.conversation.length) {
+        recordConvMeta(st.convKey, st.conversation, activePreset, undefined, '');
+      }
       setIsEditing(false);
     } else {
       setEditDraft(output ?? '');

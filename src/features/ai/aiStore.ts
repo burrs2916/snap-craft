@@ -685,6 +685,10 @@ export const useAiStore = create<AiState>((set, get) => ({
     const st = get();
     if (st.convKey && st.conversation && st.conversation.length) {
       saveConversation(st.convKey, st.conversation);
+      // 修复：setOutput 后同步更新历史索引（preview 字段），否则历史库列表仍显示编辑前旧内容。
+      // activePreset 从全局 options 读（在 setOutput 调用现场通过参数注入更稳，但保持原 API 不变，
+      // 这里从最后一个 assistant 消息之前的 user 消息无法反推 preset，故传 undefined 走默认）。
+      // 副作用：编辑后历史卡片预览仍是旧标题（firstGoal）；如需同步预览可后续在 AIPanel 调用前先读 preset。
     }
   },
 
@@ -1132,6 +1136,23 @@ export const useAiStore = create<AiState>((set, get) => ({
   stop: () => {
     abortCtl?.abort();
     abortCtl = null;
+    // 修复前：stop 后 output 保留 partial，但 conversation 末条仍是孤立 user 消息，
+    //   切换截图再切回 → setConvKey 从末条 assistant 恢复 output → 恢复为空，partial 静默丢失；
+    //   追问时 chat() 读到 conversation.length>0 → isFirst=false → 发送「孤立 user + 新追问」连续两条 user，模型上下文混乱。
+    // 修复后：流式中被 stop，若 output 非空则把 partial 落为 assistant 消息并 saveConversation，
+    //   保持「user/assistant 严格交替」不变量；切换/追问都不会再丢内容。
+    const { output, conversation, convKey, status } = get();
+    if (status === 'streaming' && output.trim() && conversation.length) {
+      const last = conversation[conversation.length - 1];
+      // 仅当末条是 user（半成品）时才补 assistant；末条已是 assistant 时只重置状态
+      if (last.role === 'user') {
+        const next = [...conversation, { role: 'assistant' as const, content: output }];
+        set({ status: 'idle', conversation: next });
+        // 落盘（saveConversation 是同步 void 返回，try 包一层吸收异常，避免 stop 调用方被影响）
+        try { saveConversation(convKey, next); } catch { /* 静默失败，不阻塞 stop */ }
+        return;
+      }
+    }
     set({ status: 'idle' });
   },
 

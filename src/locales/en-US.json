@@ -420,6 +420,7 @@
     "attachImage": "Attach screenshot",
     "attachImageTitle": "Send the current screenshot to the model (requires a vision-capable model)",
     "attachImageAgentTitle": "AI Smart Edit / Privacy Sentinel must see the screenshot to edit by coordinates, so it is attached automatically (cannot be turned off)",
+    "confirmRegenerate": "You have an existing conversation. Generating will clear it and start fresh. Continue?",
     "refreshImage": "Sync latest edits",
     "visionImageTitle": "The AI sees your edited screenshot (with annotations/redactions); click to re-composite the latest changes before sending to the AI",
     "attachOcr": "Attach OCR text",

@@ -420,6 +420,7 @@
     "attachImage": "附带截图",
     "attachImageTitle": "把当前截图发送给模型（需要支持视觉的模型）",
     "attachImageAgentTitle": "AI 智能编辑 / 隐私哨兵必须看图才能按坐标编辑，已自动附带当前截图（不可关闭）",
+    "confirmRegenerate": "当前已有对话，生成将清空并重新起草。确定继续？",
     "refreshImage": "同步最新编辑",
     "visionImageTitle": "AI 看到的是你编辑后的截图（含标注/打码）；点此把最新改动重新合成后发给 AI",
     "attachOcr": "附带识别文字",
