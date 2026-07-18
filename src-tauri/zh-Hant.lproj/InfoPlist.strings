@@ -1,0 +1,9 @@
+/* InfoPlist.strings - 繁體中文 */
+
+"NSScreenCaptureUsageDescription" = "SnapCraft 需要「螢幕錄製」權限來擷取螢幕畫面，以便你進行標註、文字辨識與儲存截圖。";
+
+"NSCameraUsageDescription" = "SnapCraft 目前版本不存取攝影機。此項目保留供未來版本使用。";
+
+"NSMicrophoneUsageDescription" = "SnapCraft 目前版本不存取麥克風。此項目保留供未來版本的螢幕錄製音訊使用。";
+
+"NSAccessibilityUsageDescription" = "SnapCraft 目前版本不需要輔助使用權限。此項目保留供未來版本的全域快捷鍵功能使用。";

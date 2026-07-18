@@ -1,0 +1,13 @@
+/* InfoPlist.strings - Deutsch
+ *
+ * "Bildschirmaufnahme" (Aufnahme) vermeiden — stattdessen "Screenshot"
+ * oder "Bildschirminhalt erfassen" verwenden.
+ */
+
+"NSScreenCaptureUsageDescription" = "SnapCraft benötigt die Berechtigung „Bildschirmaufnahme", um Bildschirminhalte aufzunehmen, damit du Screenshots kommentieren, per OCR erkennen und speichern kannst.";
+
+"NSCameraUsageDescription" = "SnapCraft verwendet die Kamera nicht. Dieser Eintrag ist für eine zukünftige Version reserviert.";
+
+"NSMicrophoneUsageDescription" = "SnapCraft verwendet in dieser Version das Mikrofon nicht. Dieser Eintrag ist für Audioaufnahmen in einer zukünftigen Version reserviert.";
+
+"NSAccessibilityUsageDescription" = "SnapCraft benötigt in dieser Version keinen Bedienungshilfe-Zugriff. Dieser Eintrag ist für globale Kurzbefehle in einer zukünftigen Version reserviert.";

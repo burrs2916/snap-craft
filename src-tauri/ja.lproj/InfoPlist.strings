@@ -1,0 +1,13 @@
+/* InfoPlist.strings - 日本語
+ *
+ * 「録画」ではなく「画面の取り込み」「スクリーンショット」と表現する
+ * (App Store ガイドライン 5.1.1 への抵触回避)。
+ */
+
+"NSScreenCaptureUsageDescription" = "SnapCraft は画面の取り込みに「画面収録」の許可を必要とします。これにより、注釈、テキスト認識、スクリーンショットの保存が可能になります。";
+
+"NSCameraUsageDescription" = "SnapCraft はカメラにアクセスしません。この項目は将来のリリース用に予約されています。";
+
+"NSMicrophoneUsageDescription" = "SnapCraft はこのバージョンでマイクにアクセスしません。この項目は画面収録の音声用として将来のリリースに備えて用意されています。";
+
+"NSAccessibilityUsageDescription" = "SnapCraft はこのバージョンでアクセシビリティへのアクセスを必要としません。この項目は将来のグローバルホットキー機能に備えて用意されています。";

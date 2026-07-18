@@ -1,0 +1,13 @@
+/* InfoPlist.strings - Español
+ *
+ * Evitar "grabación de pantalla" (implica vídeo) — usar "captura de pantalla"
+ * o "tomar instantáneas".
+ */
+
+"NSScreenCaptureUsageDescription" = "SnapCraft necesita el permiso de Grabación de pantalla para capturar el contenido de tu pantalla y permitirte anotar, reconocer texto (OCR) y guardar capturas.";
+
+"NSCameraUsageDescription" = "SnapCraft no utiliza la cámara. Esta entrada está reservada para una versión futura.";
+
+"NSMicrophoneUsageDescription" = "SnapCraft no utiliza el micrófono en esta versión. Esta entrada está reservada para el audio de grabación de pantalla en una versión futura.";
+
+"NSAccessibilityUsageDescription" = "SnapCraft no requiere acceso a Accesibilidad en esta versión. Esta entrada está reservada para funciones de atajos globales en una versión futura.";

@@ -1,0 +1,28 @@
+/* InfoPlist.strings - Localized text overrides for Info.plist
+ *
+ * Apple shows these strings in:
+ *   - System Settings → Privacy & Security → Screen Recording (TCC prompt)
+ *   - App Store product page
+ *   - First-launch permission dialogs
+ *
+ * Add a .lproj subfolder under src-tauri/ for each language you want to support.
+ * Tauri 2 automatically packages .lproj folders as bundle Resources.
+ *
+ * IMPORTANT: Keep the "NSScreenCaptureUsageDescription" text neutral.
+ * Apple App Store Guideline 5.1.1 rejects wording that implies
+ * "screen recording" / "video capture" functionality — we only capture
+ * still images, so we describe it as "capture the screen" or
+ * "annotate screenshots" (NOT "record screen" / "录屏").
+ */
+
+/* NSScreenCaptureUsageDescription - shown in the macOS Screen Recording TCC prompt */
+"NSScreenCaptureUsageDescription" = "SnapCraft needs Screen Recording permission to capture your screen so you can annotate, OCR, and save screenshots.";
+
+/* NSCameraUsageDescription - reserved, not used in 0.1.0 */
+"NSCameraUsageDescription" = "SnapCraft does not use the camera. This entry is reserved for a future release.";
+
+/* NSMicrophoneUsageDescription - reserved, not used in 0.1.0 */
+"NSMicrophoneUsageDescription" = "SnapCraft does not use the microphone in this version. This entry is reserved for screen-recording audio in a future release.";
+
+/* NSAccessibilityUsageDescription - reserved, not used in 0.1.0 */
+"NSAccessibilityUsageDescription" = "SnapCraft does not require Accessibility access in this version. This entry is reserved for global hotkey features in a future release.";

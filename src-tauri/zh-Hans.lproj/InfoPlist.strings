@@ -1,0 +1,13 @@
+/* InfoPlist.strings - 简体中文
+ *
+ * 避免使用"录屏"字眼以规避 App Store Guideline 5.1.1 审核风险。
+ * 用"截取屏幕"或"截屏"代替。
+ */
+
+"NSScreenCaptureUsageDescription" = "SnapCraft 需要「屏幕录制」权限来截取屏幕画面，以便你进行标注、文字识别与保存截图。";
+
+"NSCameraUsageDescription" = "SnapCraft 当前版本不调用摄像头。该项预留给未来版本。";
+
+"NSMicrophoneUsageDescription" = "SnapCraft 当前版本不调用麦克风。该项预留给未来版本的屏幕录制音频。";
+
+"NSAccessibilityUsageDescription" = "SnapCraft 当前版本不需要辅助功能权限。该项预留给未来版本的全局快捷键功能。";

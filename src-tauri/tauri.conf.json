@@ -51,7 +51,14 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "resources": [],
+    "resources": [
+      "en.lproj",
+      "zh-Hans.lproj",
+      "zh-Hant.lproj",
+      "ja.lproj",
+      "de.lproj",
+      "es.lproj"
+    ],
     "externalBin": [],
     "copyright": "© 2026 SnapCraft Lab. All rights reserved.",
     "macOS": {

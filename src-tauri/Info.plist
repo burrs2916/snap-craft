@@ -2,9 +2,88 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+    <key>CFBundleDisplayName</key>
+    <string>SnapCraft</string>
+    <key>CFBundleName</key>
+    <string>SnapCraft</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.snap-craft.app</string>
+    <key>CFBundleExecutable</key>
+    <string>SnapCraft</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.1.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+
+    <key>LSMinimumSystemVersion</key>
+    <string>14.0</string>
+
+    <!-- 必备：人类可读版权信息，App Store / 系统信息显示 -->
+    <key>NSHumanReadableCopyright</key>
+    <string>© 2026 SnapCraft Lab. All rights reserved.</string>
+
+    <!-- 必备：App Store 分类与 macOS Launchpad 分类 -->
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.productivity</string>
+
+    <!-- 必备：声明支持自动显卡切换（集显/独显），
+         避免 Apple Silicon 设备上无谓地跑独显。 -->
+    <key>NSSupportsAutomaticGraphicsSwitching</key>
+    <true/>
+
+    <!-- 必备：声明是高分辨率应用，让 macOS 渲染 @2x / @3x 资源。
+         即使不放 .icon 时也要设。 -->
+    <key>NSHighResolutionCapable</key>
+    <true/>
+
+    <!-- 推荐：明确应用支持 Retina 显示（与 NSHighResolutionCapable 等价但更显式） -->
+    <key>NSSupportsAutomaticTermination</key>
+    <true/>
+    <key>NSSupportsSuddenTermination</key>
+    <true/>
+
+    <!-- TCC 屏幕录制权限文案（必须，6 语言版本在 InfoPlist.strings 覆盖）。
+         严格避开"录屏"字眼（App Store 审核 R-C-02 风险）。 -->
     <key>NSScreenCaptureUsageDescription</key>
-    <string>SnapCraft 需要屏幕录制权限来截取屏幕画面。</string>
-    <key>NSAppleEventsUsageDescription</key>
-    <string>SnapCraft 需要发送 AppleScript 指令以将截图复制到剪贴板。</string>
+    <string>SnapCraft needs Screen Recording permission to capture your screen so you can annotate, OCR, and save screenshots.</string>
+
+    <!-- 文档类型声明（让 Finder 在打开 .png / .pdf 时能"在 SnapCraft 中打开"） -->
+    <key>CFBundleDocumentTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleTypeName</key>
+            <string>Screenshot Image</string>
+            <key>CFBundleTypeRole</key>
+            <string>Viewer</string>
+            <key>LSHandlerRank</key>
+            <string>Alternate</string>
+            <key>LSItemContentTypes</key>
+            <array>
+                <string>public.png</string>
+                <string>public.jpeg</string>
+                <string>com.compuserve.gif</string>
+                <string>public.tiff</string>
+            </array>
+        </dict>
+    </array>
+
+    <!-- URL Scheme（保留扩展位，留给后续 P1 的 deep link） -->
+    <key>CFBundleURLTypes</key>
+    <array/>
+
+    <!-- Spotlight 索引（关闭，避免截屏历史被 Spotlight 索引到） -->
+    <key>NSSpotlightIndexingBlocked</key>
+    <true/>
+
+    <!-- App Sandbox 模式下，系统不会自动获取摄像头/麦克风权限；
+         若 P1 阶段加入录屏/录音，本字段会被 InfoPlist.strings 覆盖。 -->
+    <key>NSCameraUsageDescription</key>
+    <string>SnapCraft does not use the camera. This entry is reserved for a future release.</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>SnapCraft does not use the microphone in this version. This entry is reserved for screen recording audio in a future release.</string>
 </dict>
 </plist>
