@@ -284,6 +284,49 @@
     "refreshing": "检查中…",
     "later": "稍后再说"
   },
+  "permissionMac": {
+    "screenRecording": {
+      "title": "屏幕录制权限",
+      "missing": "尚未授权「屏幕录制」权限。SnapCraft 需要此权限才能截取屏幕。",
+      "howTo": "1) 打开「系统设置 → 隐私与安全性 → 屏幕录制」\n2) 找到「{brand}」并打开开关\n3) 返回此处，点击「刷新」重新检测",
+      "openSettings": "打开屏幕录制设置",
+      "refresh": "刷新状态",
+      "granted": "屏幕录制权限已授予",
+      "required": "必需用于：全屏、区域、窗口、滚动截屏"
+    },
+    "microphone": {
+      "title": "麦克风权限",
+      "notRequired": "当前版本不需要。SnapCraft 不录制音频。",
+      "future": "未来版本录制屏幕带音频时将需要此权限。",
+      "openSettings": "打开麦克风设置"
+    },
+    "accessibility": {
+      "title": "辅助功能权限",
+      "notRequired": "当前版本不需要。无需辅助功能权限全局快捷键即可工作。",
+      "future": "未来版本的进阶全局快捷键功能可能需要此权限。",
+      "openSettings": "打开辅助功能设置"
+    },
+    "filesAndFolders": {
+      "title": "文件和文件夹",
+      "downloads": "下载文件夹：SnapCraft 默认将截图保存到「下载」。通过 App Sandbox 自动授权访问。",
+      "desktop": "桌面文件夹：当您保存截图到桌面时自动获得访问权限。",
+      "pictures": "图片文件夹：当您保存截图到图片文件夹时自动获得访问权限。"
+    },
+    "fullDisk": {
+      "title": "完全磁盘访问权限",
+      "notRequired": "不需要。SnapCraft 只访问您明确授权的文件夹。",
+      "openSettings": "打开完全磁盘访问设置"
+    },
+    "troubleshooting": {
+      "title": "权限问题排查",
+      "stillMissing": "如果开关已打开但 SnapCraft 仍无法截图，请尝试：",
+      "step1": "1) 把「屏幕录制」开关关掉，等待 5 秒，再打开",
+      "step2": "2) 完全退出 SnapCraft（Cmd + Q）后重新打开",
+      "step3": "3) 如仍无效，重启 Mac",
+      "reset": "重置 SnapCraft 的所有权限",
+      "resetSuccess": "所有权限已重置。下次截图时会重新请求授权。"
+    }
+  },
   "display": {
     "title": "选择要截取的显示器",
     "text": "检测到 {n} 块显示器，已按实际摆放位置排列（左→右）。点选下方对应的一块即可。",
@@ -457,6 +500,8 @@
     "copyRich": "复制为富文本",
     "copyRichTitle": "把渲染后的 HTML 复制到剪贴板，粘贴到 Word / 邮件 / 富文本编辑器时保留标题、列表、表格、引用等结构（而非裸 Markdown 源码）",
     "clear": "清空",
+    "stats": "{words} 字 · {lines} 行 · 约 {minutes} 分钟 · {images} 张图",
+    "exportNamePreview": "📁 {name}",
     "export": "导出",
     "exportOk": "已导出到 {path}",
     "exportFail": "导出失败：{msg}",

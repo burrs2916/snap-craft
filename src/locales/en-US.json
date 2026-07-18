@@ -284,6 +284,49 @@
     "refreshing": "Checking…",
     "later": "Later"
   },
+  "permissionMac": {
+    "screenRecording": {
+      "title": "Screen Recording Permission",
+      "missing": "Screen Recording permission not granted. SnapCraft cannot capture screenshots until you allow it.",
+      "howTo": "1) Open System Settings → Privacy & Security → Screen Recording\n2) Toggle on “{brand}”\n3) Return here and click “Refresh”",
+      "openSettings": "Open Screen Recording Settings",
+      "refresh": "Refresh status",
+      "granted": "Screen Recording permission granted",
+      "required": "Required for: full screen, region, window, and scrolling capture"
+    },
+    "microphone": {
+      "title": "Microphone Permission",
+      "notRequired": "Not required in this version. SnapCraft does not record audio.",
+      "future": "Will be required in a future version for screen recording with audio.",
+      "openSettings": "Open Microphone Settings"
+    },
+    "accessibility": {
+      "title": "Accessibility Permission",
+      "notRequired": "Not required in this version. Global hotkeys work without it.",
+      "future": "Will be required in a future version for advanced global hotkey features.",
+      "openSettings": "Open Accessibility Settings"
+    },
+    "filesAndFolders": {
+      "title": "Files and Folders",
+      "downloads": "Download folder: SnapCraft saves screenshots to ~/Downloads by default. Access granted automatically through the App Sandbox.",
+      "desktop": "Desktop folder: Access granted automatically when you save a screenshot there.",
+      "pictures": "Pictures folder: Access granted automatically when you save a screenshot there."
+    },
+    "fullDisk": {
+      "title": "Full Disk Access",
+      "notRequired": "Not required. SnapCraft only accesses folders you explicitly grant.",
+      "openSettings": "Open Full Disk Access Settings"
+    },
+    "troubleshooting": {
+      "title": "Permission Troubleshooting",
+      "stillMissing": "If the toggle is already on but SnapCraft still cannot capture, try:",
+      "step1": "1) Toggle Screen Recording OFF, wait 5 seconds, toggle ON again",
+      "step2": "2) Quit SnapCraft completely (Cmd + Q) and reopen",
+      "step3": "3) Restart your Mac if the issue persists",
+      "reset": "Reset all SnapCraft permissions",
+      "resetSuccess": "All SnapCraft permissions reset. The next capture will re-prompt for authorization."
+    }
+  },
   "display": {
     "title": "Choose a display to capture",
     "text": "Detected {n} display(s), arranged by physical position (left→right). Click the matching one below.",
@@ -457,6 +500,8 @@
     "copyRich": "Copy as rich text",
     "copyRichTitle": "Copy the rendered HTML to the clipboard so structure (headings, lists, tables, quotes) is preserved when pasting into Word / email / rich editors, instead of raw Markdown source",
     "clear": "Clear",
+    "stats": "{words} words · {lines} lines · ~{minutes} min · {images} images",
+    "exportNamePreview": "📁 {name}",
     "export": "Export",
     "exportOk": "Exported to {path}",
     "exportFail": "Export failed: {msg}",
