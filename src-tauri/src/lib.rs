@@ -4,6 +4,7 @@ mod logger;
 mod commands;
 mod store;
 
+use commands::permission::get_platform;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{Emitter, Manager, WindowEvent};
@@ -23,12 +24,6 @@ fn shortcut_to_event(key: Code, mods: Modifiers) -> Option<&'static str> {
         Code::Digit4 => Some("capture-scroll-frame"),
         _ => None,
     }
-}
-
-/// 返回当前操作系统标识：macos / windows / linux
-#[tauri::command]
-fn get_platform() -> String {
-    std::env::consts::OS.to_string()
 }
 
 /// 前端诊断日志：把消息写入 logs/dev.log（tag=diag），用于排查前端逻辑问题
@@ -238,6 +233,9 @@ pub fn run() {
             commands::history::set_screenshot_ocr,
             commands::history::set_screenshot_ocr_full,
             get_platform,
+            commands::permission::check_microphone_access,
+            commands::permission::check_accessibility_access,
+            commands::permission::open_permission_settings,
             commands::capture::check_screen_capture_access,
             commands::capture::request_screen_capture_access,
             commands::capture::open_screen_recording_settings,
