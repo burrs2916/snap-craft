@@ -26,7 +26,7 @@
       }
     ],
     "security": {
-      "csp": null,
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: data: blob:; connect-src 'self' https: http: ipc: http://ipc.localhost; font-src 'self' data:; media-src 'self' data:; object-src 'none'; frame-src 'none'",
       "assetProtocol": {
         "enable": true,
         "scope": [
@@ -40,6 +40,10 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "publisher": "SnapCraft Lab",
+    "category": "public.app-category.productivity",
+    "shortDescription": "AI-first cross-platform screenshot tool with editor, OCR, and document generation",
+    "longDescription": "SnapCraft is a privacy-first screenshot tool that combines full screen / region / window / scrolling capture with an editor-grade annotation suite, system-native OCR, and an AI assistant that turns your screenshots into Markdown, DOCX, PPTX, XLSX, HTML, or PDF documents — entirely on your machine by default.",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -47,10 +51,18 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
+    "resources": [],
+    "externalBin": [],
+    "copyright": "© 2026 SnapCraft Lab. All rights reserved.",
     "macOS": {
       "entitlements": "Entitlements.plist",
-      "signingIdentity": "-",
-      "infoPlist": "Info.plist"
+      "infoPlist": "Info.plist",
+      "exceptionDomain": "",
+      "frameworks": [],
+      "providerShortName": null,
+      "signingIdentity": null,
+      "hardenedRuntime": true,
+      "minimumSystemVersion": "14.0"
     }
   }
 }
