@@ -438,18 +438,20 @@ build_dev_app_bundle() {
 </plist>
 PLIST
     # 1) 优先用本机自签名证书（Gatekeeper 信任、TCC 授权跨重编稳定）
+    #    --options=runtime 启用 Hardened Runtime（App Store 必需；dev 也开方便提前验证）
     if [ -n "$SNAP_SIGN_ID" ] && cert_exists "$SNAP_SIGN_ID"; then
-        log_info "用本机自签名证书「$SNAP_SIGN_ID」对 dev .app 签名 ..."
-        if codesign --force --deep --sign "$SNAP_SIGN_ID" "$app" 2>&1; then
-            log_info "✅ 证书签名完成"
+        log_info "用本机自签名证书「$SNAP_SIGN_ID」对 dev .app 签名（--options=runtime）..."
+        if codesign --force --deep --options runtime --sign "$SNAP_SIGN_ID" "$app" 2>&1; then
+            log_info "✅ 证书签名完成（Hardened Runtime 已启用）"
         else
             log_warn "⚠️ 证书签名失败（可能被钥匙串锁定），回退 ad-hoc"
         fi
     fi
     # 2) 确保有签名（TCC 要求应用已签名）：未签名或证书失败时做 ad-hoc
+    #    ad-hoc 也开 --options=runtime，让 dev 与 prod 行为一致（方便提前暴露 runtime 问题）
     if ! codesign -v "$app" >/dev/null 2>&1; then
-        log_info "对 dev .app 进行 ad-hoc 签名（TCC 要求已签名）..."
-        codesign --force --deep --sign - "$app" 2>&1 || log_warn "⚠️ ad-hoc 签名失败"
+        log_info "对 dev .app 进行 ad-hoc 签名（Hardened Runtime + TCC 要求）..."
+        codesign --force --deep --options runtime --sign - "$app" 2>&1 || log_warn "⚠️ ad-hoc 签名失败"
     fi
     # 本地构建不带隔离属性，去除以防万一
     xattr -dr com.apple.quarantine "$app" 2>/dev/null || true
@@ -635,11 +637,12 @@ EOF
 }
 
 # 用本地自签名证书对构建出的 .app 重签，使其被 Gatekeeper 信任（无需 Apple 开发者账号）
+# 启用 Hardened Runtime（App Store 必需，dev 也开）
 codesign_app_local() {
     [ -d "$APP_BUNDLE" ] || return 0
     if [ -n "$SNAP_SIGN_ID" ] && cert_exists "$SNAP_SIGN_ID"; then
-        log_info "用本机自签名证书「$SNAP_SIGN_ID」对 .app 重新签名（Gatekeeper 信任）..."
-        if codesign --force --deep --sign "$SNAP_SIGN_ID" "$APP_BUNDLE" 2>&1; then
+        log_info "用本机自签名证书「$SNAP_SIGN_ID」对 .app 重新签名（Hardened Runtime + Gatekeeper）..."
+        if codesign --force --deep --options runtime --sign "$SNAP_SIGN_ID" "$APP_BUNDLE" 2>&1; then
             log_info "✅ 重签名完成，可直接打开，无需「右键→打开」。"
         else
             log_warn "⚠️ 重签名失败：证书可能已被钥匙串锁定，请先解锁「登录」钥匙串后重试。"
@@ -647,8 +650,46 @@ codesign_app_local() {
         # 兜底去除隔离属性（若 .app 曾从 CI 下载）
         xattr -dr com.apple.quarantine "$APP_BUNDLE" 2>/dev/null || true
     else
-        log_warn "未设置 SNAP_SIGN_ID 或未找到本机证书，走默认 ad-hoc 签名。"
+        log_warn "未设置 SNAP_SIGN_ID 或未找到本机证书，走默认 ad-hoc 签名（仍开 --options=runtime）。"
+        codesign --force --deep --options runtime --sign - "$APP_BUNDLE" 2>&1 || log_warn "⚠️ ad-hoc 签名失败"
         log_warn "首次打开需：右键 SnapCraft.app → 打开（一次性放行）；或 sudo xattr -dr com.apple.quarantine \"$APP_BUNDLE\""
+    fi
+}
+
+# 验证 .app 是否已开启 Hardened Runtime + 签名
+# 用法：./start.sh verify-sign [app-path]
+# 默认验证 dev .app（$DEV_APP_BUNDLE）
+verify_sign() {
+    local app="${1:-$DEV_APP_BUNDLE}"
+    if [ ! -d "$app" ]; then
+        log_error "未找到 $app，请先用 ./start.sh dev 或 ./start.sh app 构建"
+        return 1
+    fi
+    log_info "验证 $app 的签名与 Hardened Runtime..."
+    echo "─── codesign -dv ───"
+    codesign -dv --verbose=4 "$app" 2>&1 | head -30
+    echo ""
+    echo "─── Hardened Runtime 状态 ───"
+    local opts
+    opts=$(codesign -dv "$app" 2>&1 | grep -E "^flags=|Flags=" || echo "(未检测到 flags)")
+    echo "$opts"
+    if echo "$opts" | grep -qE "(runtime|hard);"; then
+        log_info "✅ Hardened Runtime 已启用（flags 含 runtime）"
+    else
+        log_warn "❌ Hardened Runtime 未启用！需用 codesign --options runtime 重签。"
+        return 1
+    fi
+    echo ""
+    echo "─── 签名身份 ───"
+    codesign -dv "$app" 2>&1 | grep -E "^(Identifier|Authority|TeamIdentifier|Format)" || true
+    echo ""
+    echo "─── 完整性验证 ───"
+    codesign --verify --deep --strict --verbose=2 "$app" 2>&1 | head -10
+    if codesign --verify --deep --strict "$app" 2>/dev/null; then
+        log_info "✅ 签名完整性验证通过"
+    else
+        log_error "❌ 签名完整性验证失败"
+        return 1
     fi
 }
 
@@ -688,6 +729,7 @@ show_help() {
     echo "  cert             一键创建本机自签名代码签名证书（无需 Apple 账号；让截图权限跨重编保留）"
     echo "  backup-cert      备份当前 dev 签名证书到 ~/.snapcraft/keys/（公钥身份持久化）"
     echo "  restore-cert     从 .p12 备份恢复 dev 签名证书（系统升级/换机后用）"
+    echo "  verify-sign      验证 .app 签名与 Hardened Runtime 状态（[app-path] 可选）"
     echo "  reset            重置 SnapCraft 的屏幕录制权限"
     echo "  help, -h, --help 显示此帮助信息"
     echo ""
@@ -749,6 +791,9 @@ main() {
             ;;
         restore-cert)
             restore_cert "$2" "$3"
+            ;;
+        verify-sign)
+            verify_sign "$2"
             ;;
         help|-h|--help)
             show_help
