@@ -161,7 +161,7 @@ jobs:
       # 绕过 tauri-action 脆弱的自动 security import。
       # ==========================================================
       - name: Import Apple certificate (macOS)
-        if: ${{ startsWith(matrix.platform, 'macOS') && secrets.APPLE_CERTIFICATE_BASE64 != '' }}
+        if: ${{ startsWith(matrix.platform, 'macOS') }}
         shell: bash
         env:
           CERT_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
@@ -169,6 +169,16 @@ jobs:
           KEYCHAIN: ${{ runner.temp }}/build.keychain-db
         run: |
           set -euo pipefail
+
+          # No Apple signing certificate configured -> skip import, let tauri ad-hoc sign.
+          # (step-level `if` cannot reference the `secrets` context, so the cert-presence
+          #  check lives here instead of in the `if:` condition)
+          if [ -z "${CERT_BASE64:-}" ]; then
+            echo "APPLE_CERTIFICATE_BASE64 not set - skipping certificate import; build will use ad-hoc signing."
+            printf 'RESOLVED_SIGNING_IDENTITY=\n' >> "$GITHUB_ENV"
+            exit 0
+          fi
+
           # FIX: fail fast on empty password - never hand an empty -P to `security import`
           # (empty password is the #1 cause of "One or more parameters passed to a function were not valid")
           : "${CERT_PWD:?APPLE_CERTIFICATE_PASSWORD secret is empty - cannot import a p12 that contains a private key}"
