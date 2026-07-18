@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- ============================================================
+	     SnapCraft 辅助进程 (Helper) entitlements
+	     ============================================================
+
+	     Tauri 在 macOS 上会自动生成一个 _Helper 进程（位于
+	     SnapCraft.app/Contents/Frameworks/SnapCraft Helper.app），用于托管
+	     系统级服务（系统托盘、全局快捷键 IPC 桥接等）。这个 Helper 进程
+	     也需要自己的 entitlements 文件，且必须与主 App 一致才能通过
+	     Hardened Runtime 验证。
+
+	     当前我们使用 tauri-plugin-global-shortcut 与 tauri-plugin-opener，
+	     不需要 Helper 启动子进程，但仍需该 entitlements 文件让
+	     `codesign --options=runtime --entitlements` 验证通过。
+
+	     ⚠️ 重要：Helper 不能开 app-sandbox！如果 Helper 也开 sandbox，
+	     全局快捷键注册会失败（无法监听系统级热键）。
+	     参考：https://github.com/tauri-apps/tauri/issues/4470
+	     ============================================================ -->
+
+	<!-- Helper 不开 sandbox：全局快捷键需要进程外系统服务访问 -->
+	<key>com.apple.security.app-sandbox</key>
+	<false/>
+
+	<!-- Helper 也需要网络（AI 模块若在 Helper 中加载） -->
+	<key>com.apple.security.network.client</key>
+	<true/>
+
+	<!-- Helper 需要禁用库验证：链接 Tauri 运行时库 -->
+	<key>com.apple.security.cs.disable-library-validation</key>
+	<true/>
+</dict>
+</plist>

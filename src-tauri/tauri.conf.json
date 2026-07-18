@@ -71,7 +71,7 @@
     "externalBin": [],
     "copyright": "© 2026 SnapCraft Lab. All rights reserved.",
     "macOS": {
-      "entitlements": "Entitlements.plist",
+      "entitlements": "entitlements/app.entitlements",
       "infoPlist": "Info.plist",
       "exceptionDomain": "",
       "frameworks": [],
