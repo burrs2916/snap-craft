@@ -298,6 +298,7 @@ export default function AIPanel({
   // 思考过程卡片默认展开（流式期间实时可见），可折叠收起
   const [thinkOpen, setThinkOpen] = useState(true);
   const [showSettings, setShowSettings] = useState(false);
+  const [showKey, setShowKey] = useState(false);
   const [testing, setTesting] = useState(false);
   const [testMsg, setTestMsg] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
@@ -917,12 +918,13 @@ export default function AIPanel({
     }
   };
 
-  // 用系统默认应用打开已导出的文件（依赖 opener 插件的 open_path 命令，
-  // 需在 capabilities 放行 opener:allow-open-path）。
+  // 用系统默认应用打开已导出的文件。
+  // 调用后端 open_external 命令（open.rs），内部对本地文件路径走 opener 插件的 open_path，
+  // 对 URL 走 open_url，已正确注册在 invoke_handler。
   const openExported = async (path: string) => {
     if (!path) return;
     try {
-      await invoke('open_path', { path });
+      await invoke('open_external', { target: path });
     } catch (e: any) {
       const msg = e?.message ? String(e.message) : String(e);
       setExportMsg(t('ai.exportFail', { msg }));
@@ -1269,6 +1271,14 @@ export default function AIPanel({
         <div className="ai-panel-head-actions">
           <button
             type="button"
+            className="ai-panel-settings-btn"
+            onClick={() => setShowSettings(true)}
+            title={t('ai.config')}
+          >
+            ⚙️ <span className="ai-panel-settings-text">{t('ai.config')}</span>
+          </button>
+          <button
+            type="button"
             className="ai-panel-icon"
             onClick={openHistory}
             title={t('ai.historyTitle')}
@@ -1283,6 +1293,19 @@ export default function AIPanel({
 
       {/* 可滚动主体：当预设/模板/附件/导出/记忆等区块较多时，整体滚动而不被裁剪 */}
       <div className="ai-panel-scroll">
+      {/* 首次使用引导：apiKey 为空且无对话时显示 */}
+      {!config.apiKey.trim() && conversation.length === 0 && (
+        <div className="ai-welcome">
+          <div className="ai-welcome-title">{t('ai.welcomeTitle')}</div>
+          <div className="ai-welcome-desc">{t('ai.welcomeDesc')}</div>
+          <button
+            className="ai-btn ai-btn-primary ai-welcome-btn"
+            onClick={() => setShowSettings(true)}
+          >
+            {t('ai.welcomeConfig')}
+          </button>
+        </div>
+      )}
       {/* 生成方式预设（内置 + 自定义） */}
       <div className="ai-presets">
         {presets.map((p) => (
@@ -1915,73 +1938,7 @@ export default function AIPanel({
         </div>
       )}
 
-      {/* 接口配置（折叠） */}
-      <div className="ai-config-toggle">
-        <button className="ai-link" onClick={() => setShowSettings((v) => !v)}>
-          {showSettings ? '▾' : '▸'} {t('ai.config')}
-        </button>
-      </div>
-      {showSettings && (
-        <div className="ai-config">
-          <div className="ai-row">
-            <label>{t('ai.apiType')}</label>
-            <select
-              value={config.apiType}
-              onChange={(e) => setConfig({ apiType: e.target.value as AiApiType })}
-            >
-              <option value="openai">OpenAI 兼容</option>
-              <option value="anthropic">Anthropic</option>
-            </select>
-          </div>
-          <div className="ai-row">
-            <label>{t('ai.baseUrl')}</label>
-            <input
-              value={config.baseUrl}
-              onChange={(e) => setConfig({ baseUrl: e.target.value })}
-              placeholder={t('ai.baseUrlPh')}
-            />
-          </div>
-          <div className="ai-row">
-            <label>{t('ai.apiKey')}</label>
-            <input
-              type="password"
-              value={config.apiKey}
-              onChange={(e) => setConfig({ apiKey: e.target.value })}
-              placeholder={t('ai.apiKeyPh')}
-            />
-          </div>
-          <div className="ai-row">
-            <label>{t('ai.model')}</label>
-            <input
-              value={config.model}
-              onChange={(e) => setConfig({ model: e.target.value })}
-              placeholder={t('ai.modelPh')}
-            />
-          </div>
-          <div className="ai-row">
-            <label>{t('ai.temperature')}</label>
-            <input
-              type="range"
-              min={0}
-              max={1}
-              step={0.1}
-              value={config.temperature}
-              onChange={(e) => setConfig({ temperature: Number(e.target.value) })}
-            />
-            <span className="ai-temp-val">{config.temperature.toFixed(1)}</span>
-          </div>
-          <button
-            className="ai-btn ai-btn-test"
-            onClick={handleTest}
-            disabled={testing || !config.apiKey.trim()}
-          >
-            {testing ? t('ai.testing') : t('ai.test')}
-          </button>
-          {testMsg && (
-            <div className={`ai-test-msg${testMsg.includes('失败') ? ' err' : ''}`}>{testMsg}</div>
-          )}
-        </div>
-      )}
+      {/* 接口设置弹窗已移到 .ai-panel-scroll 外部，避免 overflow 裁切 */}
 
       {/* 长期记忆（Phase 6，对齐 privdoc-ai 的 Agent Memory）：压缩早期对话，支撑多轮迭代不溢出。
           Phase 9：记忆较多时按相关性筛选注入，仅「本次相关」的记忆高亮并标「相关」徽标。 */}
@@ -2125,7 +2082,16 @@ export default function AIPanel({
         }`}
         {...(!windowChrome ? { 'data-collapsed-hint': t('ai.popupChatMoved') } : {})}
       >
-        {status === 'error' && <div className="ai-error">{error}</div>}
+        {status === 'error' && (
+          <div className="ai-error">
+            {error}
+            {(error?.includes('Key') || error?.includes('401') || error?.includes('403') || error?.includes('接口设置') || error?.includes('API Settings')) && (
+              <button className="ai-error-link" onClick={() => setShowSettings(true)}>
+                ⚙️ {t('ai.config')}
+              </button>
+            )}
+          </div>
+        )}
         {conversation.length === 0 && !isStreaming && (
           <div className="ai-chat-empty">{t('ai.chatEmpty')}</div>
         )}
@@ -2178,6 +2144,140 @@ export default function AIPanel({
         )}
       </div>
       </div>
+
+      {/* 接口设置弹窗（放在 .ai-panel-scroll 外部，避免 overflow 裁切）
+          ⚠️ 使用 absolute 定位（相对 .ai-panel），不用 fixed：
+          ① fixed 在有 transform 祖先时会被困住；
+          ② .ai-panel-scroll 的 overflow 会裁切 fixed 子元素；
+          ③ absolute 相对 .ai-panel 定位，弹窗恰好覆盖面板可视区，不溢出。 */}
+      {showSettings && (
+        <div className="ai-settings-overlay" onClick={() => setShowSettings(false)}>
+          <div className="ai-settings-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="ai-settings-head">
+              <span className="ai-settings-title">⚙️ {t('ai.settingsTitle')}</span>
+              <button className="ai-settings-close" onClick={() => setShowSettings(false)}>✕</button>
+            </div>
+            <div className="ai-settings-body">
+              {/* 供应商预设：一键填充 baseUrl + model */}
+              <div className="ai-settings-group">
+                <div className="ai-settings-group-label">{t('ai.provider')}</div>
+                <div className="ai-settings-chips">
+                  {([
+                    { id: 'openai', label: t('ai.providerOpenAI'), apiType: 'openai' as const, baseUrl: 'https://api.openai.com/v1', model: 'gpt-4o-mini' },
+                    { id: 'anthropic', label: t('ai.providerAnthropic'), apiType: 'anthropic' as const, baseUrl: 'https://api.anthropic.com', model: 'claude-sonnet-4-20250514' },
+                    { id: 'deepseek', label: t('ai.providerDeepSeek'), apiType: 'openai' as const, baseUrl: 'https://api.deepseek.com/v1', model: 'deepseek-chat' },
+                    { id: 'qwen', label: t('ai.providerQwen'), apiType: 'openai' as const, baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', model: 'qwen-vl-max' },
+                    { id: 'zhipu', label: t('ai.providerZhipu'), apiType: 'openai' as const, baseUrl: 'https://open.bigmodel.cn/api/paas/v4', model: 'glm-4v' },
+                    { id: 'moonshot', label: t('ai.providerMoonshot'), apiType: 'openai' as const, baseUrl: 'https://api.moonshot.cn/v1', model: 'moonshot-v1-8k' },
+                  ]).map((p) => (
+                    <button
+                      key={p.id}
+                      className={`ai-chip${config.baseUrl === p.baseUrl ? ' active' : ''}`}
+                      onClick={() => setConfig({ apiType: p.apiType, baseUrl: p.baseUrl, model: p.model })}
+                    >
+                      {p.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              {/* 接口配置字段 */}
+              <div className="ai-settings-group">
+                <div className="ai-settings-field">
+                  <label className="ai-settings-field-label">{t('ai.apiType')}</label>
+                  <select
+                    className="ai-settings-field-input"
+                    value={config.apiType}
+                    onChange={(e) => setConfig({ apiType: e.target.value as AiApiType })}
+                  >
+                    <option value="openai">{t('ai.apiTypeOpenAI')}</option>
+                    <option value="anthropic">{t('ai.apiTypeAnthropic')}</option>
+                  </select>
+                </div>
+                <div className="ai-settings-field">
+                  <label className="ai-settings-field-label">{t('ai.baseUrl')}</label>
+                  <input
+                    className="ai-settings-field-input"
+                    value={config.baseUrl}
+                    onChange={(e) => setConfig({ baseUrl: e.target.value })}
+                    placeholder={t('ai.baseUrlPh')}
+                  />
+                </div>
+                <div className="ai-settings-field-hint">{t('ai.baseUrlHint')}</div>
+                <div className="ai-settings-field">
+                  <label className="ai-settings-field-label">{t('ai.apiKey')}</label>
+                  <div className="ai-settings-key-row">
+                    <input
+                      className="ai-settings-field-input"
+                      type={showKey ? 'text' : 'password'}
+                      value={config.apiKey}
+                      onChange={(e) => setConfig({ apiKey: e.target.value })}
+                      placeholder={t('ai.apiKeyPh')}
+                      autoComplete="off"
+                      spellCheck={false}
+                    />
+                    <button
+                      type="button"
+                      className="ai-settings-key-toggle"
+                      onClick={() => setShowKey((v) => !v)}
+                      title={showKey ? t('ai.hideKey') : t('ai.showKey')}
+                    >
+                      {showKey ? '🙈' : '👁'}
+                    </button>
+                  </div>
+                </div>
+                <div className="ai-settings-field">
+                  <label className="ai-settings-field-label">{t('ai.model')}</label>
+                  <input
+                    className="ai-settings-field-input"
+                    value={config.model}
+                    onChange={(e) => setConfig({ model: e.target.value })}
+                    placeholder={t('ai.modelPh')}
+                  />
+                </div>
+                <div className="ai-settings-field">
+                  <label className="ai-settings-field-label">{t('ai.temperature')}</label>
+                  <div className="ai-settings-temp">
+                    <input
+                      type="range"
+                      min={0}
+                      max={1}
+                      step={0.1}
+                      value={config.temperature}
+                      onChange={(e) => setConfig({ temperature: Number(e.target.value) })}
+                    />
+                    <span className="ai-settings-temp-val">{config.temperature.toFixed(1)}</span>
+                  </div>
+                </div>
+                <div className="ai-settings-temp-labels">
+                  <span>{t('ai.tempLow')}</span>
+                  <span>{t('ai.tempHigh')}</span>
+                </div>
+              </div>
+              {/* 测试连接 */}
+              <div className="ai-settings-group">
+                <button
+                  className="ai-btn ai-btn-test"
+                  onClick={handleTest}
+                  disabled={testing || !config.apiKey.trim()}
+                >
+                  {testing ? t('ai.testing') : t('ai.test')}
+                </button>
+                {testMsg && (
+                  <div className={`ai-test-msg${testMsg.includes('失败') || testMsg.includes('failed') ? ' err' : ''}`}>{testMsg}</div>
+                )}
+              </div>
+            </div>
+            <div className="ai-settings-foot">
+              <button
+                className="ai-btn ai-btn-primary"
+                onClick={() => setShowSettings(false)}
+              >
+                {t('ai.save')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ── Phase 17：流式输出独立弹出框 ──
           解决右侧抽屉（400px 宽）承载过多区块时，流式输出被挤在小区域不友好的问题。

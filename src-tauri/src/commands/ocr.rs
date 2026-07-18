@@ -54,7 +54,9 @@ pub async fn ocr_image(
 
     let result = run_native_ocr(&tmp, lang.as_deref());
     // 无论成败都清理临时文件
-    let _ = std::fs::remove_file(&tmp);
+    if let Err(e) = std::fs::remove_file(&tmp) {
+        clog!("ocr", "清理临时 PNG 失败: {:?} err={}", tmp, e);
+    }
 
     match &result {
         Ok(r) => clog!(
@@ -79,6 +81,14 @@ fn run_native_ocr(path: &std::path::Path, _lang: Option<&str>) -> Result<OcrResu
 
     // Accurate 级别 + 语言校正，兼顾中英文准确度；识别语言由系统按内容自动选择
     // （apple-vision 0.16 的 TextRecognizer 未暴露强制语言接口，_lang 暂保留供将来）。
+    if let Some(l) = _lang {
+        clog!(
+            "ocr",
+            "⚠️ macOS Vision 后端暂不支持强制语言（apple-vision 0.16 限制），\
+             前端传入的 lang={:?} 将被忽略，系统按内容自动选择识别语言",
+            l
+        );
+    }
     let recognizer = TextRecognizer::new()
         .with_recognition_level(RecognitionLevel::Accurate)
         .with_language_correction(true);

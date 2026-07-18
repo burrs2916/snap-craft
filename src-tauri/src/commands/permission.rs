@@ -31,15 +31,55 @@ pub fn get_platform() -> String {
 
 // ===== macOS FFI 绑定（仅编译期引入） =====
 
+// ⚠️ macOS 26 SDK 兼容性修复：
+// AVCaptureDeviceAuthorizationStatusForMediaType 在 macOS 26 SDK 中不再作为
+// 可链接的 C 符号暴露（AVFoundation 框架仍存在，但该 C 函数被标记为废弃）。
+// 改用运行时 dlopen/dlsym 动态查找，避免编译时链接失败。
+// AXIsProcessTrusted（ApplicationServices）在 macOS 26 SDK 中仍可正常链接。
 #[cfg(target_os = "macos")]
-#[link(name = "AVFoundation", kind = "framework")]
 #[link(name = "ApplicationServices", kind = "framework")]
-#[link(name = "CoreMedia", kind = "framework")]
 extern "C" {
-    /// AVFoundation: 媒体类型常量（与 Swift 的 AVMediaTypeAudio 数值一致 = "soun"）
-    fn AVCaptureDeviceAuthorizationStatusForMediaType(media_type: *const std::os::raw::c_char) -> std::os::raw::c_int;
     /// ApplicationServices: 进程是否被 AX 信任（无参数，调用即查询）
     fn AXIsProcessTrusted() -> std::os::raw::c_uchar;
+}
+
+// dlopen/dlsym 运行时动态加载（macOS 自带 libdl）
+#[cfg(target_os = "macos")]
+extern "C" {
+    fn dlopen(filename: *const std::os::raw::c_char, flag: std::os::raw::c_int) -> *mut std::ffi::c_void;
+    fn dlsym(handle: *mut std::ffi::c_void, symbol: *const std::os::raw::c_char) -> *mut std::ffi::c_void;
+}
+
+#[cfg(target_os = "macos")]
+const RTLD_LAZY: std::os::raw::c_int = 1;
+
+/// AVAuthorizationStatus 函数指针类型
+#[cfg(target_os = "macos")]
+type AVCaptureDeviceAuthorizationStatusFn =
+    unsafe extern "C" fn(media_type: *const std::os::raw::c_char) -> std::os::raw::c_int;
+
+/// 运行时从 AVFoundation 框架动态加载 AVCaptureDeviceAuthorizationStatusForMediaType。
+/// macOS 26 SDK 不再暴露该 C 符号供编译时链接，但运行时 dlsym 仍可找到
+/// （AVFoundation.framework 二进制中函数仍在，只是 SDK 头文件/链接器不再导出）。
+/// 返回 None 表示函数不可用（极旧或极新 macOS），调用方应降级为 false。
+#[cfg(target_os = "macos")]
+unsafe fn load_av_authorization_status_fn() -> Option<AVCaptureDeviceAuthorizationStatusFn> {
+    let framework = b"/System/Library/Frameworks/AVFoundation.framework/AVFoundation\0";
+    let handle = dlopen(
+        framework.as_ptr() as *const std::os::raw::c_char,
+        RTLD_LAZY,
+    );
+    if handle.is_null() {
+        clog!("permission", "dlopen AVFoundation 失败，麦克风权限检查降级为 false");
+        return None;
+    }
+    let sym_name = b"AVCaptureDeviceAuthorizationStatusForMediaType\0";
+    let sym = dlsym(handle, sym_name.as_ptr() as *const std::os::raw::c_char);
+    if sym.is_null() {
+        clog!("permission", "dlsym AVCaptureDeviceAuthorizationStatusForMediaType 失败（macOS 26+ 可能已移除），麦克风权限检查降级为 false");
+        return None;
+    }
+    Some(std::mem::transmute::<*mut std::ffi::c_void, AVCaptureDeviceAuthorizationStatusFn>(sym))
 }
 
 /// AVAuthorizationStatus（与 AVFoundation/AVCaptureDevice.h 头文件一一对应）：
@@ -59,20 +99,31 @@ fn av_media_type_audio() -> *const std::os::raw::c_char {
 // ===== 麦克风权限 =====
 
 /// 检测当前是否已获得麦克风权限。
-/// macOS：调 AVCaptureDevice.authorizationStatus(for: .audio)
+/// macOS：运行时动态加载 AVCaptureDeviceAuthorizationStatusForMediaType（dlopen/dlsym），
+///        兼容 macOS 26 SDK（该 C 符号不再可编译时链接，但运行时仍可用）。
 /// Windows / Linux：现阶段 stub 返回 false（M2 阶段接入 winreg / UWP API）
 #[tauri::command]
 pub fn check_microphone_access() -> Result<bool, String> {
     #[cfg(target_os = "macos")]
     {
-        let status = unsafe { AVCaptureDeviceAuthorizationStatusForMediaType(av_media_type_audio()) };
-        clog!(
-            "permission",
-            "check_microphone_access: AVCaptureDeviceAuthorizationStatus={}",
-            status
-        );
-        // status >= 3 表示已授权；NotDetermined(0) / Restricted(1) / Denied(2) 都视为未授权
-        Ok(status >= AV_AUTHORIZATION_AUTHORIZED)
+        let check_fn = unsafe { load_av_authorization_status_fn() };
+        match check_fn {
+            Some(f) => {
+                let status = unsafe { f(av_media_type_audio()) };
+                clog!(
+                    "permission",
+                    "check_microphone_access: AVCaptureDeviceAuthorizationStatus={}",
+                    status
+                );
+                // status >= 3 表示已授权；NotDetermined(0) / Restricted(1) / Denied(2) 都视为未授权
+                Ok(status >= AV_AUTHORIZATION_AUTHORIZED)
+            }
+            None => {
+                // dlopen/dlsym 失败：AVFoundation 框架或函数不可用
+                clog!("permission", "check_microphone_access: AVFoundation 函数不可用，降级为 false");
+                Ok(false)
+            }
+        }
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -165,4 +216,38 @@ pub fn open_permission_settings(app: AppHandle, kind: String) -> Result<(), Stri
         let _ = app;
         Err(format!("当前平台不支持一键打开权限设置: {}", kind_norm))
     }
+}
+
+// ===== 重置全部权限 =====
+
+/// 重置本 App 的所有 TCC 权限（屏幕录制 / 麦克风 / 辅助功能）。
+///
+/// macOS sandbox 限制：App 无法通过 `tccutil` 等外部进程直接重置 TCC 权限，
+/// 只能引导用户到「系统设置 → 隐私与安全性」面板手动操作。
+/// 此命令打开隐私面板首页，用户手动重置后点击「刷新」即可看到最新状态。
+///
+/// Windows / Linux：TCC 不适用，直接返回 Ok（无操作）。
+#[tauri::command]
+pub fn reset_all_permissions(app: AppHandle) -> Result<(), String> {
+    clog!("permission", "reset_all_permissions 调用");
+
+    #[cfg(target_os = "macos")]
+    {
+        // sandbox 下无法调 tccutil，打开隐私面板让用户手动重置
+        app.opener()
+            .open_url(
+                "x-apple.systempreferences:com.apple.preference.security?Privacy",
+                None::<&str>,
+            )
+            .map_err(|e| format!("打开系统设置失败: {}", e))?;
+        clog!("permission", "已打开「系统设置 → 隐私与安全性」面板，请用户手动重置权限");
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        // Windows / Linux：TCC 不适用，直接返回 Ok
+        let _ = app;
+    }
+
+    Ok(())
 }

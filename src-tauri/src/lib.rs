@@ -236,6 +236,7 @@ pub fn run() {
             commands::permission::check_microphone_access,
             commands::permission::check_accessibility_access,
             commands::permission::open_permission_settings,
+            commands::permission::reset_all_permissions,
             commands::capture::check_screen_capture_access,
             commands::capture::request_screen_capture_access,
             commands::capture::open_screen_recording_settings,
@@ -274,54 +275,26 @@ pub fn run() {
                     );
 
                     if is_fs {
-                        // 先退出原生全屏，然后隐藏。两个坑必须同时兜住：
-                        //  ① hide 太早（全屏 Space 还没拆完）→ 停在被腾空的黑 Space → 整屏变黑；
-                        //  ② is_fullscreen() 仅反映「目标状态标记」，set_fullscreen(false) 后
-                        //     ~50ms 就返回 false，但 macOS 全屏退出滑回动画（~0.5-0.7s）还没跑完，
-                        //     此时 hide() 会被 AppKit 在动画中途吞掉 → 窗口退出全屏但没隐藏（只是变小）。
-                        // 结论：is_fullscreen() 不是可靠的「动画完成」信号。改为：
-                        //   退出全屏 → 给足动画时间 → hide → 验证 is_visible()，被吞则重试。
-                        let _ = window.set_fullscreen(false);
+                        // ⚠️ macOS 26 崩溃修复（EXC_BAD_ACCESS in WebPageProxy::dispatchSetObscuredContentInsets）：
+                        // 原方案 set_fullscreen(false) + 固定延迟 + hide() 在 macOS 26 上会 crash——
+                        // 全屏 Space 拆除期间 WebPageProxy 被释放，hide() 触发的 insets 派发解引用 null 指针。
+                        // 修复：全屏态下改用 set_minimized(true) 代替 hide()。
+                        //   minimize 是原子操作（NSWindow performMiniaturize:），macOS 内部处理全屏退出，
+                        //   不走 orderOut → 不触发 dispatchSetObscuredContentInsets → 不 crash。
+                        //   minimize 后窗口完全不在屏幕上（dock 缩略图不算），满足"隐藏到托盘"需求。
+                        //   后台延迟再 hide() 彻底从 dock 移除（此时 Space 已完全拆除，hide 安全）。
+                        clog!("window", "全屏态 → set_minimized (避免 hide() 触发 insets crash)");
+                        let _ = window.minimize();
                         let w = window.clone();
                         std::thread::spawn(move || {
-                            // 1) 先轮询 is_fullscreen() 变 false（标记翻转，通常很快）
-                            for i in 0..40 {
-                                std::thread::sleep(std::time::Duration::from_millis(50));
-                                if !w.is_fullscreen().unwrap_or(false) {
-                                    clog!(
-                                        "window",
-                                        "全屏标记已清除（轮询 {} 次 / {}ms）",
-                                        i + 1,
-                                        (i + 1) * 50
-                                    );
-                                    break;
-                                }
-                            }
-                            // 2) 关键：给 AppKit 的全屏退出滑回动画留足时间彻底收尾，
-                            //    否则紧接着的 hide 会在动画中途被吞。
-                            std::thread::sleep(std::time::Duration::from_millis(650));
-                            // 3) hide + 验证：hide 若在动画残余中被吞，窗口仍 visible，则重试。
-                            //    最多 10 次（每次排一次 hide + 等 120ms 检查），直到窗口真正隐藏。
-                            let mut hidden = false;
-                            for attempt in 0..10 {
-                                let wc = w.clone();
-                                let _ = w.run_on_main_thread(move || {
-                                    let _ = wc.hide();
-                                });
-                                std::thread::sleep(std::time::Duration::from_millis(120));
-                                if !w.is_visible().unwrap_or(true) {
-                                    clog!(
-                                        "window",
-                                        "已隐藏到托盘（第 {} 次 hide 生效）",
-                                        attempt + 1
-                                    );
-                                    hidden = true;
-                                    break;
-                                }
-                            }
-                            if !hidden {
-                                clog!("window", "⚠️ 重试 10 次仍未隐藏，窗口可能仍可见");
-                            }
+                            // 等 minimize + 全屏 Space 拆除彻底完成（macOS 26 需要更长）
+                            std::thread::sleep(std::time::Duration::from_millis(1500));
+                            // 此时窗口已最小化且不在全屏 Space 中，hide() 安全
+                            let wc = w.clone();
+                            let _ = w.run_on_main_thread(move || {
+                                let _ = wc.hide();
+                                clog!("window", "minimize 后延迟 hide 完成");
+                            });
                         });
                     } else if is_max {
                         // 最大化不涉及独立 Space，取消最大化后短暂延迟隐藏更稳

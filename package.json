@@ -13,7 +13,8 @@
     "app": "bash start.sh app",
     "app:reset": "bash start.sh reset",
     "app:sign": "bash start.sh sign",
-    "build:local": "bash scripts/build-local.sh"
+    "build:local": "bash scripts/build-local.sh",
+    "tauri:windows:msix": "npx @choochmeque/tauri-windows-bundle@latest build --runner pnpm"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.11.0",
@@ -28,6 +29,7 @@
     "zustand": "^5.0.12"
   },
   "devDependencies": {
+    "@choochmeque/tauri-windows-bundle": "^0.1.20",
     "@tauri-apps/cli": "^2.0.0",
     "@types/node": "^25.6.0",
     "@types/react": "^18.3.12",

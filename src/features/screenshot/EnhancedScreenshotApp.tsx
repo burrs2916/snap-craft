@@ -81,27 +81,24 @@ async function safeHideForCapture(win: ReturnType<typeof getCurrentWindow>): Pro
   } catch { /* ignore */ }
 
   if (wasFullscreen) {
-    flog(`safeHide: 窗口处于原生全屏 → 退出全屏并等待 Space 过渡动画彻底结束再隐藏`);
-    try { await win.setFullscreen(false); } catch { /* ignore */ }
-    // is_fullscreen() 仅反映「目标状态标记」，setFullscreen(false) 后 ~50ms 即翻转为 false，
-    // 但 macOS 全屏退出是 ~0.5–0.7s 的 Space 滑回动画，动画未结束就 hide+截图会截到黑场。
-    // 先轮询到标记翻转，再固定等待充足动画尾部余量（固定延迟对全屏过渡最可靠，见 lib.rs 关窗逻辑）。
-    let waited = 0;
-    while (waited < 2000) {
-      await new Promise((r) => setTimeout(r, 100));
-      waited += 100;
-      let fs = false;
-      try { fs = await win.isFullscreen(); } catch { /* ignore */ }
-      if (!fs) break;
-    }
-    await new Promise((r) => setTimeout(r, 800));
+    // ⚠️ macOS 26 崩溃修复：原方案 setFullscreen(false) + 固定延迟 + hide() 会 crash——
+    // 全屏 Space 拆除期间 WebPageProxy 被释放，hide() 触发的 insets 派发解引用 null。
+    // 修复：全屏态改用 setMinimized(true) 代替 hide()。
+    //   minimize 是原子操作，macOS 内部处理全屏退出，不走 orderOut → 不触发 insets crash。
+    //   minimize 后窗口完全不在屏幕上，截图不会截到自身。
+    flog(`safeHide: 窗口处于原生全屏 → minimize (避免 hide() 触发 insets crash)`);
+    try { await win.minimize(); } catch { /* ignore */ }
+    // 等 minimize + Space 拆除完成
+    await new Promise((r) => setTimeout(r, 600));
   } else if (wasMaximized) {
     flog(`safeHide: 窗口处于最大化 → 先取消最大化并等待重绘再隐藏`);
     try { await win.unmaximize(); } catch { /* ignore */ }
     await new Promise((r) => setTimeout(r, 350));
+    await win.hide();
+  } else {
+    await win.hide();
   }
-  await win.hide();
-  // 隐藏后再给屏幕合成器一点时间稳定（尤其刚退出全屏的那块屏），确保截到的是稳定画面
+  // 隐藏后再给屏幕合成器一点时间稳定
   if (wasFullscreen) {
     await new Promise((r) => setTimeout(r, 150));
   }
@@ -1705,8 +1702,9 @@ export const EnhancedScreenshotApp = () => {
                 ocrText: cleanedText,
                 ocrBlocksJson: JSON.stringify(cleanedBlocks),
               });
-            } catch {
+            } catch (e) {
               // 静默：本地 ocrHistory 已兜底，Rust 写失败不影响本次交互。
+              console.warn('[OCR] 持久化 ocr_blocks 失败:', e);
             }
           }
         }

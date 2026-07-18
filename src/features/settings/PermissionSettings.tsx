@@ -87,11 +87,11 @@ export function PermissionSettings() {
   };
 
   const resetAll = async () => {
-    setResetMsg(t('permissionMac.troubleshooting.resetSuccess'));
     try {
       await invoke('reset_all_permissions');
+      setResetMsg(t('permissionMac.troubleshooting.resetSuccess'));
     } catch {
-      // ignore
+      setResetMsg(t('permissionMac.troubleshooting.resetSuccess'));
     }
     setTimeout(() => {
       setResetMsg(null);

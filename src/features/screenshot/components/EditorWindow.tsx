@@ -544,6 +544,9 @@ export const EditorWindow = () => {
   const ocrTextAt = (i: number, b: OcrBlock): string =>
     ocrEdits[i] !== undefined ? ocrEdits[i] : b.text;
 
+  // 是否有任意块提供置信度（macOS Vision 有；Windows WinRT 无 → 不显示阈值控件）
+  const ocrHasConf = ocrResult ? ocrResult.blocks.some((b) => b.confidence > 0) : false;
+
   // 可见行：受「搜索 + 置信度阈值」过滤；阅读顺序重排只改遍历序，不破坏编辑映射
   const ocrVisibleLines = useCallback((): { b: OcrBlock; i: number }[] => {
     if (!ocrResult) return [];
@@ -608,7 +611,9 @@ export const EditorWindow = () => {
     const text = ocrResult.blocks
       .map((b, i) => (ocrEdits[i] !== undefined ? ocrEdits[i] : b.text))
       .join('\n');
-    await invoke('set_screenshot_ocr', { id: screenshotId, ocrText: text }).catch(() => {});
+    await invoke('set_screenshot_ocr', { id: screenshotId, ocrText: text }).catch((e) => {
+      console.warn('[OCR] 持久化 ocr_text 失败:', e);
+    });
   }, [screenshotId, ocrResult, ocrEdits]);
 
   // R3：把 OCR 可见行作为文字标注贴回画布（归一化坐标→像素，按块高设字号）
@@ -1187,7 +1192,9 @@ export const EditorWindow = () => {
       } else if (screenshotId && !img) {
         // 落库：识别结果随历史持久化，关窗/历史重开无需二次识别
         const text = res.text || res.blocks.map((b) => b.text).join('\n');
-        invoke('set_screenshot_ocr', { id: screenshotId, ocrText: text }).catch(() => {});
+        invoke('set_screenshot_ocr', { id: screenshotId, ocrText: text }).catch((e) => {
+          console.warn('[OCR] 持久化 ocr_text 失败:', e);
+        });
       }
       // N2：自动复制（默认关）：复制当前显示文字（尊重「合并为一行」格式），避免误覆盖用户剪贴板。
       if (ocrAutoCopy) {
@@ -1566,7 +1573,7 @@ export const EditorWindow = () => {
                       onChange={(e) => setOcrSearch(e.target.value)}
                     />
                   </div>
-                  {platform === 'macos' && (
+                  {ocrHasConf && (
                     <div className="ocr-conf">
                       <label>{t('ocr.confLabel')} {ocrConf}%</label>
                       <input

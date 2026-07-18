@@ -4294,6 +4294,283 @@ body {
   color: var(--danger, #ff3b30);
 }
 
+/* ===== AI 接口设置弹窗（面板内 absolute 定位，自适应面板宽度）===== */
+
+/* 头部「⚙️ 接口设置」按钮：带文字标签，一眼看出用途 */
+.ai-panel-settings-btn {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  padding: 4px 10px;
+  border: 1px solid var(--border, #e3e3e8);
+  border-radius: 8px;
+  background: var(--surface-solid, #fff);
+  color: var(--text, #333);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  white-space: nowrap;
+}
+.ai-panel-settings-btn:hover {
+  border-color: var(--accent, #007aff);
+  color: var(--accent, #007aff);
+  background: var(--accent-soft, rgba(0, 122, 255, 0.06));
+}
+.ai-panel-settings-text {
+  line-height: 1;
+}
+
+/* 遮罩层：absolute 相对 .ai-panel，恰好覆盖面板可视区 */
+.ai-settings-overlay {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.35);
+  backdrop-filter: blur(2px);
+  -webkit-backdrop-filter: blur(2px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 500;
+  padding: 12px;
+  animation: ai-settings-fade-in 0.15s ease;
+}
+@keyframes ai-settings-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+/* 弹窗主体：宽度 100% 填充面板（减去 padding），不溢出 */
+.ai-settings-modal {
+  background: rgba(255, 255, 255, 0.92);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid var(--border, #e3e3e8);
+  border-radius: 14px;
+  width: 100%;
+  max-width: 420px;
+  max-height: calc(100% - 24px);
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.25);
+  animation: ai-settings-slide-up 0.2s ease;
+  overflow: hidden;
+}
+@keyframes ai-settings-slide-up {
+  from { transform: translateY(12px); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
+
+/* 深色主题：弹窗主体改为深色半透明毛玻璃 */
+:root.dark .ai-settings-modal,
+.dark .ai-settings-modal {
+  background: rgba(28, 28, 30, 0.92);
+}
+:root.dark .ai-settings-overlay,
+.dark .ai-settings-overlay {
+  background: rgba(0, 0, 0, 0.45);
+}
+
+/* 弹窗头部 */
+.ai-settings-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border, #e3e3e8);
+  flex-shrink: 0;
+}
+.ai-settings-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text, #333);
+}
+.ai-settings-close {
+  background: none;
+  border: none;
+  font-size: 16px;
+  color: var(--text-sub, #888);
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 6px;
+  transition: all 0.15s ease;
+}
+.ai-settings-close:hover {
+  background: var(--danger-soft, rgba(255, 59, 48, 0.1));
+  color: var(--danger, #ff3b30);
+}
+
+/* 弹窗主体：可滚动 */
+.ai-settings-body {
+  padding: 14px 16px;
+  overflow-y: auto;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+/* 分组 */
+.ai-settings-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.ai-settings-group-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-sub, #888);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+/* 供应商 chips */
+.ai-settings-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.ai-settings-chips .ai-chip {
+  font-size: 12px;
+}
+
+/* 字段：label 在上方（非左侧），充分利用面板宽度 */
+.ai-settings-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.ai-settings-field-label {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text, #333);
+}
+.ai-settings-field-input {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--border, #e3e3e8);
+  border-radius: 8px;
+  background: var(--surface-solid, #fff);
+  color: var(--text, #333);
+  font-size: 13px;
+  font-family: inherit;
+  outline: none;
+  transition: border-color 0.15s ease;
+  box-sizing: border-box;
+}
+.ai-settings-field-input:focus {
+  border-color: var(--accent, #007aff);
+  box-shadow: 0 0 0 3px var(--accent-soft, rgba(0, 122, 255, 0.1));
+}
+.ai-settings-field-hint {
+  font-size: 11px;
+  color: var(--text-sub, #888);
+  margin-top: -2px;
+}
+
+/* API Key 输入框 + 显示/隐藏按钮 */
+.ai-settings-key-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.ai-settings-key-row .ai-settings-field-input {
+  flex: 1;
+  min-width: 0;
+}
+.ai-settings-key-toggle {
+  flex-shrink: 0;
+  background: none;
+  border: 1px solid var(--border, #e3e3e8);
+  border-radius: 8px;
+  padding: 7px 10px;
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  transition: border-color 0.15s ease;
+}
+.ai-settings-key-toggle:hover {
+  border-color: var(--accent, #007aff);
+}
+
+/* 温度滑块 */
+.ai-settings-temp {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.ai-settings-temp input[type="range"] {
+  flex: 1;
+}
+.ai-settings-temp-val {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text, #333);
+  min-width: 28px;
+  text-align: right;
+}
+.ai-settings-temp-labels {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  color: var(--text-sub, #888);
+  margin-top: -2px;
+}
+
+/* 弹窗底部 */
+.ai-settings-foot {
+  padding: 10px 16px;
+  border-top: 1px solid var(--border, #e3e3e8);
+  display: flex;
+  justify-content: flex-end;
+  flex-shrink: 0;
+}
+
+/* ===== AI 首次使用引导横幅 ===== */
+.ai-welcome {
+  margin: 12px 16px;
+  padding: 16px;
+  border-radius: 12px;
+  background: linear-gradient(135deg, var(--accent-soft, rgba(0, 122, 255, 0.08)), rgba(0, 122, 255, 0.03));
+  border: 1px solid var(--accent, #007aff);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.ai-welcome-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+.ai-welcome-desc {
+  font-size: 12px;
+  color: var(--text-sub);
+  line-height: 1.5;
+}
+.ai-welcome-btn {
+  align-self: flex-start;
+  margin-top: 4px;
+}
+
+/* ===== AI 错误提示中的设置跳转链接 ===== */
+.ai-error-link {
+  display: inline-block;
+  margin-left: 8px;
+  background: none;
+  border: 1px solid var(--accent, #007aff);
+  border-radius: 6px;
+  padding: 2px 8px;
+  font-size: 11px;
+  color: var(--accent, #007aff);
+  cursor: pointer;
+  vertical-align: middle;
+}
+.ai-error-link:hover {
+  background: var(--accent, #007aff);
+  color: #fff;
+}
+
 .ai-output {
   flex: 1;
   overflow-y: auto;

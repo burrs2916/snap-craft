@@ -8,6 +8,7 @@
 // 在 AI 窗口自动加载，无需任何 IPC 同步 store 状态。对话因 localStorage 持久化，关闭窗口不丢。
 
 import { useEffect, useRef, useState } from 'react';
+import { invoke } from '@tauri-apps/api/core';
 import { useAiStore } from '../features/ai/aiStore';
 import AIPanel from '../features/ai/AIPanel';
 import { t } from '../i18n';
@@ -58,9 +59,11 @@ export default function AiWindow() {
     });
 
     // 窗口关闭（unload / 程序化关闭）：取消未完成任务 + 通知主窗口复位 UI 态
+    // + 清理跨窗口传输的临时图片文件（save_temp_file 写入的 $TMPDIR/snapcraft-ai/*.png）
     const onUnload = () => {
       useAiStore.getState().stop();
       notifyAiClosed();
+      invoke('cleanup_temp_files').catch(() => {});
     };
     window.addEventListener('beforeunload', onUnload);
 
@@ -75,6 +78,8 @@ export default function AiWindow() {
     // 取消本窗口未完成的流式请求（localStorage 已持久化已完成对话）
     useAiStore.getState().stop();
     notifyAiClosed();
+    // 清理跨窗口传输的临时图片文件
+    invoke('cleanup_temp_files').catch(() => {});
     closeAiWindow();
   };
 

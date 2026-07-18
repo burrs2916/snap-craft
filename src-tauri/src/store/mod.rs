@@ -61,9 +61,25 @@ pub fn load_history(app: &tauri::AppHandle) -> Vec<HistoryItem> {
 
 pub fn save_history(app: &tauri::AppHandle, items: &[HistoryItem]) -> Result<(), String> {
     let path = history_path(app)?;
+    let dir = path.parent().ok_or("无法获取历史目录")?;
     let json = serde_json::to_string_pretty(items).map_err(|e| e.to_string())?;
-    let mut file = fs::File::create(&path).map_err(|e| e.to_string())?;
-    file.write_all(json.as_bytes()).map_err(|e| e.to_string())?;
+
+    // 原子写：先写临时文件再 rename，避免写中途崩溃导致 history.json 被截断损坏。
+    // 同目录 rename 在同一文件系统上是原子的（POSIX rename / Windows MoveFileEx）。
+    let tmp_path = dir.join(format!(
+        ".history.json.tmp.{}",
+        uuid::Uuid::new_v4()
+    ));
+    {
+        let mut file = fs::File::create(&tmp_path).map_err(|e| e.to_string())?;
+        file.write_all(json.as_bytes()).map_err(|e| e.to_string())?;
+        file.sync_all().map_err(|e| e.to_string())?;
+    }
+    fs::rename(&tmp_path, &path).map_err(|e| {
+        // rename 失败时清理临时文件，避免残留
+        let _ = fs::remove_file(&tmp_path);
+        e.to_string()
+    })?;
     Ok(())
 }
 

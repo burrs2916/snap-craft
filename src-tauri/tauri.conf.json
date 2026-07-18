@@ -79,6 +79,11 @@
       "signingIdentity": null,
       "hardenedRuntime": true,
       "minimumSystemVersion": "14.0"
+    },
+    "windows": {
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper"
+      }
     }
   }
 }
