@@ -5,6 +5,7 @@
 > **适用范围**:SnapCraft for macOS(本机应用)
 > **联系邮箱**:privacy@snap-craft.app
 > **联系地址**:SnapCraft Lab, 123 Example St, San Francisco, CA 94102, USA
+> **在线版本(中英双语同页切换)**:`/privacy.html`(M1.5 起支持中英 EN 切换器,见 public/privacy.html 顶部按钮)
 
 ---
 
