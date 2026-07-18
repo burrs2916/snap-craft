@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SnapCraft Privacy Policy</title>
+<meta name="description" content="SnapCraft Privacy Policy - zero telemetry, zero upload, your screenshots stay on your Mac.">
+<meta name="robots" content="index, follow">
+<style>
+  :root {
+    --fg: #1a1a1a;
+    --fg-muted: #4b5563;
+    --fg-faint: #6b7280;
+    --bg: #ffffff;
+    --bg-elevated: #f9fafb;
+    --bg-code: #f3f4f6;
+    --border: #e5e7eb;
+    --accent: #2563eb;
+    --success: #22c55e;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --fg: #f3f4f6;
+      --fg-muted: #d1d5db;
+      --fg-faint: #9ca3af;
+      --bg: #111827;
+      --bg-elevated: #1f2937;
+      --bg-code: #0f172a;
+      --border: #374151;
+      --accent: #60a5fa;
+      --success: #10b981;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    line-height: 1.7;
+    color: var(--fg);
+    background: var(--bg);
+    margin: 0;
+    padding: 0;
+  }
+  .container {
+    max-width: 760px;
+    margin: 0 auto;
+    padding: 40px 24px 80px;
+  }
+  h1 { font-size: 32px; margin: 0 0 8px; }
+  h2 { font-size: 22px; margin: 40px 0 12px; padding-top: 16px; border-top: 1px solid var(--border); }
+  h3 { font-size: 17px; margin: 24px 0 8px; }
+  p, li { font-size: 15px; }
+  .meta {
+    color: var(--fg-faint);
+    font-size: 13px;
+    margin-bottom: 32px;
+  }
+  .tldr {
+    background: var(--bg-elevated);
+    border-left: 4px solid var(--success);
+    padding: 16px 20px;
+    border-radius: 8px;
+    margin: 24px 0 32px;
+  }
+  .tldr strong { color: var(--success); }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 12px 0 24px;
+    font-size: 14px;
+  }
+  th, td {
+    text-align: left;
+    padding: 8px 12px;
+    border: 1px solid var(--border);
+  }
+  th { background: var(--bg-elevated); font-weight: 600; }
+  code {
+    background: var(--bg-code);
+    padding: 1px 6px;
+    border-radius: 4px;
+    font-size: 13px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  ul, ol { padding-left: 22px; }
+  li { margin: 4px 0; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .contact {
+    background: var(--bg-elevated);
+    padding: 20px;
+    border-radius: 8px;
+    margin: 32px 0;
+  }
+</style>
+</head>
+<body>
+<div class="container">
+
+<h1>SnapCraft Privacy Policy</h1>
+<p class="meta">
+  <strong>Last updated:</strong> July 18, 2026 &middot;
+  <strong>Effective:</strong> July 18, 2026 &middot;
+  <strong>Scope:</strong> SnapCraft for macOS &middot;
+  <strong>Version:</strong> 0.1.0
+</p>
+
+<div class="tldr">
+  <p><strong>TL;DR:</strong> SnapCraft does <strong>not</strong> collect, upload, or track any of your data. Your screenshots stay on your Mac. The AI assistant only makes outbound requests to the endpoint <em>you</em> configure, and only when <em>you</em> explicitly invoke it. We can't see, and don't want to know, what you screenshot.</p>
+</div>
+
+<h2>1. Our Commitment</h2>
+<ul>
+  <li>❌ <strong>No screenshot upload</strong>: Images you capture never leave your machine.</li>
+  <li>❌ <strong>No telemetry</strong>: No analytics SDKs, no "anonymous usage data", no event tracking.</li>
+  <li>❌ <strong>No clipboard reading without consent</strong>: The app only accesses the clipboard when you explicitly click "Copy".</li>
+  <li>❌ <strong>No persistent network</strong>: The app does not connect to any remote server unless you enable the AI assistant and explicitly send a request.</li>
+  <li>✅ <strong>Zero networking by default</strong>: After first launch, SnapCraft runs entirely offline until you opt in.</li>
+  <li>✅ <strong>All data is local</strong>: Screenshots, history, configuration, and AI presets live in <code>~/Library/Application Support/com.snap-craft.app/</code>.</li>
+</ul>
+
+<h2>2. What Data We Collect</h2>
+
+<h3>2.1 By default (zero collection)</h3>
+<p>After installing and launching SnapCraft, without any additional action on your part:</p>
+<table>
+  <thead><tr><th>Data type</th><th>Collected?</th><th>Storage location</th></tr></thead>
+  <tbody>
+    <tr><td>Screenshot contents</td><td>❌ No</td><td>Local disk (your chosen path)</td></tr>
+    <tr><td>Screenshot history</td><td>❌ No</td><td>Local <code>~/Library/Application Support/com.snap-craft.app/history/</code></td></tr>
+    <tr><td>Annotations / edits</td><td>❌ No</td><td>Same location as the screenshot</td></tr>
+    <tr><td>OCR text recognition</td><td>❌ No</td><td>Displayed in UI; not persisted unless you save it</td></tr>
+    <tr><td>Usage statistics / crash logs</td><td>❌ No</td><td>—</td></tr>
+    <tr><td>Device identifiers (UDID / IDFA)</td><td>❌ No</td><td>—</td></tr>
+    <tr><td>IP address</td><td>❌ No</td><td>—</td></tr>
+    <tr><td>Browser / app usage</td><td>❌ No</td><td>—</td></tr>
+    <tr><td>Cookies / tracking pixels</td><td>❌ No</td><td>—</td></tr>
+  </tbody>
+</table>
+
+<h3>2.2 When you enable the AI Assistant</h3>
+<p>SnapCraft includes a built-in AI assistant that converts screenshots into documents (Markdown, DOCX, PPTX, XLSX, HTML, PDF). It is <strong>off by default</strong> and stays dormant until you explicitly enable it.</p>
+<p>To enable it, you must provide in <em>Settings → AI Assistant</em>:</p>
+<ol>
+  <li>An <strong>API endpoint</strong> (e.g. <code>https://api.openai.com/v1</code> or your self-hosted <code>http://localhost:11434/v1</code>)</li>
+  <li>An <strong>API key</strong></li>
+</ol>
+<p>When you then click "Generate Document":</p>
+<ul>
+  <li><strong>Sent</strong>: Your current screenshot (base64-encoded) + your prompt text</li>
+  <li><strong>Destination</strong>: <strong>Only</strong> the API endpoint you configured (we do not proxy)</li>
+  <li><strong>Storage</strong>: Governed by the privacy policy of the endpoint you chose (OpenAI, Anthropic, your self-host, etc.)</li>
+  <li><strong>Can we see it?</strong> <strong>No.</strong> We do not proxy, log, or otherwise see your requests or keys.</li>
+</ul>
+<p><strong>Recommendations</strong>:</p>
+<ul>
+  <li><strong>Sensitive contexts</strong> (legal, medical, financial): use a <strong>locally self-hosted model</strong> (Ollama, LM Studio, vLLM) so data never leaves your machine.</li>
+  <li><strong>General use</strong>: when using cloud APIs, you agree to the respective provider's privacy policy.</li>
+</ul>
+
+<h3>2.3 Error reports (opt-in only)</h3>
+<p>SnapCraft does not include automatic crash reporting. If you choose to report a problem:</p>
+<ul>
+  <li>You must explicitly click "Package Logs" in Settings</li>
+  <li>Contents: <code>logs/dev.log</code> (with screenshots filtered out)</li>
+  <li>You must manually choose to send it via email or attach to a GitHub issue</li>
+  <li><strong>We do not proactively receive</strong> anything — this is an action you initiate.</li>
+</ul>
+
+<h3>2.4 Apple system-level data</h3>
+<p>macOS itself may record app usage statistics (controlled in <em>System Settings → Privacy & Security → Analytics & Improvements</em>). This is system-level behavior, independent of SnapCraft.</p>
+
+<h2>3. Sandbox & Permissions</h2>
+<p>SnapCraft runs inside the macOS <strong>App Sandbox</strong> (mandatory for all Mac App Store apps). Permissions:</p>
+<table>
+  <thead><tr><th>Permission</th><th>Purpose</th><th>Required?</th><th>If denied</th></tr></thead>
+  <tbody>
+    <tr><td>Screen Recording</td><td>Capture screen</td><td>✅ Yes</td><td>Cannot screenshot</td></tr>
+    <tr><td>Outgoing network</td><td>AI assistant</td><td>⚠️ Optional</td><td>AI assistant disabled, capture still works</td></tr>
+    <tr><td>User-selected files</td><td>Save to chosen location</td><td>✅ Yes</td><td>Cannot save</td></tr>
+    <tr><td>Downloads folder</td><td>Default save target</td><td>✅ Yes</td><td>Must pick path each time</td></tr>
+    <tr><td>Full Disk Access</td><td>—</td><td>❌ Not needed</td><td>—</td></tr>
+    <tr><td>Accessibility</td><td>Global hotkeys</td><td>❌ Not needed</td><td>—</td></tr>
+    <tr><td>Camera</td><td>—</td><td>❌ Not needed</td><td>—</td></tr>
+    <tr><td>Microphone</td><td>Recording audio (P1)</td><td>❌ Not needed in 0.1.0</td><td>—</td></tr>
+  </tbody>
+</table>
+<p><strong>TCC auto-revocation</strong>: macOS may revoke permissions during system updates or user cleanup. This is system behavior; re-enable in <em>System Settings → Privacy & Security</em>.</p>
+
+<h2>4. Data Storage</h2>
+
+<h3>4.1 Local paths</h3>
+<table>
+  <thead><tr><th>Data</th><th>Path</th><th>Encrypted</th></tr></thead>
+  <tbody>
+    <tr><td>Configuration</td><td><code>~/Library/Application Support/com.snap-craft.app/config.json</code></td><td>❌</td></tr>
+    <tr><td>History index</td><td><code>~/Library/Application Support/com.snap-craft.app/history/index.json</code></td><td>❌</td></tr>
+    <tr><td>History images</td><td><code>~/Library/Application Support/com.snap-craft.app/history/YYYY-MM/&lt;uuid&gt;.png</code></td><td>❌</td></tr>
+    <tr><td>Pin metadata</td><td><code>~/Library/Application Support/com.snap-craft.app/pin/</code></td><td>❌</td></tr>
+    <tr><td>Diagnostic logs</td><td><code>~/Library/Logs/com.snap-craft.app/dev.log</code></td><td>❌ (manual cleanup)</td></tr>
+    <tr><td>Temp files</td><td><code>/tmp/snapcraft-ai/</code></td><td>❌ (system cleanup)</td></tr>
+  </tbody>
+</table>
+
+<h3>4.2 Retention</h3>
+<ul>
+  <li><strong>History images</strong>: until you delete them (per-item or "Clear All")</li>
+  <li><strong>Configuration</strong>: until you uninstall the app</li>
+  <li><strong>Diagnostic logs</strong>: 7 days (rolling)</li>
+  <li><strong>On uninstall</strong>: macOS automatically removes <code>~/Library/Application Support/com.snap-craft.app/</code> but does <strong>not</strong> remove screenshots you exported to <code>~/Downloads/</code></li>
+</ul>
+
+<h3>4.3 Encryption</h3>
+<ul>
+  <li>✅ <strong>Full-disk encryption (FileVault)</strong>: if enabled in macOS, all data is encrypted at rest automatically.</li>
+  <li>❌ <strong>In-app encryption</strong>: not currently used (no secrets stored locally).</li>
+</ul>
+
+<h2>5. Your Rights (GDPR / CCPA)</h2>
+<p>Regardless of your jurisdiction (EU, California, or elsewhere), you have the following rights:</p>
+<table>
+  <thead><tr><th>Right</th><th>How to exercise</th></tr></thead>
+  <tbody>
+    <tr><td>Access (view what we have)</td><td>All data is on your Mac — no need to contact us</td></tr>
+    <tr><td>Rectification (modify)</td><td>Edit <code>config.json</code> directly or via UI</td></tr>
+    <tr><td>Erasure (right to be forgotten)</td><td>Uninstall the app + delete <code>~/Downloads/</code> exports</td></tr>
+    <tr><td>Data portability (export)</td><td>Copy <code>~/Library/Application Support/com.snap-craft.app/</code> via Finder</td></tr>
+    <tr><td>Object to automated decisions</td><td>N/A — we perform no automated processing</td></tr>
+    <tr><td>Lodge a complaint</td><td>Contact your local Data Protection Authority (DPA)</td></tr>
+  </tbody>
+</table>
+<p><strong>SnapCraft does not hold any copy of your data</strong>, so data export and data deletion are effectively the same action: you control the files on your Mac.</p>
+
+<h2>6. Children's Privacy (COPPA)</h2>
+<p>SnapCraft is not directed at children under 13 and does not collect any age-related information. If you believe your child has used SnapCraft without your consent, please contact us and we'll assist.</p>
+
+<h2>7. Third-Party Services</h2>
+<p>SnapCraft itself integrates <strong>no</strong> third-party analytics, crash reporters, or ad SDKs. You may indirectly use:</p>
+<table>
+  <thead><tr><th>Service</th><th>When used</th><th>Privacy jurisdiction</th></tr></thead>
+  <tbody>
+    <tr><td>OpenAI API</td><td>When you configure OpenAI as your AI endpoint</td><td><a href="https://openai.com/privacy">OpenAI Privacy Policy</a></td></tr>
+    <tr><td>Anthropic API</td><td>When you configure Anthropic as your AI endpoint</td><td><a href="https://www.anthropic.com/privacy">Anthropic Privacy Policy</a></td></tr>
+    <tr><td>Self-hosted (local)</td><td>When you configure <code>http://localhost:*</code></td><td>Stays on your machine</td></tr>
+  </tbody>
+</table>
+<p><strong>We do not proxy, cache, or log</strong> these calls. The app connects directly to the endpoint you chose.</p>
+
+<h2>8. International Data Transfer</h2>
+<p>By default, <strong>no</strong> data crosses borders (because the app does not connect to any network by default).</p>
+<p>Data only leaves your machine when <em>you</em> explicitly:</p>
+<ul>
+  <li>Enable the AI assistant and configure an overseas API (OpenAI in the US, Anthropic in the US)</li>
+  <li>Choose to report an issue and upload a log to GitHub Issues (GitHub in the US)</li>
+</ul>
+<p>These actions are entirely initiated by you, and the destinations are ones you selected.</p>
+
+<h2>9. Security Measures</h2>
+<ul>
+  <li>✅ App Sandbox isolation (system-enforced)</li>
+  <li>✅ Hardened Runtime (prevents dynamic code injection)</li>
+  <li>✅ Notarization (verifies the binary hasn't been tampered with)</li>
+  <li>✅ Private API detection (Apple automatically scans)</li>
+  <li>❌ End-to-end encryption: N/A (no cloud data)</li>
+  <li>❌ Two-factor authentication: N/A (no account system)</li>
+</ul>
+
+<h2>10. Changes to This Policy</h2>
+<ul>
+  <li>Policy changes will trigger a notification on app launch</li>
+  <li>Material changes (e.g. changes to data collection) require your explicit confirmation</li>
+  <li>Version history: see <a href="./CHANGELOG-PRIVACY.html">CHANGELOG-PRIVACY</a> (if applicable)</li>
+</ul>
+
+<h2>11. Contact Us</h2>
+<div class="contact">
+  <p><strong>Email</strong>: <a href="mailto:privacy@snap-craft.app">privacy@snap-craft.app</a></p>
+  <p><strong>GitHub Issues</strong>: <a href="https://github.com/liwenchao/snap-craft/issues">github.com/liwenchao/snap-craft/issues</a></p>
+  <p><strong>Postal mail (slow)</strong>: SnapCraft Lab, 123 Example St, San Francisco, CA 94102, USA</p>
+  <p><strong>Response time</strong>: Initial reply within 7 business days.</p>
+</div>
+
+<h2>12. License</h2>
+<p>This document is written in the spirit of <a href="https://tosdr.org/">Terms of Service; Didn't Read</a>, licensed under CC BY 4.0. You are welcome to adapt it.</p>
+
+<p style="margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--border); color: var(--fg-faint); font-size: 13px;">
+  SnapCraft &copy; 2026 SnapCraft Lab. Last updated July 18, 2026.
+</p>
+
+</div>
+</body>
+</html>
