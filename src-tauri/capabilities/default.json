@@ -1,7 +1,7 @@
 {
   "identifier": "main-window",
   "description": "Capabilities for the main window and region-selection overlay",
-  "windows": ["main", "pin-*", "region-overlay", "window-overlay", "editor-*", "ai-panel"],
+  "windows": ["main", "pin-*", "region-overlay", "window-overlay", "editor-*", "ai-panel", "clipboard-*"],
   "permissions": [
     "core:default",
     "core:event:allow-emit",

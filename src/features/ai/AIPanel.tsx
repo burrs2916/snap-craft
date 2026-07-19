@@ -20,7 +20,7 @@ import { markdownToDocx, type DocxImage } from './markdownDocx';
 import { markdownToPptx } from './markdownPptx';
 import { markdownToXlsx } from './markdownXlsx';
 import { buildZip, dataUrlToBytes } from './zipStore';
-import { pickExportPath, buildDefaultPath, rememberDirFromPath, revealInFolder, deriveFileHint } from './exportPath';
+import { pickExportPath, buildDefaultPath, rememberDirFromPath, revealInFolder, deriveFileHint, baseNameOf } from './exportPath';
 import { pushExportHistory, listExportHistory, clearExportHistory, type ExportHistoryItem } from './exportHistory';
 import type { AiApiType, AiChatTurn } from './aiTypes';
 import { t, getLang, isTauri } from '../../i18n';
@@ -486,7 +486,7 @@ export default function AIPanel({
         });
         if (!path) return;
         await invoke('save_binary_file', { bytes: Array.from(bytes), filePath: path });
-        setHistoryMsg(t('ai.exportOk', { path: path.split('/').pop() ?? path }));
+        setHistoryMsg(t('ai.exportOk', { path: baseNameOf(path) }));
         setLastExportedPath(path);
         setHistoryExportedPath(path);
         pushExportHistory({ path, format: 'xlsx', title: firstHeading(md) || activeConv.meta.firstGoal, time: Date.now() });
@@ -504,7 +504,7 @@ export default function AIPanel({
         });
         if (!path) return;
         await invoke('save_binary_file', { bytes: Array.from(bytes), filePath: path });
-        setHistoryMsg(t('ai.exportOk', { path: path.split('/').pop() ?? path }));
+        setHistoryMsg(t('ai.exportOk', { path: baseNameOf(path) }));
         setLastExportedPath(path);
         setHistoryExportedPath(path);
         pushExportHistory({ path, format: 'docx', title: firstHeading(md) || activeConv.meta.firstGoal, time: Date.now() });
@@ -545,7 +545,7 @@ export default function AIPanel({
         });
         if (!path) return;
         await invoke('save_binary_file', { bytes: Array.from(bytes), filePath: path });
-        setHistoryMsg(t('ai.exportOk', { path: path.split('/').pop() ?? path }));
+        setHistoryMsg(t('ai.exportOk', { path: baseNameOf(path) }));
         setHistoryExportedPath(path);
         pushExportHistory({ path, format: 'pptx', title: firstHeading(md) || activeConv.meta.firstGoal, time: Date.now() });
       } else {
@@ -577,7 +577,7 @@ export default function AIPanel({
         });
         if (!path) return;
         await invoke('save_text_file', { content, filePath: path });
-        setHistoryMsg(t('ai.exportOk', { path: path.split('/').pop() ?? path }));
+        setHistoryMsg(t('ai.exportOk', { path: baseNameOf(path) }));
         setLastExportedPath(path);
         setHistoryExportedPath(path);
         pushExportHistory({ path, format: fmt, title: firstHeading(md) || activeConv.meta.firstGoal, time: Date.now() });
@@ -624,7 +624,7 @@ export default function AIPanel({
       });
       if (!path) return;
       await invoke('save_binary_file', { bytes: Array.from(zip), filePath: path });
-      setHistoryMsg(t('ai.exportOk', { path: path.split('/').pop() ?? path }));
+      setHistoryMsg(t('ai.exportOk', { path: baseNameOf(path) }));
       setLastExportedPath(path);
       pushExportHistory({ path, format: 'zip', title: activeConv.meta.firstGoal || 'Archive', time: Date.now() });
     } catch (e: any) {
@@ -642,7 +642,7 @@ export default function AIPanel({
   // 随 goal 变化更新；时间戳在 goal 变化时冻结一次，避免每次渲染抖动。
   const exportNamePreview = useMemo(() => {
     const full = buildDefaultPath({ ext: 'docx', hint: deriveFileHint(goal) });
-    return full.split('/').pop() ?? full;
+    return baseNameOf(full);
   }, [goal]);
 
   // AI 工具循环（打码/画框等）在主窗口真实执行后，自动让主窗口重算「编辑后截图」
@@ -1011,7 +1011,7 @@ export default function AIPanel({
     if (!path) return;
     try {
       await invoke('save_text_file', { content, filePath: path });
-      const name = path.split('/').pop() ?? path;
+      const name = baseNameOf(path);
       setExportMsg(t('ai.exportOk', { path: name }));
       setExportErr(false);
       setLastExportedPath(path);
@@ -1051,7 +1051,7 @@ export default function AIPanel({
         return;
       }
       await invoke('save_binary_file', { bytes: Array.from(bytes), filePath: path });
-      const name = path.split('/').pop() ?? path;
+      const name = baseNameOf(path);
       setExportMsg(t('ai.exportOk', { path: name }));
       setExportErr(false);
       setLastExportedPath(path);
@@ -1091,7 +1091,7 @@ export default function AIPanel({
         return;
       }
       await invoke('save_binary_file', { bytes: Array.from(bytes), filePath: path });
-      const name = path.split('/').pop() ?? path;
+      const name = baseNameOf(path);
       setExportMsg(t('ai.exportOk', { path: name }));
       setExportErr(false);
       setLastExportedPath(path);
@@ -1125,7 +1125,7 @@ export default function AIPanel({
         return;
       }
       await invoke('save_binary_file', { bytes: Array.from(bytes), filePath: path });
-      const name = path.split('/').pop() ?? path;
+      const name = baseNameOf(path);
       setExportMsg(t('ai.exportOk', { path: name }));
       setExportErr(false);
       setLastExportedPath(path);
@@ -1795,7 +1795,7 @@ export default function AIPanel({
                     <div key={`${it.path}-${i}`} className="ai-export-history-item">
                       <span className="ai-export-history-fmt">.{it.format}</span>
                       <span className="ai-export-history-name" title={it.path}>
-                        {it.path.split('/').pop() ?? it.path}
+                        {baseNameOf(it.path)}
                       </span>
                       <span className="ai-export-history-time">{fmtTime(it.time)}</span>
                       <button
@@ -2469,7 +2469,7 @@ export default function AIPanel({
                         <div key={`${it.path}-${i}`} className="ai-export-history-item">
                           <span className="ai-export-history-fmt">.{it.format}</span>
                           <span className="ai-export-history-name" title={it.path}>
-                            {it.path.split('/').pop() ?? it.path}
+                            {baseNameOf(it.path)}
                           </span>
                           <span className="ai-export-history-time">{fmtTime(it.time)}</span>
                           <button

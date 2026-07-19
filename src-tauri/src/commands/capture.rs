@@ -514,7 +514,21 @@ mod xcap_capture {
 
     /// 截取主显示器全图（无 display_id 时）
     pub fn capture_xcap_screen() -> Result<String, String> {
-        let monitor = Monitor::from_point(0, 0).map_err(|e| format!("获取主显示器失败: {}", e))?;
+        // ⚠️ 主屏选择策略（跨平台对等强化 R26）：
+        // 优先用系统权威的「主屏标志」`is_primary()` 取主显示器——比
+        // `Monitor::from_point(0, 0)` 更稳。Windows 多屏且主屏被设为非虚拟桌面原点
+        // （例如主屏位于扩展布局的负坐标侧、或显示器排列把原点让给副屏）时，
+        // `from_point(0,0)` 可能落到非主屏，导致「全屏截图截错显示器」。
+        // `is_primary()` 由系统权威判定，无此歧义。找不到主屏标记时（理论上不会发生）
+        // 再退回 `from_point(0, 0)` 兜底，保证绝不空手返回、不退化任何功能。
+        let monitor = {
+            let monitors = Monitor::all().map_err(|e| format!("枚举显示器失败: {}", e))?;
+            monitors
+                .into_iter()
+                .find(|m| m.is_primary().unwrap_or(false))
+                .or_else(|| Monitor::from_point(0, 0).ok())
+                .ok_or("未找到可用显示器（多屏枚举为空）")?
+        };
         let image = monitor
             .capture_image()
             .map_err(|e| format!("全屏截屏失败: {}", e))?;

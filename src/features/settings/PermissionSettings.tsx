@@ -75,11 +75,21 @@ export function PermissionSettings() {
 
   const openSettings = async (category: 'screen' | 'microphone' | 'accessibility') => {
     try {
-      await invoke('open_permission_settings', { category });
+      // ⚠️ 跨平台对等（R27）：Rust 命令签名为 `open_permission_settings(app, kind)`，
+      // Tauri 2 按参数名严格匹配 → 必须传 `kind`（不能传 `category`）。此前误传 `category`，
+      // 两端 Rust 都收不到 `kind` → 命令报错；macOS 靠下方苹果 deeplink 兜底「看似正常」，
+      // Windows 兜底仍是 macOS 专属 URL → 静默失败 → 「打开系统设置」按钮在 Windows 点了没反应。
+      await invoke('open_permission_settings', { kind: category });
     } catch {
-      // 兜底：直接打开系统设置的隐私与安全面板
+      // 兜底：跨平台安全 — Windows 跳 ms-settings，macOS 跳 Apple 系统设置，
+      // 杜绝「Windows 落到 x-apple.systempreferences: 专属 URL」导致的无声失效。
+      const isWin =
+        typeof navigator !== 'undefined' && /Windows/i.test(navigator.userAgent);
+      const target = isWin
+        ? 'ms-settings:privacy'
+        : 'x-apple.systempreferences:com.apple.preference.security';
       try {
-        await invoke('open_external', { target: 'x-apple.systempreferences:com.apple.preference.security' });
+        await invoke('open_external', { target });
       } catch {
         // ignore
       }

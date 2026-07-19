@@ -28,6 +28,22 @@ import { useAiStore } from '../ai/aiStore';
 import { useI18n, t } from '../../i18n';
 import { stitchFrames, loadImage, type StitchFrame } from './utils/stitch';
 
+/**
+ * 平台兜底检测（不依赖 IPC）：当 `get_platform` 命令调用失败时，
+ * 用 `navigator.userAgent` 判定平台，杜绝「失败回落到 macOS」导致
+ * Windows / Linux 误走 macOS 专属分支（如快捷键提示 ⌘⇧、区域截屏走
+ * screencapture -i 等）——这是跨平台对等（parity）的关键边界用例（R2）。
+ * 返回值与 Rust `std::env::consts::OS` 一致：'macos' | 'windows' | 'linux'。
+ */
+function detectPlatformFromUA(): string {
+  if (typeof navigator === 'undefined') return 'linux';
+  const ua = navigator.userAgent;
+  if (/Windows/i.test(ua)) return 'windows';
+  if (/Mac OS X|Macintosh/i.test(ua)) return 'macos';
+  if (/Linux/i.test(ua)) return 'linux';
+  return 'linux';
+}
+
 // ── Phase 14：AI 智能编辑 — 工具宿主辅助函数 ──
 const clamp01 = (v: any): number => Math.max(0, Math.min(1, Number(v) || 0));
 const genAnnoId = () => `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
@@ -970,8 +986,12 @@ export const EnhancedScreenshotApp = () => {
         setStorePlatform(p as string);
       })
       .catch(() => {
-        setPlatform('macos');
-        setStorePlatform('macos');
+        // ⚠️ 跨平台对等（R2）：IPC 失败时不可回落到 'macos'，
+        // 否则 Windows / Linux 会错误走 macOS 专属分支。改用 UA 兜底判定。
+        const fallback = detectPlatformFromUA();
+        console.warn(`[platform] get_platform 调用失败，回落到 UA 判定: ${fallback}`);
+        setPlatform(fallback);
+        setStorePlatform(fallback);
       });
   }, [setStorePlatform]);
 
@@ -1325,7 +1345,14 @@ export const EnhancedScreenshotApp = () => {
       const main = getCurrentWindow();
       await main.hide();
       // 计算所有显示器的并集包围盒（虚拟桌面），覆盖层铺满整个虚拟桌面 → 支持任意屏拉框。
-      // Windows/Linux 的 x/y/width/height 为物理像素、正坐标系。窗口尺寸用逻辑像素。
+      // Windows/Linux 的 x/y/width/height 为物理像素、正坐标系。
+      // ⚠️ 跨平台坐标一致性（HiDPI 关键修复）：Tauri WebviewWindow 的 x/y/width/height
+      // 期望【逻辑像素】，而 list_displays 返回的是【物理像素】。若直接把物理值当逻辑值
+      // 传入，在 DPR≠1 的 Windows（如 Surface / 4K 笔记本）上覆盖层会被放大 DPR 倍并错位，
+      // 导致区域选框坐标整体偏移 → 截错位置。故创建窗口时按 dpr 折算为逻辑像素，
+      // 并把 dpr 经 URL 传给覆盖层，使其内部「CSS局部 × dpr + 原点」换算与窗口定位保持一致。
+      // DPR=1 时折算为恒等变换，零回归。
+      const dpr = window.devicePixelRatio || 1;
       let vx = 0, vy = 0, vw = 0, vh = 0;
       try {
         const disp = await invoke<DisplayInfo[]>('list_displays');
@@ -1342,12 +1369,13 @@ export const EnhancedScreenshotApp = () => {
         }
       } catch { /* ignore，退回让系统决定尺寸 */ }
       new WebviewWindow('region-overlay', {
-        // 把虚拟桌面原点通过 URL 传给覆盖层，用于把 CSS 局部坐标换算成全局物理像素
-        url: `/#region-overlay?vx=${vx}&vy=${vy}&vw=${vw}&vh=${vh}`,
-        x: vx,
-        y: vy,
-        width: vw || undefined,
-        height: vh || undefined,
+        // 把虚拟桌面原点 + dpr 通过 URL 传给覆盖层，用于把 CSS 局部坐标换算成全局物理像素
+        url: `/#region-overlay?vx=${vx}&vy=${vy}&vw=${vw}&vh=${vh}&dpr=${dpr}`,
+        // 物理像素 → 逻辑像素（Tauri 窗口几何单位），HiDPI 下覆盖层才能精确铺满虚拟桌面
+        x: Math.round(vx / dpr),
+        y: Math.round(vy / dpr),
+        width: Math.round(vw / dpr) || undefined,
+        height: Math.round(vh / dpr) || undefined,
         transparent: true,
         decorations: false,
         alwaysOnTop: true,
@@ -1373,6 +1401,9 @@ export const EnhancedScreenshotApp = () => {
       }
       const main = getCurrentWindow();
       await main.hide();
+      // 同 region-overlay：list_displays 返回物理像素，Tauri 窗口几何用逻辑像素，
+      // 按 dpr 折算避免 HiDPI Windows 下覆盖层错位；dpr 经 URL 传给覆盖层保持换算一致。
+      const dpr = window.devicePixelRatio || 1;
       let vx = 0, vy = 0, vw = 0, vh = 0;
       try {
         const disp = await invoke<DisplayInfo[]>('list_displays');
@@ -1389,11 +1420,11 @@ export const EnhancedScreenshotApp = () => {
         }
       } catch { /* ignore */ }
       new WebviewWindow('window-overlay', {
-        url: `/#window-overlay?vx=${vx}&vy=${vy}&vw=${vw}&vh=${vh}`,
-        x: vx,
-        y: vy,
-        width: vw || undefined,
-        height: vh || undefined,
+        url: `/#window-overlay?vx=${vx}&vy=${vy}&vw=${vw}&vh=${vh}&dpr=${dpr}`,
+        x: Math.round(vx / dpr),
+        y: Math.round(vy / dpr),
+        width: Math.round(vw / dpr) || undefined,
+        height: Math.round(vh / dpr) || undefined,
         transparent: true,
         decorations: false,
         alwaysOnTop: true,
@@ -1970,24 +2001,30 @@ export const EnhancedScreenshotApp = () => {
       }
 
       if (text) {
-        // 文字模式：渲染成文字卡片占位图，复用取字面板（复制/导出/搜索/合并/重新识别）。
-        const card = await makeTextCardDataUrl(text);
-        const dim = await getImageDims(card);
-        setCurrentScreenshot(null); // 非本机历史条目，避免误用历史 id
-        setCurrent({ dataUrl: card, width: dim.w || 920, height: dim.h || 360 });
-        setCurrentView('edit');
-        // 与 runOcr 对齐：重置上一次识别遗留的视图状态（搜索/勾选/框选/修正），避免把文字误隐藏。
-        setOcrEdits({});
-        setOcrSearch('');
-        setOcrConf(0);
-        setOcrSel({});
-        setOcrRegionPick(false);
-        setOcrDrag(null);
-        // 合成单块 OcrResult：整段文字作为一块（全幅 bbox），复制/导出/搜索均正常。
-        setOcrResult({ text, blocks: [{ text, x: 0, y: 0, w: 1, h: 1, confidence: 1 }] });
-        setOcrLastImage(card);
-        setOcrSourceKind('text'); // 来自剪贴板纯文字：无真实原图，禁用「重新识别/贴回标注」
-        flash(t('ocr.clipTextMode'), 'success');
+        try {
+          // 文字模式：渲染成文字卡片占位图，复用取字面板（复制/导出/搜索/合并/重新识别）。
+          const card = await makeTextCardDataUrl(text);
+          const dim = await getImageDims(card);
+          setCurrentScreenshot(null); // 非本机历史条目，避免误用历史 id
+          setCurrent({ dataUrl: card, width: dim.w || 920, height: dim.h || 360 });
+          setCurrentView('edit');
+          // 与 runOcr 对齐：重置上一次识别遗留的视图状态（搜索/勾选/框选/修正），避免把文字误隐藏。
+          setOcrEdits({});
+          setOcrSearch('');
+          setOcrConf(0);
+          setOcrSel({});
+          setOcrRegionPick(false);
+          setOcrDrag(null);
+          // 合成单块 OcrResult：整段文字作为一块（全幅 bbox），复制/导出/搜索均正常。
+          setOcrResult({ text, blocks: [{ text, x: 0, y: 0, w: 1, h: 1, confidence: 1 }] });
+          setOcrLastImage(card);
+          setOcrSourceKind('text'); // 来自剪贴板纯文字：无真实原图，禁用「重新识别/贴回标注」
+          flash(t('ocr.clipTextMode'), 'success');
+        } catch {
+          // 文字已成功读取，仅「渲染成卡片」失败（极罕见，如画布不可用）→
+          // 用精准文案而非误导性的「读取剪贴板失败」。
+          flash(t('ocr.clipTextRenderFailed'), 'error');
+        }
         return;
       }
 
@@ -2045,9 +2082,17 @@ export const EnhancedScreenshotApp = () => {
       await runOcr(dataUrl);
     } catch (e) {
       const msg = String(e);
-      // 后端用稳定令牌前缀（ERR_*）标记错误类别，这里映射为精准本地化文案。
-      // 文字/图片皆无 → info 中性提示（不再是 error）；仅真正的意外错误才回退 clipFailed 并附原因。
-      if (msg.includes('ERR_EMPTY')) {
+      // 生产级防御：即便后端（旧版/异常）泄漏 arboard 原始报错
+      // （如 "The clipboard contents were not available in the requested format..."），
+      // 也绝不透传给用户，统一降级为中性「剪贴板为空」提示——这是修复
+      // 「读取剪贴板失败：读取剪贴板文件失败: ...」报错的展示层兜底。
+      const isArboardRaw =
+        /not available in the requested format|clipboard contents were not available|was not available|读取剪贴板文件失败/i.test(
+          msg,
+        );
+      if (isArboardRaw) {
+        flash(t('ocr.clipEmptyNeutral'), 'info');
+      } else if (msg.includes('ERR_EMPTY')) {
         flash(t('ocr.clipEmptyNeutral'), 'info');
       } else if (msg.includes('ERR_TEXT_NOT_IMAGE')) {
         // 极少：文字探测为空但图片路径又看到纯文字（如仅空白文字）→ 中性引导

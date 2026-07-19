@@ -49,6 +49,8 @@ export const WindowOverlay = () => {
   // 订阅语言事件：跟随主页面统一切换，弹窗自身不内置独立选择器
   useI18n();
 
+  // dpr 优先取自 URL（由主窗口按物理/逻辑折算时传入，保证与覆盖层窗口几何一致），
+  // 缺省回落到窗口自身 devicePixelRatio。用于「全局物理 - 原点) / dpr = 局部 CSS 像素」。
   const dprRef = useRef(window.devicePixelRatio || 1);
   const originRef = useRef<{ vx: number; vy: number }>({ vx: 0, vy: 0 });
 
@@ -67,6 +69,9 @@ export const WindowOverlay = () => {
       vx: Number(params.get('vx')) || 0,
       vy: Number(params.get('vy')) || 0,
     };
+    // 与创建窗口时传入的 dpr 保持一致，确保「(全局物理 - 原点)/dpr」换算与窗口实际定位对齐
+    const urlDpr = Number(params.get('dpr'));
+    if (urlDpr && urlDpr > 0) dprRef.current = urlDpr;
     log(`覆盖层挂载 dpr=${dprRef.current} inner=${window.innerWidth}x${window.innerHeight} 原点=(${originRef.current.vx},${originRef.current.vy})`);
 
     invoke<string>('capture_screen', { displayId: null })

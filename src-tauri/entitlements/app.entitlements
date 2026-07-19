@@ -2,53 +2,24 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<!-- ============================================================
-	     SnapCraft 主 App entitlements (src-tauri/entitlements/app.entitlements)
-	     用于 App Store 上架与 Hardened Runtime 签名。
-	     ============================================================ -->
+    <!--
+      SnapCraft · 直接分发 / 开发者 ID + 公证 用 entitlements（非沙箱）
+      ------------------------------------------------------------------
+      本文件被 src-tauri/tauri.conf.json 的 bundle.macOS.entitlements 引用，
+      是 macOS `tauri build` 的必需输入（缺它构建直接失败）。
 
-	<!-- App Store 强制要求 app-sandbox=true。
-	     截屏改用 CoreGraphics API（CGDisplayCreateImage / CGWindowListCreateImage），
-	     剪贴板改用 arboard，均为 sandbox 兼容 API。
-	     原 screencapture CLI / osascript / open 命令在 sandbox 下禁止使用，已全部移除。 -->
-	<key>com.apple.security.app-sandbox</key>
-	<true/>
+      截屏走 CoreGraphics（CGDisplayCreateImage / CGWindowListCreateImage），
+      只需用户在「系统设置 → 隐私与安全 → 屏幕录制」中授权（TCC），
+      与沙箱无关，不需要任何 screen-capture entitlement。
 
-	<!-- AI 助手需要外连 HTTPS（OpenAI / 本地模型 http://localhost） -->
-	<key>com.apple.security.network.client</key>
-	<true/>
-
-	<!-- 截图保存、图片文件读取（用户通过对话框选择的文件） -->
-	<key>com.apple.security.files.user-selected.read-write</key>
-	<true/>
-
-	<!-- 截图默认保存到 ~/Downloads -->
-	<key>com.apple.security.files.downloads.read-write</key>
-	<true/>
-
-	<!-- apple-vision crate 通过 objc 调用 Vision 框架，需要加载动态库。
-	     App Store 审核：仅当真正需要加载自定义 dylib 时才加；不加会被拒。 -->
-	<key>com.apple.security.cs.disable-library-validation</key>
-	<true/>
-
-	<!-- ===========================================================
-	     故意不开的 entitlement（注释保留，避免后续误加）：
-
-	     ❌ com.apple.security.device.camera        P0 不录视频/不拍图
-	     ❌ com.apple.security.device.audio-input   P0 不录音频
-	     ❌ com.apple.security.device.microphone    P0 不录麦克风
-	     ❌ com.apple.security.files.user-selected.read-only 已被 .read-write 覆盖
-	     ❌ com.apple.security.application-groups   无群组容器需求
-	     ❌ com.apple.security.cs.allow-jit         无 WebAssembly JIT 需求
-	     ❌ com.apple.security.cs.allow-unsigned-executable-memory  同上
-	     ❌ com.apple.security.cs.disable-library-validation  已在上面开（必需）
-	     ❌ com.apple.security.print                不需要打印
-	     ❌ com.apple.security.network.server       不监听端口（P0）
-
-	     如未来 P1 阶段加入：
-	       - 录屏音频 → 打开 com.apple.security.device.audio-input
-	       - 全局快捷键辅助 → 打开 com.apple.security.accessibility
-	         (同时也需在 Info.plist 加 NSAppleEventsUsageDescription)
-	     =========================================================== -->
+      Hardened Runtime（tauri.conf 已开）下 WebView2 / JavaScriptCore
+      需要 JIT 与动态库校验豁免，以下三项为 Tauri macOS 应用的标准组合。
+    -->
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
 </dict>
 </plist>

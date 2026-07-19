@@ -23,6 +23,20 @@ function dirOf(p: string): string {
   return i >= 0 ? p.slice(0, i) : '';
 }
 
+/**
+ * 从任意路径中提取文件名（跨平台：同时兼容 `/` 与 `\` 分隔符）。
+ *
+ * ⚠️ 跨平台对等（R25）：此前 UI 多处用 `path.split('/').pop()` 取文件名，
+ * 在 macOS/Linux（路径用 `/`）正常，但在 Windows（路径用 `\`，见 `buildDefaultPath`）
+ * 因无 `/` 可切而原样返回整条路径——导致"导出成功"提示与导出历史列表在
+ * Windows 上显示成 `C:\Users\X\Documents\SnapCraft-ai-123.docx` 整串，而非 `SnapCraft-ai-123.docx`。
+ * 用正则同时切两种分隔符，两端行为严格一致、功能只增不减。
+ */
+export function baseNameOf(p: string): string {
+  if (!p) return '';
+  return p.split(/[\\/]/).pop() ?? p;
+}
+
 /** 文件名消毒：去掉非法字符 + 截断过长部分。 */
 export function sanitizeFilename(name: string, max = 40): string {
   const cleaned = (name || '').replace(ILLEGAL_RE, '_').trim();
@@ -66,6 +80,23 @@ export interface BuildDefaultPathOpts {
   withTs?: boolean;
 }
 
+/**
+ * 当前是否 Windows。依赖零：沿用本 App 的 `detectPlatformFromUA` 思路用 UA 判定，
+ * 避免为这一个工具函数引入 @tauri-apps/plugin-os 依赖。
+ * （UA 在渲染进程稳定可读，与后端 `std::env::consts::OS` 判定一致。）
+ */
+function isWindows(): boolean {
+  if (typeof navigator !== 'undefined' && navigator.userAgent) {
+    return /Windows/i.test(navigator.userAgent);
+  }
+  return false;
+}
+
+/** 当前平台的路径分隔符：Windows 用反斜杠，其余（macOS/Linux）用正斜杠。 */
+function pathSep(): string {
+  return isWindows() ? '\\' : '/';
+}
+
 /** 生成 saveDialog 的 defaultPath：lastDir + sanitize(hint) + ts + ext */
 export function buildDefaultPath(opts: BuildDefaultPathOpts): string {
   const { ext, hint = '', prefix = DEFAULT_BASENAME, withTs = true } = opts;
@@ -75,8 +106,14 @@ export function buildDefaultPath(opts: BuildDefaultPathOpts): string {
   const fileName = `${baseCore}${stamp}.${cleanExt}`;
   const last = readLastDir();
   if (!last) return fileName;
-  // 平台无关：直接用 "/" 拼接（saveDialog 在 Windows 也会自动归一）
-  return `${last.replace(/[\\/]+$/, '')}/${fileName}`;
+  // ⚠️ 跨平台对等修复（R23）：绝不能用 "/" 硬拼。
+  // 之前 `last.replace(/[\\/]+$/, '') + "/" + fileName` 在 Windows 上会产出
+  // 混合分隔符路径（如 `C:\Users\X\Documents/SnapCraft-ai-123.docx`）。
+  // Windows 原生 Save 对话框按 `\` 解析默认路径，遇到 `/` 会忽略默认目录、
+  // 丢失预填文件名，造成"每次导出都要重选目录"的 Windows 专属偏差。
+  // 现按运行平台选分隔符：Windows 用 `\`、其余用 `/`，两端都给出规范路径。
+  const sep = pathSep();
+  return `${last.replace(/[\\/]+$/, '')}${sep}${fileName}`;
 }
 
 /** 选完路径后，记住它的目录部分。返回原路径。 */

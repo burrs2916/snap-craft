@@ -42,13 +42,24 @@ jobs:
       - name: Run tsc type-check
         run: pnpm exec tsc --noEmit
 
+      # ---- 跨平台一致性 Lint（ACL 窗口授权 + 命令注册对等）----
+      # 拦截两类「两端一致地崩」的兼容性缺口：
+      #  ① 运行时动态窗口 label 未列入 capability（典型：clipboard-ocr 在
+      #     Windows 真机被 ACL 拒绝 → 点击取字无反应）；
+      #  ② 前端 invoke 的命令未在 lib.rs 注册（功能被 Tauri 静默拒绝、点了没反应）。
+      # 零平台依赖、零新依赖，PR/push 即跑，先于构建阻断回归。
+      - name: Lint cross-platform parity (ACL + command registration)
+        run: node tests/lint-capabilities.mjs
+
   # ============================================================
-  # Rust check (backend quality gate)
+  # Rust build (backend quality gate · 全量编译+链接)
+  # 比 `cargo check` 更强：真正编译+链接出二进制(不含签名/bundle)，
+  # 与 cargo-check-win 对称，两端都在 PR 阶段验证产物可编译。
   # ============================================================
   cargo-check:
-    name: Cargo Check
+    name: Cargo Build
     runs-on: macos-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -68,12 +79,53 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
 
-      - name: Cargo check
-        run: cargo check --locked
+      - name: Cargo build
+        run: cargo build --locked
         working-directory: src-tauri
 
       - name: Cargo clippy
         run: cargo clippy --locked --all-targets -- -D warnings
+        working-directory: src-tauri
+
+  # ============================================================
+  # Windows Rust 编译门禁(跨平台对等 · 全量 build)
+  #
+  # macOS 的 `cargo-check` 仅覆盖苹果专属代码路径；
+  # Windows 专属分支(#[cfg(not(target_os = "macos"))] 的 xcap 截屏/OCR 等)
+  # 此前只在 push 到 main 的 Windows 构建里才被编译，PR 阶段完全无编译校验。
+  #
+  # 本 job 在 PR 阶段即对 x86_64-pc-windows-msvc 跑「全量 `cargo build`」——
+  # 比 `cargo check` 更强：check 只做类型/借用校验、不链接；
+  # build 会真正编译+链接出 Windows 二进制，并把 tauri-winres 资源编译
+  # (RC.EXE，windows-latest 自带) 一并跑通。这能把「仅 Windows 真机/Release
+  # 才暴露的编译/链接错误」在 PR 阶段就拦下，直接服务
+  # 「GitHub Actions 编译产物在 Windows 上必须能正常构建运行」的诉求。
+  # ============================================================
+  cargo-check-win:
+    name: Cargo Build (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache Cargo (Windows)
+        uses: actions/cache@v4
+        with:
+          path: |
+            C:\Users\runneradmin\.cargo\registry
+            C:\Users\runneradmin\.cargo\git
+            src-tauri\target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Cargo build (Windows target, full link)
+        run: cargo build --locked --target x86_64-pc-windows-msvc
         working-directory: src-tauri
 
   # ============================================================
@@ -89,10 +141,20 @@ jobs:
   # ============================================================
   build:
     name: Build (${{ matrix.platform }})
-    needs: [typecheck, cargo-check]
+    needs: [typecheck, cargo-check, cargo-check-win]
     permissions:
       contents: write
+    # ⚠️ 跨平台产物门禁升级（R23）：除 push / workflow_dispatch 外，
+    # 同源 PR（非 fork）也跑完整的 `tauri build`（macOS dmg + Windows MSI/NSIS）。
+    # 目的：把「仅 push 到 main 的 Windows/macOS 打包步骤才暴露的回归」
+    # （WiX/NSIS 配置损坏、icon.ico 缺失、tauri.conf.json Windows 段错误、
+    # 资源路径错位等）前移到 PR 阶段拦截——直接服务
+    # 「GitHub Actions 编译产物在 Windows/macOS 上都必须能正常构建运行」诉求。
+    # 用 `head.repo.full_name == repository` 限定同源 PR：fork PR 的 GITHUB_TOKEN
+    # 为只读、upload-artifact 会 403，故 fork 跳过本 job 避免误红。
     if: |
+      (github.event_name == 'pull_request' &&
+       github.event.pull_request.head.repo.full_name == github.repository) ||
       github.event_name == 'push' ||
       github.event_name == 'workflow_dispatch'
     strategy:
@@ -103,13 +165,17 @@ jobs:
             runner: macos-latest
             target: aarch64-apple-darwin
             artifact: macos-arm64
+          - platform: macOS-x64
+            runner: macos-latest
+            target: x86_64-apple-darwin
+            artifact: macos-x64
           - platform: Windows
             runner: windows-latest
             target: x86_64-pc-windows-msvc
             artifact: windows-x64
 
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
@@ -266,7 +332,7 @@ jobs:
           else
             echo "No signing identity resolved — tauri will ad-hoc sign (unsigned for distribution)."
           fi
-          pnpm tauri build --target aarch64-apple-darwin
+          pnpm tauri build --target ${{ matrix.target }}
 
       # ==========================================================
       # Windows: 保留 tauri-action (仅 MSI/NSIS 签名, 未报证书错误)
@@ -351,18 +417,36 @@ jobs:
 
       # ---- Build & Upload MSIX (Windows, 微软商城用) ----
       # 使用 @choochmeque/tauri-windows-bundle 从已编译的 exe 生成 MSIX 包
+      # ---- Init Windows bundle tool (best-effort, 仅首次需要) ----
+      - name: Init tauri-windows-bundle (Windows)
+        if: matrix.platform == 'Windows'
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          Write-Host "=== Initializing tauri-windows-bundle (creates MSIX template) ==="
+          # 生成 MSIX 模板(msix.template.xml / 资源清单)，未 init 时 build 会直接失败。
+          # 幂等：已 init 时该命令安全跳过。
+          npx @choochmeque/tauri-windows-bundle@0.1.28 init --runner pnpm 2>&1
+          if ($LASTEXITCODE -ne 0) {
+            echo "::warning::tauri-windows-bundle init 失败（可忽略，build 步骤会再次尝试）。"
+          }
+
+      # ---- Build MSIX (best-effort, 微软商城用) ----
+      # MS Store 真实上架需：①在 src-tauri/tauri.microsoftstore.conf.json 填入
+      #   Partner Center 分配的 publisher / identity.name；②MSIX 由微软重签，
+      #   故 certificateThumbprint 留空、webviewInstallMode=emulation（不内嵌离线安装包）。
+      # 本步用默认配置生成「自签名 MSIX」仅作 sideload 冒烟测试；Store 提交请用
+      # `pnpm tauri build --config src-tauri/tauri.microsoftstore.conf.json` 产出未签名 MSIX。
       - name: Build MSIX package (Windows)
         if: matrix.platform == 'Windows'
-        continue-on-error: true   # 仅微软商城用；当前无 Store 证书/未 init,本步会失败,但不阻塞主产物(MSI/NSIS/portable)
+        continue-on-error: true   # 仅微软商城用；缺 init / Store 证书时本步失败,但不阻塞主产物(MSI/NSIS/portable)
         shell: pwsh
         run: |
           Write-Host "=== Building MSIX package (best-effort, Microsoft Store submission only) ==="
-          # 安装 msixbundle-cli（若未安装）。保留输出现场以便排查,不静默丢弃。
-          cargo install msixbundle-cli 2>&1 | Out-Host
           # 使用 tauri-windows-bundle 生成 MSIX（固定版本,避免 @latest 供应链漂移）
           npx @choochmeque/tauri-windows-bundle@0.1.28 build --runner pnpm 2>&1
           if ($LASTEXITCODE -ne 0) {
-            echo "::warning::MSIX build failed (needs 'tauri-windows-bundle init' + Microsoft Store cert). Non-fatal — MSI/NSIS/portable artifacts are unaffected."
+            echo "::warning::MSIX build failed (needs Microsoft Store publisher identity in tauri.microsoftstore.conf.json). Non-fatal — MSI/NSIS/portable artifacts are unaffected."
             exit 0
           }
           # 列出 MSIX 产物
@@ -480,9 +564,11 @@ jobs:
           body: |
             ## SnapCraft ${{ github.ref_name }}
 
-            ### macOS (Apple Silicon)
-            Download `SnapCraft_*.dmg`, double-click to mount, then drag
-            **SnapCraft** into the Applications folder.
+            ### macOS (Apple Silicon & Intel)
+            Download the DMG matching your Mac:
+            - `SnapCraft_aarch64.dmg` — Apple Silicon (M1 / M2 / M3 / M4)
+            - `SnapCraft_x64.dmg` — Intel Macs
+            Double-click to mount, then drag **SnapCraft** into the Applications folder.
 
             如果应用使用了 Apple Developer ID 签名 + 公证（CI 配置了证书时），
             Gatekeeper 不会拦截，可直接双击打开。否则使用 ad-hoc 签名，首次
@@ -494,15 +580,25 @@ jobs:
 
             ### Windows (Installer)
             Download `SnapCraft_*.msi` and double-click to install.
+            The installer **bundles the Microsoft WebView2 Runtime**, so it works
+            fully offline — no separate download or pre-installed runtime required.
             SmartScreen may warn - choose "More info -> Run anyway".
 
             ### Windows (Standalone EXE)
-            Download `SnapCraft_*.exe` (standalone, no installer needed).
-            Frontend is embedded; requires WebView2 Runtime (pre-installed on Win10/11).
+            Download `snap-craft.exe` (standalone, no installer needed).
+            Frontend is embedded; requires the Microsoft WebView2 Runtime
+            (pre-installed on most Win10/11 — if missing, get it from
+            https://developer.microsoft.com/microsoft-edge/webview2/).
 
             ### Windows (MSIX)
             Download `SnapCraft_*.msix` for Microsoft Store sideloading.
             Requires Windows 10 1809+ with Developer Mode or signed certificate.
+          # ⚠️ 路径口径（R28 修正）：release 只收 `bundle/**` 下的产物会漏掉两类真实产物：
+          #  ① 独立 exe —— 上传自 `src-tauri/target/<target>/release/snap-craft.exe`
+          #     （不在 bundle/ 下，而是 release/ 根），Release 说明却承诺「Windows 独立 EXE」；
+          #  ② 免安装便携 zip —— 上传自 `src-tauri/target/windows-portable.zip`。
+          #  此前这两类产物因 glob 不匹配从未随 Tag Release 发布 → 用户照 Release 说明找不到下载。
+          #  现补齐 glob，让 Windows 独立 exe / 便携 zip 与 dmg/msi/nsis 一同随 Release 发布（只增不减）。
           files: |
             src-tauri/target/**/release/bundle/**/*.dmg
             src-tauri/target/**/release/bundle/**/*.msi
@@ -510,6 +606,8 @@ jobs:
             src-tauri/target/**/release/bundle/**/*.app.zip
             src-tauri/target/**/release/bundle/**/*.msix
             src-tauri/target/**/release/bundle/**/*.msixbundle
+            src-tauri/target/**/release/snap-craft.exe
+            src-tauri/target/**/windows-portable.zip
 
   # ============================================================
   # macOS App Store submission (opt-in via vars.ENABLE_APPSTORE)
@@ -609,7 +707,9 @@ jobs:
         run: |
           set -e
           echo "Building .app with signing identity: $APPLE_SIGNING_IDENTITY"
-          pnpm tauri build --target aarch64-apple-darwin --bundles app
+          # 用 App Store 专用配置覆盖 entitlements（强制 sandbox），
+          # 否则 .app 不带 com.apple.security.app-sandbox → App Store 审核拒收。
+          pnpm tauri build --target aarch64-apple-darwin --bundles app --config src-tauri/tauri.appstore.conf.json
 
       # ---- productbuild 生成 App Store .pkg ----
       - name: Build App Store .pkg

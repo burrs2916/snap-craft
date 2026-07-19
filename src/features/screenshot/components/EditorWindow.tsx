@@ -330,6 +330,7 @@ export const EditorWindow = () => {
   const autoOcrRef = useRef(false); // 防重复自动 OCR
   // 持最新 loadFromClipboard 引用，供「重新读取」事件监听器调用（避免闭包捕获旧版本）
   const loadFromClipboardRef = useRef<() => Promise<void>>(async () => {});
+  const loadFromClipboardBusyRef = useRef(false); // 防重入：读取中禁用「重新读取」
 
   // 从 store 取标注和工具状态（独立 webview = 全新 store 实例）
   const {
@@ -450,6 +451,10 @@ export const EditorWindow = () => {
 
   // 模式 2：从剪贴板取字（文字优先 -> 图片次之 -> 空中性提示）
   const loadFromClipboard = async () => {
+    // 生产级防重入：读取 + 解码 + 识别期间禁用「重新读取」，连点只算一次，
+    // 杜绝重复触发导致的状态错乱 / 双 OCR。
+    if (loadFromClipboardBusyRef.current) return;
+    loadFromClipboardBusyRef.current = true;
     // 重新读取前重置状态（首次挂载时已 loading=true，这里保证「重新读取」也走 loading 态）
     setLoading(true);
     setError(null);
@@ -481,7 +486,6 @@ export const EditorWindow = () => {
         setOcrElapsed(0);
         flash(t('ocr.clipTextMode'), 'success');
         elog(`[clipboard] 文字模式: ${clipText.length} 字符`);
-        setLoading(false);
         return;
       }
 
@@ -490,7 +494,6 @@ export const EditorWindow = () => {
       if (!dataUrl || !dataUrl.startsWith('data:image')) {
         flash(t('ocr.clipEmptyNeutral'), 'info');
         setError(t('ocr.clipEmptyNeutral'));
-        setLoading(false);
         return;
       }
 
@@ -520,19 +523,46 @@ export const EditorWindow = () => {
       }
 
       elog(`[clipboard] 图片模式: ${dim.w}x${dim.h} id=${cid}`);
-      setLoading(false);
 
       // 自动跑 OCR（挂载后自动识别，比之前更省一步）
       setTimeout(() => doOcr(dataUrl), 100);
     } catch (e) {
       const msg = String(e);
-      if (msg.includes('ERR_EMPTY') || msg.includes('没有图片') || /no image/i.test(msg)) {
+      // 生产级防御：即便后端（旧版/异常）泄漏 arboard 原始报错
+      // （如 "The clipboard contents were not available in the requested format..."），
+      // 也绝不透传给用户，统一降级为中性「剪贴板为空」提示。
+      const isArboardRaw =
+        /not available in the requested format|clipboard contents were not available|was not available|读取剪贴板文件失败/i.test(
+          msg,
+        );
+      if (
+        isArboardRaw ||
+        msg.includes('ERR_EMPTY') ||
+        msg.includes('没有图片') ||
+        /no image/i.test(msg)
+      ) {
         flash(t('ocr.clipEmptyNeutral'), 'info');
         setError(t('ocr.clipEmptyNeutral'));
+      } else if (msg.includes('ERR_TEXT_NOT_IMAGE')) {
+        setError(t('ocr.clipTextOnly'));
+        flash(t('ocr.clipTextOnly'), 'info');
+      } else if (msg.includes('ERR_NO_IMG_FILE')) {
+        setError(t('ocr.clipNoImgFile'));
+        flash(t('ocr.clipNoImgFile'), 'error');
+      } else if (msg.includes('ERR_BAD_IMG_FILE')) {
+        setError(t('ocr.clipBadImgFile'));
+        flash(t('ocr.clipBadImgFile'), 'error');
+      } else if (msg.includes('ERR_ZERO_SIZE')) {
+        setError(t('ocr.clipZero'));
+        flash(t('ocr.clipZero'), 'error');
       } else {
         setError(t('ocr.clipFailed', { msg }));
         flash(t('ocr.clipFailed', { msg }), 'error');
       }
+    } finally {
+      // 生产级保证：无论成功 / 读取失败 / 任何意外异常，必解锁并收尾 loading，
+      // 杜绝「读取中…」永久卡死导致该功能彻底不可用。
+      loadFromClipboardBusyRef.current = false;
       setLoading(false);
     }
   };
@@ -1480,7 +1510,7 @@ export const EditorWindow = () => {
           <button
             className="tbar-btn tbar-ghost"
             onClick={handleCopy}
-            title={sourceKind === 'text' ? t('copy') : t('editor.copyTitle', { mod: '⌘' })}
+            title={sourceKind === 'text' ? t('editor.copyTitle') : t('editor.copyTitle', { mod: '⌘' })}
           >
             {t('editor.copy')}
           </button>

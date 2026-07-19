@@ -1,6 +1,4 @@
 use crate::store;
-#[cfg(target_os = "macos")]
-use std::process::Command;
 use std::path::Path;
 use std::sync::Mutex;
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
@@ -30,76 +28,35 @@ pub async fn copy_to_clipboard(_app: AppHandle, image_data: String) -> Result<()
     clog!("clip", "copy_to_clipboard 调用: data_url 长度={} 前缀={}",
         image_data.len(),
         &image_data.chars().take(30).collect::<String>());
-    #[cfg(target_os = "macos")]
-    {
-        // macOS：通过 AppleScript 将 PNG 文件写入剪贴板（无需额外解码依赖）
-        let bytes = match store::data_url_to_bytes(&image_data) {
-            Ok(b) => b,
-            Err(e) => {
-                clog!("clip", "解码 data_url 失败: {}", e);
-                return Err(format!("解码图片数据失败: {}", e));
-            }
-        };
-        clog!("clip", "解码成功: PNG 字节数={}", bytes.len());
-        let tmp = store::temp_png_path();
-        if let Err(e) = store::write_bytes(&tmp, &bytes) {
-            clog!("clip", "写临时 PNG 失败: path={:?} err={}", tmp, e);
-            return Err(format!("写入临时文件失败: {}", e));
-        }
-        clog!("clip", "临时 PNG 已写入: {:?}", tmp);
+    // 跨平台统一路径：解码 PNG 为 RGBA，使用 arboard 写入剪贴板。
+    // - 此前 macOS 走 osascript（包外外部二进制），在 App Store 沙箱下无法 spawn → 复制图片失效；
+    //   arboard 在 macOS 走 NSPasteboard，沙箱可用，macOS App Store 版本也能正常复制图片。
+    // - Windows / Linux 行为与此前完全一致，无回归。
+    // - NSPasteboard 非线程安全，必须串行化（与 read_clipboard_image_sync / 文本读取共用同一把锁）。
+    let bytes = store::data_url_to_bytes(&image_data)?;
+    let tmp = store::temp_png_path();
+    store::write_bytes(&tmp, &bytes)?;
 
-        let path = tmp.to_str().ok_or("无效的临时路径")?;
-        // 注意：AppleScript 现代 macOS 不认识 `as PNG picture`（会报 -2741 语法错误），
-        // 必须用四字符类型码 «class PNGf» 读取 PNG 数据写入剪贴板。
-        let script = format!(
-            "set the clipboard to (read (POSIX file \"{}\") as «class PNGf»)",
-            path.replace('"', "\\\"")
-        );
-        let output = Command::new("osascript")
-            .arg("-e")
-            .arg(&script)
-            .output()
-            .map_err(|e| {
-                clog!("clip", "无法运行 osascript: {}", e);
-                format!("无法运行 osascript: {}", e)
-            })?;
-        // 清理临时文件
-        let _ = std::fs::remove_file(&tmp);
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            clog!("clip", "osascript 失败: 退出码={:?} stderr={}", output.status.code(), stderr.trim());
-            return Err(format!("复制到剪贴板失败：{}", stderr.trim()));
-        }
-        clog!("clip", "复制到剪贴板成功 ✅");
-        Ok(())
-    }
+    let img = image::open(&tmp)
+        .map_err(|e| format!("解码图片失败: {}", e))?
+        .to_rgba8();
+    // 清理临时文件
+    let _ = std::fs::remove_file(&tmp);
+    let (w, h) = (img.width() as usize, img.height() as usize);
+    let rgba = img.into_raw();
 
-    #[cfg(not(target_os = "macos"))]
-    {
-        // Windows / Linux：解码 PNG 为 RGBA，使用 arboard 写入剪贴板
-        let bytes = store::data_url_to_bytes(&image_data)?;
-        let tmp = store::temp_png_path();
-        store::write_bytes(&tmp, &bytes)?;
-
-        let img = image::open(&tmp)
-            .map_err(|e| format!("解码图片失败: {}", e))?
-            .to_rgba8();
-        // 清理临时文件
-        let _ = std::fs::remove_file(&tmp);
-        let (w, h) = (img.width() as usize, img.height() as usize);
-        let rgba = img.into_raw();
-
-        let mut clipboard =
-            arboard::Clipboard::new().map_err(|e| format!("剪贴板初始化失败: {}", e))?;
-        clipboard
-            .set_image(arboard::ImageData {
-                width: w,
-                height: h,
-                bytes: rgba.into(),
-            })
-            .map_err(|e| format!("复制到剪贴板失败: {}", e))?;
-        Ok(())
-    }
+    let _guard = CLIPBOARD_LOCK.lock().map_err(|e| format!("剪贴板锁获取失败: {}", e))?;
+    let mut clipboard =
+        arboard::Clipboard::new().map_err(|e| format!("剪贴板初始化失败: {}", e))?;
+    clipboard
+        .set_image(arboard::ImageData {
+            width: w,
+            height: h,
+            bytes: rgba.into(),
+        })
+        .map_err(|e| format!("复制到剪贴板失败: {}", e))?;
+    clog!("clip", "复制到剪贴板成功 ✅");
+    Ok(())
 }
 
 /// 系统剪贴板图片经本命令读取后，长边允许的最大像素：超过则等比缩放后再编码。
@@ -130,12 +87,13 @@ const ERR_ZERO_SIZE: &str = "ERR_ZERO_SIZE";
 ///
 /// 仅读取用户主动复制的内容，不访问屏幕录制，无需 TCC 屏幕录制权限；只读不写，
 /// 与 copy_to_clipboard 平级、互不干扰。返回契约（PNG data URL 字符串）未变，前端零改造。
-#[tauri::command]
-pub async fn read_clipboard_image() -> Result<String, String> {
+/// 同步实现：在独立线程（spawn_blocking）执行，避免阻塞 tokio 运行时。
+/// 见 `read_clipboard_image` 命令包装。
+fn read_clipboard_image_sync() -> Result<String, String> {
     use image::imageops::FilterType;
 
-    // macOS 的 NSPasteboard 不是线程安全的，多个 tokio worker 同时读会 EXC_BAD_ACCESS。
-    // 用 spawn_blocking + 全局 Mutex 串行化，确保同一时刻只有一个线程访问剪贴板。
+    // macOS 的 NSPasteboard 不是线程安全的，多个 tokio worker 线程同时读会 EXC_BAD_ACCESS。
+    // 用全局 Mutex 串行化所有剪贴板读写，确保同一时刻只有一个线程在访问。
     let _guard = CLIPBOARD_LOCK.lock().map_err(|e| format!("剪贴板锁获取失败: {}", e))?;
 
     let mut clipboard =
@@ -253,6 +211,17 @@ pub async fn read_clipboard_image() -> Result<String, String> {
     Ok(data_url)
 }
 
+#[tauri::command]
+pub async fn read_clipboard_image() -> Result<String, String> {
+    // macOS 的 NSPasteboard 不是线程安全的；用 spawn_blocking 把同步剪贴板 I/O
+    // 移到独立线程，避免阻塞 tokio 运行时（生产级：巨图解码 / PNG 编码可达数百 ms）。
+    // 全局 CLIPBOARD_LOCK 仍在同一线程内串行化，正确性不受影响。
+    let result = tauri::async_runtime::spawn_blocking(read_clipboard_image_sync)
+        .await
+        .map_err(|e| format!("剪贴板任务执行失败: {}", e))?;
+    result
+}
+
 /// 读取系统剪贴板中的纯文本（保留内部换行，仅去除首尾空白/换行）。
 /// 供「从剪贴板取字」在图片之前**优先**探测：若剪贴板里本来就是文字，直接作为取字结果，
 /// 无需 OCR，最贴合「取字」语义，也避开了「一个叫取字的功能拒绝文字」的反直觉问题。
@@ -262,8 +231,9 @@ pub async fn read_clipboard_image() -> Result<String, String> {
 ///  - 无文字（剪贴板空、或仅有空白/换行）：返回 ERR_EMPTY，由前端继续尝试图片路径，
 ///    最终文字与图片皆无时才提示「剪贴板为空」，绝不把无文字当作错误抛给用户。
 /// 仅读取、不写；与 read_clipboard_image 平级、互不干扰。
-#[tauri::command]
-pub async fn read_clipboard_text() -> Result<String, String> {
+/// 同步实现：在独立线程（spawn_blocking）执行，避免阻塞 tokio 运行时。
+/// 见 `read_clipboard_text` 命令包装。
+fn read_clipboard_text_sync() -> Result<String, String> {
     // macOS 的 NSPasteboard 不是线程安全的，用全局 Mutex 串行化。
     let _guard = CLIPBOARD_LOCK.lock().map_err(|e| format!("剪贴板锁获取失败: {}", e))?;
 
@@ -281,6 +251,15 @@ pub async fn read_clipboard_text() -> Result<String, String> {
     }
     clog!("clip", "read_clipboard_text 成功: 长度={}", text.len());
     Ok(text)
+}
+
+#[tauri::command]
+pub async fn read_clipboard_text() -> Result<String, String> {
+    // 用 spawn_blocking 把同步剪贴板 I/O 移到独立线程，避免阻塞 tokio 运行时。
+    let result = tauri::async_runtime::spawn_blocking(read_clipboard_text_sync)
+        .await
+        .map_err(|e| format!("剪贴板任务执行失败: {}", e))?;
+    result
 }
 
 /// 将纯文本（如 OCR 识别结果）写入指定文件路径。

@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!--
+      SnapCraft · macOS App Store 上架用 entitlements（强制沙箱）
+      ------------------------------------------------------------------
+      被 src-tauri/tauri.appstore.conf.json 引用，由 build.yml 的
+      `appstore` job 通过 `tauri build --config tauri.appstore.conf.json`
+      在打 .pkg 前对 .app 签名时使用。
+
+      ⚠️ App Store 强制要求开启 App Sandbox。
+
+      ⚠️ 不允许使用 com.apple.security.temporary-exception.screencapture
+         （该临时例外在 App Store 审核中被拒）。
+
+      🔴 已知 P0 阻断（待 ScreenCaptureKit 迁移，见仓库文档）：
+         当前 capture.rs 截屏实际走外部 CLI `screencapture`（CoreGraphics 仅用于
+         显示器枚举，不参与像素捕获），edit.rs 的窗口激活 / 复制图片此前也走
+         外部 CLI `osascript`。沙箱禁止 spawn 包外进程 → App Store 构建下
+         全屏/区域/窗口/滚动截屏 + 复制图片全部失效。
+         - 复制图片已改为 arboard（走 NSPasteboard，沙箱可用）。
+         - 截屏本体仍需迁移到 ScreenCaptureKit（SCStream/SCContentFilter），
+           这是 App Store 上架前的硬性前提，属架构级改动，需单独里程碑。
+    -->
+
+    <!-- App Store 强制：App Sandbox 必须开启 -->
+    <key>com.apple.security.app-sandbox</key>
+    <true/>
+
+    <!-- 用户通过保存对话框选中的位置可读写（Powerbox 授予） -->
+    <key>com.apple.security.files.user-selected.read-write</key>
+    <true/>
+    <!-- 直接写入 ~/Downloads（截图默认落盘处，Apple 批准用途） -->
+    <key>com.apple.security.files.downloads.read-write</key>
+    <true/>
+
+    <!-- AI 助手直连用户自配的 API 端点（https 出站），App Store 合规 -->
+    <key>com.apple.security.network.client</key>
+    <true/>
+
+    <!-- Hardened Runtime + WebView2 / JavaScriptCore JIT 所需 -->
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+</dict>
+</plist>
