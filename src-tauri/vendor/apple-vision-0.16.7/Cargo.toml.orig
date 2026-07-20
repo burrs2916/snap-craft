@@ -1,0 +1,125 @@
+[package]
+name = "apple-vision"
+version = "0.16.7"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/doom-fish/vision-rs"
+repository = "https://github.com/doom-fish/vision-rs"
+description = "Safe Rust bindings for Apple's Vision framework — OCR, object detection, face landmarks on macOS"
+authors = ["Per Johansson <per@doom.fish>"]
+keywords = ["vision", "ocr", "macos", "computer-vision", "apple"]
+categories = ["api-bindings", "os::macos-apis", "computer-vision"]
+rust-version = "1.76"
+readme = "README.md"
+build = "build.rs"
+include = [
+    "src/**/*",
+    "examples/**/*",
+    "tests/**/*",
+    "swift-bridge/Package.swift",
+    "swift-bridge/Sources/**/*",
+    "build.rs",
+    "Cargo.toml",
+    "README.md",
+    "LICENSE-*",
+    "CHANGELOG.md",
+]
+
+[lints.rust]
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+cargo = { level = "warn", priority = -1 }
+
+[lib]
+name = "apple_vision"
+crate-type = ["lib"]
+
+[features]
+default = [
+    "recognize_text", "detect_faces", "detect_barcodes", "saliency",
+    "face_landmarks", "body_pose", "hand_pose", "contours", "animals",
+    "classify", "rectangles", "horizon", "feature_print", "humans",
+    "aesthetics", "segmentation", "optical_flow", "coreml", "tracking",
+]
+async = []
+
+# Per-request-type feature flags.
+recognize_text = []
+detect_faces = []
+detect_barcodes = []
+saliency = []
+face_landmarks = ["detect_faces"]
+body_pose = []
+hand_pose = ["body_pose"]
+contours = ["face_landmarks"]
+animals = ["detect_faces"]
+classify = []
+rectangles = ["face_landmarks"]
+horizon = []
+feature_print = []
+humans = ["detect_faces"]
+aesthetics = ["detect_faces"]
+segmentation = []
+optical_flow = ["segmentation"]
+coreml = ["classify"]
+tracking = ["recognize_text", "rectangles"]
+
+[dependencies]
+apple-cf = { path = "../apple-cf-rs", version = ">=0.7, <0.10", default-features = false, features = ["cv", "iosurface"] }
+doom-fish-utils = { path = "../doom-fish-utils", version = ">=0.1, <0.4" }
+libc = "0.2.186"
+
+[dev-dependencies]
+pollster = "0.3"
+regex-lite = "0.1"
+
+[package.metadata.docs.rs]
+all-features = true
+default-target = "aarch64-apple-darwin"
+targets = ["aarch64-apple-darwin", "x86_64-apple-darwin"]
+rustdoc-args = ["--cfg", "docsrs"]
+
+[badges]
+maintenance = { status = "actively-developed" }
+
+[[example]]
+name = "01_ocr_smoke"
+required-features = ["recognize_text"]
+
+[[example]]
+name = "02_ocr_pixel_buffer"
+required-features = ["recognize_text"]
+
+[[example]]
+name = "03_face_detect"
+required-features = ["detect_faces", "recognize_text"]
+
+[[example]]
+name = "05_tracking"
+required-features = ["tracking"]
+
+[[example]]
+name = "06_request_processing"
+required-features = ["recognize_text"]
+
+[[example]]
+name = "07_async_recognize_text"
+required-features = ["async", "recognize_text"]
+
+[[example]]
+name = "08_async_detect_faces"
+required-features = ["async", "detect_faces"]
+
+[[example]]
+name = "09_async_detect_barcodes"
+required-features = ["async", "detect_barcodes"]
+
+[[example]]
+name = "10_async_segmentation"
+required-features = ["async", "segmentation"]
+
+[profile.release]
+debug = "full"
+strip = "none"

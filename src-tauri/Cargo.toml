@@ -32,3 +32,19 @@ image = "0.25"
 # Windows 侧不加依赖——用系统自带 PowerShell 5.1 子进程调 WinRT Windows.Media.Ocr。
 [target.'cfg(target_os = "macos")'.dependencies]
 apple-vision = "0.16"
+
+# ============================================================
+# [patch] apple-vision 0.16.7 —— 修复 CI 跨 SDK 编译阻断
+# ------------------------------------------------------------
+# 原 crate 的 build.rs 无条件 `swift build` 整个 swift-bridge 包，其中
+# SegmentationOpticalFlowCoreML.swift 用到 `Float16(bitPattern:)`，该初始化器
+# 仅在最新 SDK（Xcode 26 / macOS 26）提供；GitHub macOS runner 实际供给的
+# SDK（Xcode 16 / macOS 15）缺失此 API → swift build 失败 → 所有 macOS
+# `cargo build` / `tauri build` 挂。`macos-26` runner 标签并未稳定提供该 SDK，
+# 故仅靠 pin runner 不可靠。
+# 此处 vendored 一份源码，仅把该处改为 SDK 无关写法（unsafeBitCast），
+# 使 apple-vision 在任意 macOS SDK 上都能编译。本地开发环境（macOS 26 SDK）
+# 仍 100% 等价；OCR 功能（recognize_text）零变化。
+# ============================================================
+[patch.crates-io]
+apple-vision = { path = "vendor/apple-vision-0.16.7" }

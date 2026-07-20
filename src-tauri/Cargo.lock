@@ -93,8 +93,6 @@ dependencies = [
 [[package]]
 name = "apple-vision"
 version = "0.16.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "520e69c1bed790eef95c78ed6df113f5974478d16eec287af905362aa1a90b83"
 dependencies = [
  "apple-cf",
  "doom-fish-utils",
