@@ -72,3 +72,18 @@ IDENTITY.md
 SOUL.md
 TOOLS.md
 USER.md
+
+# Internal working journals (kept locally, removed from repo to keep root clean)
+AI助手-*.md
+OCR增强-*.md
+REPORT-*.md
+PLATFORM_PARITY_FIX-*.md
+overview-*.md
+_audit_*.md
+_prd_store_compliance.md
+需求发现-v2-*.md
+
+# Redundant store-readiness scratch reports (superseded snapshots)
+CROSS_PLATFORM_READINESS-*.md
+CROSS_PLATFORM_STORE_READINESS-*.md
+STORE_READINESS_SNAPSHOT-*.md
