@@ -87,6 +87,8 @@ _prd_store_compliance.md
 CROSS_PLATFORM_READINESS-*.md
 CROSS_PLATFORM_STORE_READINESS-*.md
 STORE_READINESS_SNAPSHOT-*.md
+APPLE_VISION_CI_FIX-*.md
+CROSS_PLATFORM_RETRO-*.md
 
 # Local / dev artifacts — intentionally excluded (not needed for build or store submission)
 *.py
