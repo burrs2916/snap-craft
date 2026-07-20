@@ -32,6 +32,16 @@ image = "0.25"
 # Windows 侧不加依赖——用系统自带 PowerShell 5.1 子进程调 WinRT Windows.Media.Ocr。
 [target.'cfg(target_os = "macos")'.dependencies]
 apple-vision = "0.16"
+# macOS App Store 沙箱截屏：ScreenCaptureKit（SCScreenshotManager / SCShareableContent）。
+# 沙箱内禁止 spawn 外部 screencapture CLI，故 App Store 构建走 ScreenCaptureKit（纯框架调用、
+# 沙箱可用）；开发者 ID 构建仍走 screencapture（见 capture.rs 的运行时 is_sandboxed 分流）。
+# 这些 crate 仅 macOS 编译，Windows/Linux 不引入（xcap 原生截屏）。
+objc2-screen-capture-kit = "0.3"
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-core-foundation = "0.3"
+objc2-uniform-type-identifiers = "0.3"
+block2 = "0.6"
 
 # ============================================================
 # [patch] apple-vision 0.16.7 —— 修复 CI 跨 SDK 编译阻断

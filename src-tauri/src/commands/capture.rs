@@ -240,6 +240,12 @@ pub async fn capture_screen(
         // 等待窗口隐藏完成，避免截到自身窗口 / 截到未重绘的黑屏（macOS 隐藏+重绘需时间）
         std::thread::sleep(std::time::Duration::from_millis(400));
 
+        // App Store 沙箱路径：禁止 spawn 外部 screencapture，改用 ScreenCaptureKit（纯框架调用）。
+        // 开发者 ID 构建不进此分支（is_sandboxed=false），仍走下方原生 screencapture。
+        if crate::commands::screen_capture_kit::is_sandboxed() {
+            return crate::commands::screen_capture_kit::sc_capture_display(display_id);
+        }
+
         // 权限闸门：无屏幕录制权限就主动弹授权窗并给出指引，避免 -x 静默失败
         ensure_screen_capture_access()?;
 
@@ -329,6 +335,19 @@ pub async fn capture_region(_app: AppHandle, rect: Option<CaptureRect>) -> Resul
     }
     #[cfg(target_os = "macos")]
     {
+        // App Store 沙箱：区域截图需前端选区覆盖层传入 rect，走 ScreenCaptureKit；
+        // 无 rect（纯交互 -i）在沙箱下不可用，明确报错避免静默失效。
+        if crate::commands::screen_capture_kit::is_sandboxed() {
+            return match rect {
+                Some(r) => {
+                    crate::commands::screen_capture_kit::sc_capture_region(r.x, r.y, r.width, r.height)
+                }
+                None => Err(
+                    "App Store 沙箱下区域截图需先框选区域（前端选区覆盖层将传入 rect）".into(),
+                ),
+            };
+        }
+
         // 权限闸门：无屏幕录制权限就主动弹授权窗并给出指引
         ensure_screen_capture_access()?;
 
@@ -368,6 +387,13 @@ pub async fn capture_region_fixed(_app: AppHandle, rect: CaptureRect) -> Result<
     }
     #[cfg(target_os = "macos")]
     {
+        // App Store 沙箱：非交互精确矩形截图走 ScreenCaptureKit（rect 已确定）
+        if crate::commands::screen_capture_kit::is_sandboxed() {
+            return crate::commands::screen_capture_kit::sc_capture_region(
+                rect.x, rect.y, rect.width, rect.height,
+            );
+        }
+
         ensure_screen_capture_access()?;
         let rarg = format!("{},{},{},{}", rect.x, rect.y, rect.width, rect.height);
         let parts = ["-x".to_string(), "-R".to_string(), rarg];
@@ -387,6 +413,11 @@ pub async fn capture_window(_app: AppHandle) -> Result<String, String> {
     {
         // 等待覆盖层窗口完全隐藏（与 capture_screen 一致），避免截到正在消失的覆盖层
         std::thread::sleep(std::time::Duration::from_millis(200));
+
+        // App Store 沙箱：无交互取窗 UI（-w 不可用），自动抓最前台窗口
+        if crate::commands::screen_capture_kit::is_sandboxed() {
+            return crate::commands::screen_capture_kit::sc_capture_frontmost_window();
+        }
 
         // 权限闸门：无屏幕录制权限就主动弹授权窗并给出指引
         ensure_screen_capture_access()?;
@@ -426,11 +457,15 @@ pub async fn capture_window(_app: AppHandle) -> Result<String, String> {
 }
 
 /// 枚举可截图窗口（Windows/Linux 的窗口点选覆盖层用）。
-/// macOS 用系统原生 -w 交互点窗，无需此命令，返回空。
+/// macOS 开发者 ID 用系统原生 -w 交互点窗，无需此命令，返回空；
+/// macOS App Store 沙箱禁 -w，改用 ScreenCaptureKit 枚举窗口供前端覆盖层点选。
 #[tauri::command]
 pub fn list_windows() -> Vec<WindowInfo> {
     #[cfg(target_os = "macos")]
     {
+        if crate::commands::screen_capture_kit::is_sandboxed() {
+            return crate::commands::screen_capture_kit::sc_list_windows();
+        }
         Vec::new()
     }
     #[cfg(not(target_os = "macos"))]
@@ -445,6 +480,10 @@ pub async fn capture_window_by_id(_app: AppHandle, window_id: u32) -> Result<Str
     clog!("capture", "命令=capture_window_by_id window_id={}", window_id);
     #[cfg(target_os = "macos")]
     {
+        // App Store 沙箱：窗口点选覆盖层（list_windows + 此命令）走 ScreenCaptureKit
+        if crate::commands::screen_capture_kit::is_sandboxed() {
+            return crate::commands::screen_capture_kit::sc_capture_window_by_id(window_id);
+        }
         let _ = window_id;
         Err("macOS 使用系统原生窗口截图，无需此命令".into())
     }
@@ -810,8 +849,9 @@ fn mac_has_screen_capture_access() -> bool {
 /// 截图前的权限闸门：没有屏幕录制权限就主动触发系统授权弹窗，
 /// 并返回清晰的可操作提示。这解决了之前「screencapture -x 无 UI 不弹窗、
 /// 错误被误判成『其它错误』导致权限永远拿不到」的死循环。
+/// 同时被 ScreenCaptureKit 沙箱截图路径复用（同需屏幕录制 TCC 权限）。
 #[cfg(target_os = "macos")]
-fn ensure_screen_capture_access() -> Result<(), String> {
+pub fn ensure_screen_capture_access() -> Result<(), String> {
     if mac_has_screen_capture_access() {
         return Ok(());
     }

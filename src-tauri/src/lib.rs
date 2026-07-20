@@ -32,6 +32,14 @@ fn diag_log(msg: String) {
     clog!("diag", "{}", msg);
 }
 
+/// 是否处于 App Store 沙箱（macOS）。前端据此决定：区域/窗口截图走「原生交互」
+/// 还是「ScreenCaptureKit + 选区覆盖层」。非 macOS 恒为 false。
+#[cfg(target_os = "macos")]
+#[tauri::command]
+fn is_sandboxed() -> bool {
+    commands::screen_capture_kit::is_sandboxed()
+}
+
 /// AI 窗口大图跨窗口传输用的临时目录（位于系统 temp 下，避免占用内存 IPC）
 fn ai_temp_dir() -> std::path::PathBuf {
     let mut d = std::env::temp_dir();
@@ -233,6 +241,8 @@ pub fn run() {
             commands::history::set_screenshot_ocr,
             commands::history::set_screenshot_ocr_full,
             get_platform,
+            #[cfg(target_os = "macos")]
+            is_sandboxed,
             commands::permission::check_microphone_access,
             commands::permission::check_accessibility_access,
             commands::permission::open_permission_settings,

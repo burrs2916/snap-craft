@@ -607,6 +607,9 @@ export const EnhancedScreenshotApp = () => {
   // 与 flash 共享字符串窗口，零状态机改动：revealPath 与 toast 同时存在/清空
   const [revealPath, setRevealPath] = useState<string | null>(null);
   const [platform, setPlatform] = useState<string>('');
+  // macOS App Store 沙箱标记：沙箱内禁止 spawn 外部 screencapture，区域/窗口截图须走
+  // 自建覆盖层（与 Windows/Linux 一致）而非系统原生 -i/-w。开发者 ID 构建为 false。
+  const [isSandboxed, setIsSandboxed] = useState(false);
   const [displays, setDisplays] = useState<DisplayInfo[]>([]);
   const [showDisplayPicker, setShowDisplayPicker] = useState(false);
   // 选屏器用途：全屏截图('shot') 还是滚动长截图('scroll')——决定点选后走哪条流程
@@ -984,6 +987,10 @@ export const EnhancedScreenshotApp = () => {
       .then((p) => {
         setPlatform(p as string);
         setStorePlatform(p as string);
+        // macOS 沙箱检测：App Store 构建为 true；开发者 ID 为 false。仅 macOS 查询（命令仅 macOS 注册）。
+        if (p === 'macos') {
+          invoke<boolean>('is_sandboxed').then(setIsSandboxed).catch(() => setIsSandboxed(false));
+        }
       })
       .catch(() => {
         // ⚠️ 跨平台对等（R2）：IPC 失败时不可回落到 'macos'，
@@ -992,6 +999,9 @@ export const EnhancedScreenshotApp = () => {
         console.warn(`[platform] get_platform 调用失败，回落到 UA 判定: ${fallback}`);
         setPlatform(fallback);
         setStorePlatform(fallback);
+        if (fallback === 'macos') {
+          invoke<boolean>('is_sandboxed').then(setIsSandboxed).catch(() => setIsSandboxed(false));
+        }
       });
   }, [setStorePlatform]);
 
@@ -1467,7 +1477,7 @@ export const EnhancedScreenshotApp = () => {
       //  - macOS：走系统原生交互式 -i（下方统一 invoke capture_region）；
       //  - Windows/Linux：系统无可调用的交互截图 API，打开自建全屏覆盖层选区，
       //    选区完成后由 'region-selected' 事件回调真正 invoke capture_region。
-      if (kind === 'region' && platform !== 'macos' && platform !== '') {
+      if (kind === 'region' && platform !== '' && (platform !== 'macos' || isSandboxed)) {
         busyRef.current = false;
         setBusy(false);
         await openRegionOverlay();
@@ -1477,7 +1487,7 @@ export const EnhancedScreenshotApp = () => {
       //  - macOS：走系统原生 -w 点窗（下方统一 invoke capture_window）；
       //  - Windows/Linux：打开窗口点选覆盖层，画高亮框让用户点选目标窗口，
       //    选中后由 'window-picked' 事件回调 invoke capture_window_by_id。
-      if (kind === 'window' && platform !== 'macos' && platform !== '') {
+      if (kind === 'window' && platform !== '' && (platform !== 'macos' || isSandboxed)) {
         busyRef.current = false;
         setBusy(false);
         await openWindowOverlay();
@@ -1542,7 +1552,7 @@ export const EnhancedScreenshotApp = () => {
         setBusy(false);
       }
     },
-    [onCaptured, flash, platform, setPermissionNeeded, ensureCapturePermission, openRegionOverlay, openWindowOverlay, runCountdown]
+    [onCaptured, flash, platform, isSandboxed, setPermissionNeeded, ensureCapturePermission, openRegionOverlay, openWindowOverlay, runCountdown]
   );
 
   // ===== 全局快捷键监听 =====

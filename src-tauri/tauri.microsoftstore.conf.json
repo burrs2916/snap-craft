@@ -2,10 +2,10 @@
   "$schema": "https://schema.tauri.app/config/2",
   "bundle": {
     "targets": "all",
-    "publisher": "CN=SnapCraftLab",
-    "publisherDisplayName": "SnapCraft Lab",
+    "publisher": "CN=6BF20FE5-8F53-448E-9DD3-67F8E30B4B9E",
+    "publisherDisplayName": "BURRS",
     "identity": {
-      "name": "SnapCraftLab.SnapCraft"
+      "name": "BURRS.SnapCraft"
     },
     "windows": {
       "certificateThumbprint": "",
