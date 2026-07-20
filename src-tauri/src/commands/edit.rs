@@ -230,6 +230,7 @@ pub async fn read_clipboard_image() -> Result<String, String> {
 ///  - 成功：去首尾后的原始文本（内部换行/空格原样保留）；
 ///  - 无文字（剪贴板空、或仅有空白/换行）：返回 ERR_EMPTY，由前端继续尝试图片路径，
 ///    最终文字与图片皆无时才提示「剪贴板为空」，绝不把无文字当作错误抛给用户。
+///
 /// 仅读取、不写；与 read_clipboard_image 平级、互不干扰。
 /// 同步实现：在独立线程（spawn_blocking）执行，避免阻塞 tokio 运行时。
 /// 见 `read_clipboard_text` 命令包装。
