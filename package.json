@@ -13,7 +13,6 @@
     "app": "bash start.sh app",
     "app:reset": "bash start.sh reset",
     "app:sign": "bash start.sh sign",
-    "build:local": "bash scripts/build-local.sh",
     "tauri:windows:msix": "npx @choochmeque/tauri-windows-bundle@latest build --runner pnpm"
   },
   "dependencies": {

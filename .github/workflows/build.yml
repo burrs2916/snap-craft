@@ -262,7 +262,6 @@ jobs:
           if ! openssl pkcs12 -info -in "$CERT_P12" -passin "pass:$CERT_PWD" -nokeys -passout pass: 2>/dev/null | grep -q "BEGIN CERTIFICATE"; then
             echo "❌ APPLE_CERTIFICATE_BASE64 不是合法、可被密码解开的 PKCS#12 (.p12) 证书包。"
             echo "   常见原因: 误存了 Apple 下载的 .cer(仅公钥)、PEM 文本、二次 base64 编码损坏, 或密码不符。"
-            echo "   请用本地脚本先自查: ./scripts/validate-apple-cert.sh build_certificate.p12 '<p12-password>'"
             exit 1
           fi
           if ! openssl pkcs12 -info -in "$CERT_P12" -passin "pass:$CERT_PWD" -nocerts -passout pass: 2>/dev/null | grep -q "PRIVATE KEY"; then

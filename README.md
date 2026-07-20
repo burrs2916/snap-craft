@@ -79,7 +79,6 @@ pnpm dev
 # Production build
 pnpm build          # tsc && vite build (frontend)
 pnpm app            # bundle the app via start.sh
-pnpm build:local    # scripts/build-local.sh
 ```
 
 ### Backing up your dev signing identity

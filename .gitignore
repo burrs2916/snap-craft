@@ -87,3 +87,14 @@ _prd_store_compliance.md
 CROSS_PLATFORM_READINESS-*.md
 CROSS_PLATFORM_STORE_READINESS-*.md
 STORE_READINESS_SNAPSHOT-*.md
+
+# Local / dev artifacts — intentionally excluded (not needed for build or store submission)
+*.py
+/icons.iconset/
+/icons/
+scripts/
+docs/
+_tmp_*/
+tests/test-*.mjs
+tests/smoke-*
+tests/PARITY_TEST_STRATEGY.md
