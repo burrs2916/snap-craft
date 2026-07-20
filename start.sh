@@ -20,8 +20,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOG_DIR="$SCRIPT_DIR/logs"
 VITE_LOG="$LOG_DIR/vite.log"
 TAURI_LOG="$LOG_DIR/tauri.log"
-# 截屏诊断日志（Rust 端 logger 会写入此文件，用于精确定位截图错误）
-DEV_LOG="$LOG_DIR/dev.log"
+# 运行时诊断日志（Rust 端 logger 会写入此文件，release/Windows 也落盘）
+DEBUG_LOG="$LOG_DIR/debug.log"
 
 # Vite 开发服务器端口
 VITE_PORT=1925
@@ -210,9 +210,9 @@ start_dev() {
     # （即便用 open 启动 .app 时丢弃了该环境变量，Rust 端也会用编译期兜底路径
     #  写入 logs/dev.log，见 src-tauri/src/logger.rs）
     mkdir -p "$LOG_DIR"
-    export SNAP_LOG_FILE="$DEV_LOG"
-    : > "$DEV_LOG"
-    log_info "截屏诊断日志: $DEV_LOG  （实时查看：tail -f logs/dev.log）"
+    export SNAP_LOG_FILE="$DEBUG_LOG"
+    : > "$DEBUG_LOG"
+    log_info "运行时诊断日志: $DEBUG_LOG  （实时查看：tail -f logs/debug.log）"
 
     # 1) 前端 dev server（vite，端口与 tauri.conf.json 的 devUrl 一致）
     log_info "正在启动前端 dev server (vite, 端口 $VITE_PORT) ..."
@@ -320,7 +320,7 @@ start_dev() {
 👉 若未配证书（ad-hoc）：仅纯重开能保住权限；一旦改了 Rust 代码重编，需重新授权一次（建议配证书）。
 👉 首次使用若尚未授权：点一次「全屏截图」会弹系统「屏幕录制」授权，点「允许」。
 👉 系统设置 → 隐私与安全性 → 屏幕录制 里能看到 SnapCraft（dev）且开关已开。
-👉 截屏问题查 logs/dev.log（已注入全链路诊断日志）。
+👉 截屏问题查 logs/debug.log（已注入全链路诊断日志）。
 👉 重置 dev .app 权限：tccutil reset All com.snap-craft.app.dev
 ────────────────────────────────────────────
 EOF

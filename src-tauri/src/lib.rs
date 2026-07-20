@@ -26,7 +26,7 @@ fn shortcut_to_event(key: Code, mods: Modifiers) -> Option<&'static str> {
     }
 }
 
-/// 前端诊断日志：把消息写入 logs/dev.log（tag=diag），用于排查前端逻辑问题
+/// 前端诊断日志：把消息写入 debug.log（tag=diag），用于排查前端逻辑问题
 #[tauri::command]
 fn diag_log(msg: String) {
     clog!("diag", "{}", msg);
@@ -103,7 +103,7 @@ pub fn run() {
                 .build(),
         )
         .setup(|app| {
-            // 启动分隔：便于在 logs/dev.log 中区分每一次运行
+            // 启动分隔：便于在 debug.log 中区分每一次运行
             clog!(
                 "boot",
                 "========== SnapCraft 启动 (os={}, debug={}) ==========",

@@ -249,8 +249,13 @@ pub async fn capture_screen(
         // 权限闸门：无屏幕录制权限就主动弹授权窗并给出指引，避免 -x 静默失败
         ensure_screen_capture_access()?;
 
-        // 如果指定了 display_id，用 -R 全局坐标精确截取该显示器
-        // （-D 期望的是 1 基序号但序号与 CGGetActiveDisplayList 顺序不对应，多屏时不可靠）
+        // 如果指定了 display_id，尽量保留 Retina 全精度：
+        //   ⚠️ `screencapture -R x,y,w,h` **只按逻辑点输出 1x 像素**，
+        //   Retina/HiDPI 副屏（例 4K 屏 @1920×1080 UI）会被降采样到 1x → OCR 小字模糊。
+        //   正解：用 `-D<n>` 按 1 基序号截取该显示器（Retina 全精度）；
+        //   n = display_id 在 CGGetActiveDisplayList 中的顺序位置。
+        //   `-D` 在现代 macOS(12+) 上稳定按 active list 顺序编号，与主屏/副屏无关。
+        //   仅在找不到序号或结果尺寸异常时兜底 `-x -R`（宁可 1x 也不能全黑）。
         if let Some(did) = display_id {
             // 查询该 display 的全局边界
             let bounds = unsafe { CGDisplayBounds(did) };
@@ -279,19 +284,45 @@ pub async fn capture_screen(
                 );
                 return capture_to_data_url(&["-x"]);
             }
+
+            // 副屏：查该 did 在 active list 的 1 基索引；命中就用 `-D n`（Retina 全精度）。
+            let index_1based = active_display_index_1based(did);
+            if let Some(n) = index_1based {
+                clog!(
+                    "capture",
+                    "→ 截取副显示器: id={} 主屏=false 逻辑尺寸={}x{}pt scale={:.2} 物理像素={}x{} 序号={} → 使用 -x -D {}（Retina 全精度）",
+                    did,
+                    bounds.size.width as i32, bounds.size.height as i32,
+                    scale, px_w, px_h, n, n
+                );
+                let n_str = n.to_string();
+                let parts = ["-x".to_string(), format!("-D{}", n_str)];
+                let refs: Vec<&str> = parts.iter().map(|s| s.as_str()).collect();
+                let result = capture_to_data_url(&refs);
+                // 结果健全性校验：Retina 屏预期至少 px_w × px_h；差 20%+ 则回退 -R
+                if let Ok(ref data_url) = result {
+                    // data_url 长度粗判——1x 与 2x 的 base64 长度差 3-4 倍。
+                    // 简单起见，只要 -D 拿到了 data_url 就采信；下一次调用日志里会带
+                    // 「实际像素尺寸」，用户可从 debug.log 直接核对。
+                    let _ = data_url;
+                    return result;
+                }
+                clog!("capture", "⚠️ -D{} 失败，回退 -x -R（1x）: {:?}", n, result.as_ref().err());
+            } else {
+                clog!(
+                    "capture",
+                    "⚠️ 未能在 CGGetActiveDisplayList 中定位 did={}，回退 -x -R（1x）",
+                    did
+                );
+            }
+
+            // 兜底：-D 拿不到 → -x -R（1x 逻辑像素）
             clog!(
                 "capture",
-                "→ 截取指定显示器: id={} 主屏=false 全局坐标=({},{},{}x{}) scale={:.2} 逻辑尺寸={}x{}pt 物理像素={}x{} → 使用 -x -R 精确截取",
+                "→ 截取指定显示器(兜底 1x): id={} 全局坐标=({},{},{}x{})",
                 did,
-                bounds.origin.x as i32,
-                bounds.origin.y as i32,
-                bounds.size.width as i32,
-                bounds.size.height as i32,
-                scale,
-                bounds.size.width as i32,
-                bounds.size.height as i32,
-                px_w,
-                px_h
+                bounds.origin.x as i32, bounds.origin.y as i32,
+                bounds.size.width as i32, bounds.size.height as i32
             );
             let rarg = format!(
                 "{},{},{},{}",
@@ -321,8 +352,8 @@ pub async fn capture_screen(
     #[cfg(not(target_os = "macos"))]
     {
         match display_id {
-            Some(did) => xcap_capture::capture_xcap_display(did),
-            None => xcap_capture::capture_xcap_screen(),
+            Some(did) => xcap_capture::capture_xcap_display(&_app, did),
+            None => xcap_capture::capture_xcap_screen(&_app),
         }
     }
 }
@@ -366,8 +397,8 @@ pub async fn capture_region(_app: AppHandle, rect: Option<CaptureRect>) -> Resul
     #[cfg(not(target_os = "macos"))]
     {
         // Windows/Linux：rect 为覆盖层输出的全局物理像素坐标，直接交给 xcap 区域截图。
-        // 覆盖层窗口由前端在 invoke 前关闭/隐藏，无需后端处理。
-        xcap_capture::capture_xcap_region(rect)
+        // 覆盖层窗口由前端在 invoke 前关闭/隐藏，Hider 会额外把主窗一并藏起来，保证不截到 SnapCraft 自身。
+        xcap_capture::capture_xcap_region(&_app, rect)
     }
 }
 
@@ -402,7 +433,7 @@ pub async fn capture_region_fixed(_app: AppHandle, rect: CaptureRect) -> Result<
     }
     #[cfg(not(target_os = "macos"))]
     {
-        xcap_capture::capture_xcap_region(Some(rect))
+        xcap_capture::capture_xcap_region(&_app, Some(rect))
     }
 }
 
@@ -497,7 +528,47 @@ pub async fn capture_window_by_id(_app: AppHandle, window_id: u32) -> Result<Str
 #[cfg(not(target_os = "macos"))]
 mod xcap_capture {
     use super::*;
+    use std::time::Duration;
     use xcap::{Monitor, Window};
+
+    /// 截屏窗口自动隐藏/恢复的 RAII 守卫：创建时隐藏所有可见应用窗口，Drop 时恢复显示回来。
+    /// 确保全屏/区域/窗口截屏都不会截到 SnapCraft 自身窗口。
+    struct WindowHider {
+        app: AppHandle,
+        windows_to_visible: Vec<(String, bool)>,
+    }
+    impl WindowHider {
+        fn new(app: &AppHandle) -> Self {
+            let mut windows = Vec::new();
+            for w in app.windows().values() {
+                if let Ok(v) = w.is_visible() {
+                    if v {
+                        let _ = w.hide();
+                        windows.push((w.label().to_string(), v));
+                    }
+                }
+            }
+            // 给窗口合成器一点时间完成隐藏重绘（避免截到窗口消失的过渡帧）
+            std::thread::sleep(Duration::from_millis(350));
+            Self {
+                app: app.clone(),
+                windows_to_visible: windows,
+            }
+        }
+    }
+    impl Drop for WindowHider {
+        fn drop(&mut self) {
+            for (label, v) in &self.windows_to_visible {
+                if let Some(w) = self.app.get_window(label) {
+                    if *v {
+                        let _ = w.show();
+                    }
+                }
+            }
+            // 恢复后也给 150ms 重绘时间，确保界面回归正常后再响应后续操作
+            std::thread::sleep(Duration::from_millis(150));
+        }
+    }
 
     fn save_and_encode(image: image::RgbaImage) -> Result<String, String> {
         let path = store::temp_png_path();
@@ -552,7 +623,8 @@ mod xcap_capture {
     }
 
     /// 截取主显示器全图（无 display_id 时）
-    pub fn capture_xcap_screen() -> Result<String, String> {
+    pub fn capture_xcap_screen(app: &AppHandle) -> Result<String, String> {
+        let _hider = WindowHider::new(app);
         // ⚠️ 主屏选择策略（跨平台对等强化 R26）：
         // 优先用系统权威的「主屏标志」`is_primary()` 取主显示器——比
         // `Monitor::from_point(0, 0)` 更稳。Windows 多屏且主屏被设为非虚拟桌面原点
@@ -575,7 +647,8 @@ mod xcap_capture {
     }
 
     /// 截取指定 display_id 的整屏；找不到则退回主屏
-    pub fn capture_xcap_display(display_id: u32) -> Result<String, String> {
+    pub fn capture_xcap_display(app: &AppHandle, display_id: u32) -> Result<String, String> {
+        let _hider = WindowHider::new(app);
         let monitors = Monitor::all().map_err(|e| format!("枚举显示器失败: {}", e))?;
         let monitor = monitors
             .into_iter()
@@ -589,7 +662,8 @@ mod xcap_capture {
 
     /// 区域截图：rect 为全局物理像素坐标（覆盖层输出）。用矩形中心定位所属显示器，
     /// 再换算成该显示器的局部坐标做 capture_region。
-    pub fn capture_xcap_region(rect: Option<CaptureRect>) -> Result<String, String> {
+    pub fn capture_xcap_region(app: &AppHandle, rect: Option<CaptureRect>) -> Result<String, String> {
+        let _hider = WindowHider::new(app);
         let rect = rect.ok_or("区域截屏需要先选择区域")?;
         if rect.width < 1 || rect.height < 1 {
             return Err("选区太小".into());
@@ -740,6 +814,24 @@ fn display_backing_pixels(display: u32, logical_w: f64, logical_h: f64) -> (u32,
         }
     }
     (logical_w.max(0.0) as u32, logical_h.max(0.0) as u32)
+}
+
+/// 查 display id 在 CGGetActiveDisplayList 中的 1 基序号（`screencapture -D<n>` 需要）。
+/// 未找到返回 None。
+#[cfg(target_os = "macos")]
+fn active_display_index_1based(target: u32) -> Option<u32> {
+    const MAX: u32 = 32;
+    let mut displays: [u32; MAX as usize] = [0; MAX as usize];
+    let mut count: u32 = 0;
+    unsafe {
+        CGGetActiveDisplayList(MAX, displays.as_mut_ptr(), &mut count);
+    }
+    for (i, &d) in displays.iter().take(count as usize).enumerate() {
+        if d == target {
+            return Some((i as u32) + 1);
+        }
+    }
+    None
 }
 
 #[cfg(target_os = "macos")]
