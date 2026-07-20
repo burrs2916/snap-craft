@@ -431,7 +431,8 @@ jobs:
           Write-Host "=== Initializing tauri-windows-bundle (creates MSIX template) ==="
           # 生成 MSIX 模板(msix.template.xml / 资源清单)，未 init 时 build 会直接失败。
           # 幂等：已 init 时该命令安全跳过。
-          npx @choochmeque/tauri-windows-bundle@0.1.28 init --runner pnpm 2>&1
+          # init 不认 --runner（那是 build 的选项）；且需显式指向 src-tauri 才能找到 tauri.conf.json 生成模板。
+          npx @choochmeque/tauri-windows-bundle@0.1.28 init -p src-tauri 2>&1
           if ($LASTEXITCODE -ne 0) {
             echo "::warning::tauri-windows-bundle init 失败（可忽略，build 步骤会再次尝试）。"
           }
