@@ -431,8 +431,10 @@ jobs:
           Write-Host "=== Initializing tauri-windows-bundle (creates MSIX template) ==="
           # 生成 MSIX 模板(msix.template.xml / 资源清单)，未 init 时 build 会直接失败。
           # 幂等：已 init 时该命令安全跳过。
-          # init 不认 --runner（那是 build 的选项）；且需显式指向 src-tauri 才能找到 tauri.conf.json 生成模板。
-          npx @choochmeque/tauri-windows-bundle@0.1.28 init -p src-tauri 2>&1
+          # 根因：该工具 findProjectRoot() 在 -p 为相对路径('.') 时，因 path.dirname('.')==='.'
+          # 导致 while 循环不进入，直接抛 "Could not find Tauri project root"。
+          # 故不传 -p，让其回退到绝对路径 process.cwd()（CI 默认即仓库根 GITHUB_WORKSPACE）。
+          npx @choochmeque/tauri-windows-bundle@0.1.28 init 2>&1
           if ($LASTEXITCODE -ne 0) {
             echo "::warning::tauri-windows-bundle init 失败（可忽略，build 步骤会再次尝试）。"
           }
