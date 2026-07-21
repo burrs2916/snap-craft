@@ -260,17 +260,38 @@ try {
 
     $arr = @()
     foreach ($line in $result.Lines) {
-        $r = $line.BoundingRect
+        # IMPORTANT: WinRT OcrLine has NO BoundingRect property (only Text + Words).
+        # To get per-line box, union all word rects. If words empty, skip line.
+        $words = $line.Words
+        if ($words -eq $null -or $words.Count -eq 0) { continue }
+        $minX = [double]::MaxValue
+        $minY = [double]::MaxValue
+        $maxX = [double]::MinValue
+        $maxY = [double]::MinValue
+        foreach ($word in $words) {
+            $r = $word.BoundingRect
+            $wx = [double]$r.X
+            $wy = [double]$r.Y
+            $ww = [double]$r.Width
+            $wh = [double]$r.Height
+            if ($wx -lt $minX) { $minX = $wx }
+            if ($wy -lt $minY) { $minY = $wy }
+            if (($wx + $ww) -gt $maxX) { $maxX = $wx + $ww }
+            if (($wy + $wh) -gt $maxY) { $maxY = $wy + $wh }
+        }
+        # Force double division; PS integer / integer would truncate to 0.
         $arr += [pscustomobject]@{
             text = $line.Text
-            x = ($r.X / $iw)
-            y = ($r.Y / $ih)
-            w = ($r.Width / $iw)
-            h = ($r.Height / $ih)
+            x = $minX / [double]$iw
+            y = $minY / [double]$ih
+            w = ($maxX - $minX) / [double]$iw
+            h = ($maxY - $minY) / [double]$ih
         }
     }
-    # Force array serialization (single-element ConvertTo-Json degrades to object otherwise)
-    Write-Output (,@($arr) | ConvertTo-Json -Compress -Depth 4)
+    # Use -InputObject to bypass pipeline (piped arrays get wrapped as {"value":[...]}
+    # in PS 5.1); -InputObject with @($arr) always serializes as a JSON array,
+    # even for 0 or 1 element (@() enforces array type).
+    Write-Output (ConvertTo-Json -InputObject @($arr) -Compress -Depth 4)
     exit 0
 } catch {
     # Catchall: full Message + StackTrace to stderr, Rust clog! persists it
@@ -378,17 +399,29 @@ try {
         w: f64,
         h: f64,
     }
-    let lines: Vec<WinLine> = match serde_json::from_str(trimmed) {
-        Ok(v) => v,
-        Err(e) => {
-            clog!(
-                "ocr",
-                "WinRT OCR JSON 解析失败: {} raw={:?}",
-                e,
-                trimmed.chars().take(200).collect::<String>()
-            );
-            return Err(format!("OCR 结果解析失败：{}", e));
-        }
+    // PS 5.1 通过管道传数组给 ConvertTo-Json 时会把结果包裹成 `{"value":[...],"Count":N}`；
+    // -InputObject 形式则输出裸数组 `[...]`。两种格式都兼容，保险起见都解析一遍。
+    #[derive(serde::Deserialize)]
+    struct WinLinesWrapped {
+        value: Vec<WinLine>,
+    }
+    let lines: Vec<WinLine> = if let Ok(arr) = serde_json::from_str::<Vec<WinLine>>(trimmed) {
+        arr
+    } else if let Ok(w) = serde_json::from_str::<WinLinesWrapped>(trimmed) {
+        w.value
+    } else {
+        // 两种都失败，把详细错落 debug.log，让用户/开发者能贴日志排查
+        let err = match serde_json::from_str::<Vec<WinLine>>(trimmed) {
+            Ok(_) => "unknown".to_string(),
+            Err(e) => e.to_string(),
+        };
+        clog!(
+            "ocr",
+            "WinRT OCR JSON 解析失败: {} raw={:?}",
+            err,
+            trimmed.chars().take(200).collect::<String>()
+        );
+        return Err(format!("OCR 结果解析失败：{}", err));
     };
     let blocks: Vec<OcrBlock> = lines
         .into_iter()
