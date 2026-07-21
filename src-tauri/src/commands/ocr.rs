@@ -171,8 +171,14 @@ fn run_native_ocr_windows(path: &std::path::Path, lang: Option<&str>) -> Result<
     let ps1_path = dir.join(format!("snapcraft-ocr-{}.ps1", uid));
     let arg_path = dir.join(format!("snapcraft-ocr-{}.args.txt", uid));
     // arg 文件两行：第 1 行=图片绝对路径，第 2 行=语言代码（可空）
+    // 加 UTF-8 BOM——PS 5.1 的 Get-Content -Encoding UTF8 在无 BOM 时会走 ANSI 回退启发式，
+    // 用户目录含中文（例：C:\Users\张三\AppData\Local\Temp\）时会解码错误。
+    // 加了 BOM 就 100% 走 UTF-8 解析路径，与 .ps1 脚本一致的双保险。
     let arg_text = format!("{}\n{}\n", img_path, lang_arg);
-    std::fs::write(&arg_path, arg_text.as_bytes())
+    let mut arg_buf: Vec<u8> = Vec::with_capacity(arg_text.len() + 3);
+    arg_buf.extend_from_slice(&[0xEF, 0xBB, 0xBF]);
+    arg_buf.extend_from_slice(arg_text.as_bytes());
+    std::fs::write(&arg_path, &arg_buf)
         .map_err(|e| format!("写 OCR 参数文件失败: {}", e))?;
 
     // ---- ② PS 脚本：UTF-8 编码前置 + WinRT 调用 + 归一化 JSON 输出 ----
@@ -274,7 +280,12 @@ try {
     exit 99
 }
 "#;
-    let script = script_tpl.replace("<ARGS_PATH>", &arg_path.to_string_lossy());
+    let script = script_tpl.replace(
+        "<ARGS_PATH>",
+        // PS 单引号字符串里的 `'` 需转义成 `''`（虽然 %TEMP% + UUID 路径几乎不会含单引号，
+        // 但用户 profile 可能被改成含 `'` 的名字，加转义 0 成本 100% 保险）
+        &arg_path.to_string_lossy().replace('\'', "''"),
+    );
     // Write UTF-8 with BOM. PowerShell 5.1 auto-detects BOM and skips ANSI/GBK fallback;
     // no BOM = 中文 Windows PS 会用 GBK 解析，即使脚本全 ASCII 也偶发 parser 边界 bug。
     let mut buf: Vec<u8> = Vec::with_capacity(script.len() + 3);

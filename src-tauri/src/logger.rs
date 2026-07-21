@@ -24,10 +24,16 @@
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// 单文件轮转阈值（5MB）。超过则备份为 `debug.log.1` 并从新文件开始。
 const MAX_LOG_SIZE: u64 = 5 * 1024 * 1024;
+
+/// 日志路径解析结果缓存。首次 `log()` 时决定，之后所有 `clog!` 复用——
+/// 避免每次日志都跑 `is_writable` 探针（create+write+delete 3 次 IO），
+/// 高频日志（截屏一秒几十条）下这曾是严重 IO 与探针文件泄露风险。
+static LOG_PATHS_CACHE: OnceLock<Vec<PathBuf>> = OnceLock::new();
 
 /// 当前可执行文件所在目录（生产环境把日志落这里，与 .exe 同级）。
 /// 打包后 Windows 是 `<install_dir>` / macOS bundle 是 `.app/Contents/MacOS/`。
@@ -88,8 +94,9 @@ fn user_data_dir() -> Option<PathBuf> {
     None
 }
 
-/// 解析所有日志文件路径（按优先级；可能多条）。返回空 Vec 表示仅 stderr。
-fn log_paths() -> Vec<PathBuf> {
+/// 首次解析所有日志文件路径（按优先级；可能多条）。返回空 Vec 表示仅 stderr。
+/// 结果通过 `LOG_PATHS_CACHE` 缓存，之后所有日志调用都复用缓存，避免重复探针 IO。
+fn resolve_log_paths() -> Vec<PathBuf> {
     // 1) 显式环境变量优先（start.sh dev 注入绝对路径，单文件模式）
     if let Ok(p) = std::env::var("SNAP_LOG_FILE") {
         let p = p.trim();
@@ -128,6 +135,11 @@ fn log_paths() -> Vec<PathBuf> {
     paths
 }
 
+/// 获取（并首次初始化）日志路径缓存。
+fn log_paths() -> &'static [PathBuf] {
+    LOG_PATHS_CACHE.get_or_init(resolve_log_paths).as_slice()
+}
+
 /// 生成东八区可读时间戳 `YYYY-MM-DD HH:MM:SS.mmm`（civil_from_days，无需 chrono）。
 fn timestamp() -> String {
     let dur = match SystemTime::now().duration_since(UNIX_EPOCH) {
@@ -163,14 +175,14 @@ pub fn log(tag: &str, msg: &str) {
     let line = format!("[{}] [{}] {}", timestamp(), tag, msg);
     // 始终打到 stderr
     eprintln!("{}", line);
-    // 追加到所有文件目标（best-effort）
+    // 追加到所有文件目标（best-effort）——路径已缓存，零探针 IO
     for path in log_paths() {
-        write_one(&path, &line);
+        write_one(path, &line);
     }
 }
 
 /// 写一行到单个文件；若超过轮转阈值则先备份为 `.1` 再写新文件。
-fn write_one(path: &PathBuf, line: &str) {
+fn write_one(path: &std::path::Path, line: &str) {
     if let Some(dir) = path.parent() {
         let _ = fs::create_dir_all(dir);
     }
