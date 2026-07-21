@@ -525,10 +525,18 @@ pub async fn capture_window_by_id(_app: AppHandle, window_id: u32) -> Result<Str
 }
 
 // ===== Windows / Linux：使用 xcap 原生截屏 =====
-#[cfg(not(target_os = "macos"))]
+// 静态验证 trick：`any(not(target_os = "macos"), test)` 让 macOS `cargo check --tests`
+// 也把整个 xcap_capture 模块编译一遍，能提前捕获 Manager trait / API 变更导致的类型错，
+// 避免"上 Windows CI 才发现语法错"（历史踩过：app.windows() vs app.webview_windows()）。
+// `#[allow(dead_code)]`：macOS test 编译下这些函数没有调用点（调用点被 `not(macos)` 门挡住），
+// 但真实 Windows/Linux target 下每个都会用到——必须抑制 clippy 的 dead_code 警告，
+// 否则 `-D warnings` 门禁会挂。
+#[cfg(any(not(target_os = "macos"), test))]
+#[allow(dead_code)]
 mod xcap_capture {
     use super::*;
     use std::time::Duration;
+    use tauri::Manager;
     use xcap::{Monitor, Window};
 
     /// 截屏窗口自动隐藏/恢复的 RAII 守卫：创建时隐藏所有可见应用窗口，Drop 时恢复显示回来。
@@ -539,8 +547,11 @@ mod xcap_capture {
     }
     impl WindowHider {
         fn new(app: &AppHandle) -> Self {
+            // Tauri 2：SnapCraft 所有可见窗口都是 WebviewWindow（含 webview），
+            // 用 webview_windows()/get_webview_window() 而不是 windows()/get_window()。
+            // 后者是"原生窗口"（不带 webview），我们没用到，编译期直接 no method。
             let mut windows = Vec::new();
-            for w in app.windows().values() {
+            for w in app.webview_windows().values() {
                 if let Ok(v) = w.is_visible() {
                     if v {
                         let _ = w.hide();
@@ -559,7 +570,7 @@ mod xcap_capture {
     impl Drop for WindowHider {
         fn drop(&mut self) {
             for (label, v) in &self.windows_to_visible {
-                if let Some(w) = self.app.get_window(label) {
+                if let Some(w) = self.app.get_webview_window(label) {
                     if *v {
                         let _ = w.show();
                     }
