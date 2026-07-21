@@ -135,107 +135,218 @@ fn run_native_ocr(path: &std::path::Path, _lang: Option<&str>) -> Result<OcrResu
 // ===== Windows：WinRT Windows.Media.Ocr（系统自带 PowerShell 5.1 子进程调用，用户零依赖） =====
 // 不引入 windows crate（巨型依赖 + 可能与 Tauri 的 windows 版本冲突），
 // 改用 Win10/11 系统自带的 PowerShell 5.1 通过 WinRT 类型投影完成识别。
+//
+// 关键工程细节（2026-07-21 血泪修）：
+//   ① 脚本落到临时 .ps1 文件，避开 `-Command` 内联超长脚本的引号/转义地狱。
+//   ② 图片路径也落到脚本旁边的 sidecar 文件读取，不做字符串插值——路径含引号/空格/中文全兼容。
+//   ③ `[Console]::OutputEncoding = UTF8` 放在脚本第一行，保证异常抛出前就是 UTF-8（否则错误按 GBK 出，
+//      Rust 侧 from_utf8_lossy 变乱码，用户看到的 "OCR 直接报错" 完全没根因）。
+//   ④ 用 `-ExecutionPolicy Bypass -File`：绕过用户组策略 Restricted。
+//   ⑤ 精细分类错误：PS 未找到、WinRT 组件加载失败、语言包缺失、图片解码失败、空结果 → 各自返回可读文案；
+//      不认得的 stderr 原样返回，同时 clog! 落 debug.log 便于线下复现。
+//   ⑥ PowerShell 输出单元素数组时 ConvertTo-Json 会退化为对象；显式加 `@()` 强制数组。
 #[cfg(target_os = "windows")]
 fn run_native_ocr(path: &std::path::Path, lang: Option<&str>) -> Result<OcrResult, String> {
+    run_native_ocr_windows(path, lang)
+}
+
+#[cfg(any(target_os = "windows", test))]
+#[allow(dead_code)]
+fn run_native_ocr_windows(path: &std::path::Path, lang: Option<&str>) -> Result<OcrResult, String> {
     use std::process::Command;
 
     let started = std::time::Instant::now();
-    // PowerShell 字符串里路径用正斜杠最稳，避免反斜杠转义问题
-    let bmp_path = path.to_string_lossy().replace('\\', "/");
-    let lang_arg = lang.unwrap_or("");
+    let img_path = path.to_string_lossy().to_string();
+    let lang_arg = lang.unwrap_or("").to_string();
     clog!(
         "ocr",
         "→ Windows WinRT OCR: 识别 {} lang={:?}",
-        bmp_path,
+        img_path,
         lang_arg
     );
 
-    // 通过 System.Runtime.WindowsRuntime 的 AsTask 把 WinRT IAsyncOperation 转同步等待。
-    // lang 优先：用 TryCreateFromLanguage；失败/为空再退回用户语言包。
-    // 输出为归一化（原点左上）JSON 数组，Rust 侧解析为 blocks。
-    let ps_script = format!(
-        r#"
-$ErrorActionPreference = 'Stop'
-$null = [Windows.Media.Ocr.OcrEngine,Windows.Foundation,ContentType=WindowsRuntime]
-$null = [Windows.Graphics.Imaging.BitmapDecoder,Windows.Foundation,ContentType=WindowsRuntime]
-$null = [Windows.Storage.StorageFile,Windows.Foundation,ContentType=WindowsRuntime]
-$asm = [System.Reflection.Assembly]::LoadWithPartialName('System.Runtime.WindowsRuntime')
-$extType = $asm.GetType('System.WindowsRuntimeSystemExtensions')
-$asTask = ($extType.GetMethods() | Where-Object {{
-  $_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 -and
-  $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation`1'
-}})[0]
-function AwaitT($op, [Type]$rt) {{
-  $task = $asTask.MakeGenericMethod($rt).Invoke($null, @($op))
-  $task.Wait()
-  $task.Result
-}}
-$engine = $null
-$langCode = "{lang_arg}"
-if ($langCode -ne '') {{
-  try {{
-    $l = [Windows.Globalization.Language]::new($langCode)
-    if ([Windows.Media.Ocr.OcrEngine]::IsLanguageSupported($l)) {{
-      $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromLanguage($l)
-    }}
-  }} catch {{}}
-}}
-if ($engine -eq $null) {{
-  $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromUserProfileLanguages()
-}}
-if ($engine -eq $null) {{ Write-Error 'NO_OCR_ENGINE'; exit 2 }}
-$path = "{bmp_path}"
-$file = AwaitT ([Windows.Storage.StorageFile]::GetFileFromPathAsync($path)) ([Windows.Storage.StorageFile])
-$stream = AwaitT ($file.OpenAsync([Windows.Storage.FileAccessMode]::Read)) ([Windows.Storage.Streams.IRandomAccessStream])
-$decoder = AwaitT ([Windows.Graphics.Imaging.BitmapDecoder]::CreateAsync($stream)) ([Windows.Graphics.Imaging.BitmapDecoder])
-$bitmap = AwaitT ($decoder.GetSoftwareBitmapAsync()) ([Windows.Graphics.Imaging.SoftwareBitmap])
-$result = AwaitT ($engine.RecognizeAsync($bitmap)) ([Windows.Media.Ocr.OcrResult])
-$stream.Dispose()
-$iw = $bitmap.PixelWidth
-$ih = $bitmap.PixelHeight
-$arr = @()
-foreach ($line in $result.Lines) {{
-  $r = $line.BoundingRect
-  $arr += [pscustomobject]@{{
-    text = $line.Text
-    x = ($r.X / $iw)
-    y = ($r.Y / $ih)
-    w = ($r.Width / $iw)
-    h = ($r.Height / $ih)
-  }}
-}}
+    // ---- ① 用 sidecar 文件传路径与语言参数（避免字符串插值受特殊字符影响）----
+    let dir = std::env::temp_dir();
+    let uid = uuid::Uuid::new_v4();
+    let ps1_path = dir.join(format!("snapcraft-ocr-{}.ps1", uid));
+    let arg_path = dir.join(format!("snapcraft-ocr-{}.args.txt", uid));
+    // arg 文件两行：第 1 行=图片绝对路径，第 2 行=语言代码（可空）
+    let arg_text = format!("{}\n{}\n", img_path, lang_arg);
+    std::fs::write(&arg_path, arg_text.as_bytes())
+        .map_err(|e| format!("写 OCR 参数文件失败: {}", e))?;
+
+    // ---- ② PS 脚本：UTF-8 编码前置 + WinRT 调用 + 归一化 JSON 输出 ----
+    // 注意：这里所有 $ 与 { 都不再受 Rust format! 影响（普通字符串字面量）；
+    //       只有 <ARGS_PATH> 一处占位符用 replace 注入，避开 Rust format! 的花括号转义地狱。
+    let script_tpl = r#"
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-Write-Output ($arr | ConvertTo-Json -Compress)
-"#,
-        lang_arg = lang_arg,
-        bmp_path = bmp_path
-    );
+[Console]::InputEncoding  = [System.Text.Encoding]::UTF8
+$OutputEncoding = [System.Text.Encoding]::UTF8
+$ErrorActionPreference = 'Stop'
 
-    // 必须用 Windows PowerShell 5.1（powershell.exe），不是 pwsh(PS7)——PS7 移除了 WinRT 投影。
+try {
+    $argLines = Get-Content -LiteralPath '<ARGS_PATH>' -Encoding UTF8
+    if ($argLines.Count -lt 1) { Write-Error 'ARGS_MISSING'; exit 10 }
+    $imgPath = $argLines[0]
+    $langCode = if ($argLines.Count -ge 2) { $argLines[1] } else { '' }
+
+    if (-not (Test-Path -LiteralPath $imgPath)) { Write-Error 'IMG_NOT_FOUND'; exit 11 }
+
+    # 加载 WinRT 类型（Win10/11 自带；Windows Server / N-SKU 可能缺失）
+    try {
+        $null = [Windows.Media.Ocr.OcrEngine,Windows.Foundation,ContentType=WindowsRuntime]
+        $null = [Windows.Graphics.Imaging.BitmapDecoder,Windows.Foundation,ContentType=WindowsRuntime]
+        $null = [Windows.Storage.StorageFile,Windows.Foundation,ContentType=WindowsRuntime]
+        $null = [Windows.Globalization.Language,Windows.Foundation,ContentType=WindowsRuntime]
+    } catch {
+        Write-Error 'WINRT_MISSING'; exit 12
+    }
+
+    # AsTask 反射：把 WinRT IAsyncOperation<T> 转 .NET Task<T> 后同步等待
+    $asm = [System.Reflection.Assembly]::LoadWithPartialName('System.Runtime.WindowsRuntime')
+    if ($asm -eq $null) { Write-Error 'WINRT_RT_MISSING'; exit 13 }
+    $extType = $asm.GetType('System.WindowsRuntimeSystemExtensions')
+    $asTask = ($extType.GetMethods() | Where-Object {
+        $_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 -and
+        $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation`1'
+    })[0]
+    function AwaitT($op, [Type]$rt) {
+        $task = $asTask.MakeGenericMethod($rt).Invoke($null, @($op))
+        $task.Wait()
+        $task.Result
+    }
+
+    # 语言选择：优先 langCode → 回退用户 profile → 再报错
+    $engine = $null
+    if ($langCode -ne '') {
+        try {
+            $l = [Windows.Globalization.Language]::new($langCode)
+            if ([Windows.Media.Ocr.OcrEngine]::IsLanguageSupported($l)) {
+                $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromLanguage($l)
+            }
+        } catch {}
+    }
+    if ($engine -eq $null) {
+        $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromUserProfileLanguages()
+    }
+    if ($engine -eq $null) { Write-Error 'NO_OCR_ENGINE'; exit 14 }
+
+    # 读取图片 → 解码 SoftwareBitmap → 识别
+    $file = AwaitT ([Windows.Storage.StorageFile]::GetFileFromPathAsync($imgPath)) ([Windows.Storage.StorageFile])
+    $stream = AwaitT ($file.OpenAsync([Windows.Storage.FileAccessMode]::Read)) ([Windows.Storage.Streams.IRandomAccessStream])
+    try {
+        $decoder = AwaitT ([Windows.Graphics.Imaging.BitmapDecoder]::CreateAsync($stream)) ([Windows.Graphics.Imaging.BitmapDecoder])
+        $bitmap = AwaitT ($decoder.GetSoftwareBitmapAsync()) ([Windows.Graphics.Imaging.SoftwareBitmap])
+    } catch {
+        Write-Error 'IMG_DECODE_FAILED'; exit 15
+    } finally {
+        try { $stream.Dispose() } catch {}
+    }
+
+    $result = AwaitT ($engine.RecognizeAsync($bitmap)) ([Windows.Media.Ocr.OcrResult])
+    $iw = $bitmap.PixelWidth
+    $ih = $bitmap.PixelHeight
+
+    $arr = @()
+    foreach ($line in $result.Lines) {
+        $r = $line.BoundingRect
+        $arr += [pscustomobject]@{
+            text = $line.Text
+            x = ($r.X / $iw)
+            y = ($r.Y / $ih)
+            w = ($r.Width / $iw)
+            h = ($r.Height / $ih)
+        }
+    }
+    # 强制数组序列化（PS 单元素 ConvertTo-Json 会退化成对象）
+    Write-Output (,@($arr) | ConvertTo-Json -Compress -Depth 4)
+    exit 0
+} catch {
+    # 兜底：把未分类错误的 Message + StackTrace 完整打到 stderr，Rust 侧 clog! 落盘
+    $msg = $_.Exception.Message
+    $st  = $_.ScriptStackTrace
+    Write-Error ("UNCAUGHT: " + $msg + "`n" + $st)
+    exit 99
+}
+"#;
+    let script = script_tpl.replace("<ARGS_PATH>", &arg_path.to_string_lossy());
+    std::fs::write(&ps1_path, script.as_bytes())
+        .map_err(|e| format!("写 OCR 脚本文件失败: {}", e))?;
+
+    // ---- ③ 用 -File 执行，绕过 -Command 引号地狱和 ExecutionPolicy 限制 ----
+    // powershell.exe 是 Windows PowerShell 5.1（PS7 pwsh 移除了 WinRT 投影，不能用）
     let output = Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", &ps_script])
-        .output()
-        .map_err(|e| format!("无法启动 PowerShell: {}", e))?;
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            &ps1_path.to_string_lossy(),
+        ])
+        .output();
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    // 无论成败，先清理临时脚本 / 参数文件（避免 %TEMP% 堆积）
+    let _ = std::fs::remove_file(&ps1_path);
+    let _ = std::fs::remove_file(&arg_path);
+
+    let output = output.map_err(|e| {
+        let msg = e.to_string();
+        clog!("ocr", "无法启动 PowerShell: {}", msg);
+        if msg.contains("not found") || msg.contains("os error 2") {
+            "系统未找到 Windows PowerShell 5.1（powershell.exe）。请确认 Windows 未卸载该组件。".to_string()
+        } else {
+            format!("无法启动 PowerShell 5.1: {}", msg)
+        }
+    })?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let code = output.status.code();
     clog!(
         "ocr",
-        "WinRT OCR 返回: 退出码={:?} 耗时={}ms stderr={:?}",
-        output.status.code(),
+        "WinRT OCR 返回: 退出码={:?} 耗时={}ms stdout_len={} stderr={:?}",
+        code,
         started.elapsed().as_millis(),
+        stdout.len(),
         stderr.trim()
     );
 
     if !output.status.success() {
-        if stderr.contains("NO_OCR_ENGINE") {
+        // 分类错误码 → 用户可读文案
+        if stderr.contains("ARGS_MISSING") {
+            return Err("OCR 内部错误：参数文件为空，请重试或反馈问题。".into());
+        }
+        if stderr.contains("IMG_NOT_FOUND") {
+            return Err("OCR 无法读取临时截图文件（可能被杀软拦截）。请把 %TEMP%\\snapcraft-*.png 加入信任列表后重试。".into());
+        }
+        if stderr.contains("WINRT_MISSING") || stderr.contains("WINRT_RT_MISSING") {
             return Err(
-                "系统未安装可用的 OCR 语言包。请在 设置 → 时间和语言 → 语言 中\
-                 为中文/英文添加「可选功能」里的文字识别组件后重试。"
-                    .into(),
+                "本机 Windows 未安装 WinRT 组件（常见于 Windows Server / N-SKU）。\
+                 请安装 Media Feature Pack 或改用完整 Windows 10/11 家庭版/专业版。".into(),
             );
         }
-        return Err(format!("Windows OCR 失败：{}", stderr.trim()));
+        if stderr.contains("NO_OCR_ENGINE") {
+            return Err(
+                "系统未安装可用的 OCR 语言包。请在「设置 → 时间和语言 → 语言 → 添加语言」\
+                 后进入该语言的「语言选项」勾选「光学字符识别」下载完成后重试。".into(),
+            );
+        }
+        if stderr.contains("IMG_DECODE_FAILED") {
+            return Err("OCR 无法解码截图（不支持的格式或文件损坏）。请重新截图后重试。".into());
+        }
+        // 未分类错误：原样返回 stderr（含 UNCAUGHT: 前缀）
+        return Err(format!(
+            "Windows OCR 失败（退出码 {}）：{}",
+            code.unwrap_or(-1),
+            stderr.trim()
+        ));
+    }
+
+    let trimmed = stdout.trim();
+    if trimmed.is_empty() {
+        // 成功退出但无输出 = 图像里无文字
+        return Err("未识别到文字".into());
     }
 
     // 解析 PowerShell 输出的归一化 JSON 数组（置信度 WinRT 不提供 → 记 0）。
@@ -247,10 +358,15 @@ Write-Output ($arr | ConvertTo-Json -Compress)
         w: f64,
         h: f64,
     }
-    let lines: Vec<WinLine> = match serde_json::from_str(stdout.trim()) {
+    let lines: Vec<WinLine> = match serde_json::from_str(trimmed) {
         Ok(v) => v,
         Err(e) => {
-            clog!("ocr", "WinRT OCR JSON 解析失败: {} raw={:?}", e, stdout.trim());
+            clog!(
+                "ocr",
+                "WinRT OCR JSON 解析失败: {} raw={:?}",
+                e,
+                trimmed.chars().take(200).collect::<String>()
+            );
             return Err(format!("OCR 结果解析失败：{}", e));
         }
     };
