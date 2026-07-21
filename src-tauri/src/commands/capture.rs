@@ -743,7 +743,7 @@ mod xcap_capture {
             });
         }
         // z 值大的在上层（前台），按 z 降序，覆盖层优先高亮命中最上层窗口
-        out.sort_by(|a, b| b.z.cmp(&a.z));
+        out.sort_by_key(|w| std::cmp::Reverse(w.z));
         clog!("capture", "xcap 窗口枚举完成: 共 {} 个可截图窗口", out.len());
         out
     }
