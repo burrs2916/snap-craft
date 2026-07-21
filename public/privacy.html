@@ -266,7 +266,7 @@
     <tr><td>History index</td><td><code>~/Library/Application Support/com.snap-craft.app/history/index.json</code></td><td>❌</td></tr>
     <tr><td>History images</td><td><code>~/Library/Application Support/com.snap-craft.app/history/YYYY-MM/&lt;uuid&gt;.png</code></td><td>❌</td></tr>
     <tr><td>Pin metadata</td><td><code>~/Library/Application Support/com.snap-craft.app/pin/</code></td><td>❌</td></tr>
-    <tr><td>Diagnostic logs</td><td><code>~/Library/Logs/com.snap-craft.app/debug.log</code></td><td>❌ (manual cleanup)</td></tr>
+    <tr><td>Diagnostic logs</td><td><code>&lt;app-dir&gt;/debug.log</code> (fallback to <code>~/Library/Application Support/SnapCraft/debug.log</code> when app dir is read-only)</td><td>❌ (manual cleanup)</td></tr>
     <tr><td>Temp files</td><td><code>/tmp/snapcraft-ai/</code></td><td>❌ (system cleanup)</td></tr>
   </tbody>
 </table>
@@ -462,7 +462,7 @@
     <tr><td>历史索引</td><td><code>~/Library/Application Support/com.snap-craft.app/history/index.json</code></td><td>❌</td></tr>
     <tr><td>历史图片</td><td><code>~/Library/Application Support/com.snap-craft.app/history/YYYY-MM/&lt;uuid&gt;.png</code></td><td>❌</td></tr>
     <tr><td>Pin 元数据</td><td><code>~/Library/Application Support/com.snap-craft.app/pin/</code></td><td>❌</td></tr>
-    <tr><td>诊断日志</td><td><code>~/Library/Logs/com.snap-craft.app/debug.log</code></td><td>❌(手动清理)</td></tr>
+    <tr><td>诊断日志</td><td><code>&lt;app-dir&gt;/debug.log</code>（应用目录只读时回退到 <code>~/Library/Application Support/SnapCraft/debug.log</code>）</td><td>❌(手动清理)</td></tr>
     <tr><td>临时文件</td><td><code>/tmp/snapcraft-ai/</code></td><td>❌(系统清理)</td></tr>
   </tbody>
 </table>

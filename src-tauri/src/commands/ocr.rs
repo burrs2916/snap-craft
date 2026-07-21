@@ -176,6 +176,11 @@ fn run_native_ocr_windows(path: &std::path::Path, lang: Option<&str>) -> Result<
         .map_err(|e| format!("写 OCR 参数文件失败: {}", e))?;
 
     // ---- ② PS 脚本：UTF-8 编码前置 + WinRT 调用 + 归一化 JSON 输出 ----
+    // 重要（血泪坑）：Windows PowerShell 5.1 读取 .ps1 文件时默认按 **系统 ANSI codepage**
+    // 解析（中文 Windows = GBK/CP936），除非文件带 UTF-8 BOM。原先脚本含中文注释时，
+    // GBK 解码破坏 tokenizer，最终在 `} catch {` 附近报 UnexpectedToken。
+    // 双保险：① 脚本文件写入 UTF-8 with BOM；② 注释全英文纯 ASCII，即使 BOM 被杀软策略
+    // 吃掉也能正常 tokenize。
     // 注意：这里所有 $ 与 { 都不再受 Rust format! 影响（普通字符串字面量）；
     //       只有 <ARGS_PATH> 一处占位符用 replace 注入，避开 Rust format! 的花括号转义地狱。
     let script_tpl = r#"
@@ -192,7 +197,7 @@ try {
 
     if (-not (Test-Path -LiteralPath $imgPath)) { Write-Error 'IMG_NOT_FOUND'; exit 11 }
 
-    # 加载 WinRT 类型（Win10/11 自带；Windows Server / N-SKU 可能缺失）
+    # Load WinRT types (built-in on Win10/11; Windows Server / N-SKU may lack them)
     try {
         $null = [Windows.Media.Ocr.OcrEngine,Windows.Foundation,ContentType=WindowsRuntime]
         $null = [Windows.Graphics.Imaging.BitmapDecoder,Windows.Foundation,ContentType=WindowsRuntime]
@@ -202,7 +207,7 @@ try {
         Write-Error 'WINRT_MISSING'; exit 12
     }
 
-    # AsTask 反射：把 WinRT IAsyncOperation<T> 转 .NET Task<T> 后同步等待
+    # AsTask reflection: convert WinRT IAsyncOperation<T> to .NET Task<T> and wait sync
     $asm = [System.Reflection.Assembly]::LoadWithPartialName('System.Runtime.WindowsRuntime')
     if ($asm -eq $null) { Write-Error 'WINRT_RT_MISSING'; exit 13 }
     $extType = $asm.GetType('System.WindowsRuntimeSystemExtensions')
@@ -216,7 +221,7 @@ try {
         $task.Result
     }
 
-    # 语言选择：优先 langCode → 回退用户 profile → 再报错
+    # Language selection: prefer langCode -> fallback user profile -> error
     $engine = $null
     if ($langCode -ne '') {
         try {
@@ -231,7 +236,7 @@ try {
     }
     if ($engine -eq $null) { Write-Error 'NO_OCR_ENGINE'; exit 14 }
 
-    # 读取图片 → 解码 SoftwareBitmap → 识别
+    # Read image -> decode SoftwareBitmap -> recognize
     $file = AwaitT ([Windows.Storage.StorageFile]::GetFileFromPathAsync($imgPath)) ([Windows.Storage.StorageFile])
     $stream = AwaitT ($file.OpenAsync([Windows.Storage.FileAccessMode]::Read)) ([Windows.Storage.Streams.IRandomAccessStream])
     try {
@@ -258,11 +263,11 @@ try {
             h = ($r.Height / $ih)
         }
     }
-    # 强制数组序列化（PS 单元素 ConvertTo-Json 会退化成对象）
+    # Force array serialization (single-element ConvertTo-Json degrades to object otherwise)
     Write-Output (,@($arr) | ConvertTo-Json -Compress -Depth 4)
     exit 0
 } catch {
-    # 兜底：把未分类错误的 Message + StackTrace 完整打到 stderr，Rust 侧 clog! 落盘
+    # Catchall: full Message + StackTrace to stderr, Rust clog! persists it
     $msg = $_.Exception.Message
     $st  = $_.ScriptStackTrace
     Write-Error ("UNCAUGHT: " + $msg + "`n" + $st)
@@ -270,8 +275,12 @@ try {
 }
 "#;
     let script = script_tpl.replace("<ARGS_PATH>", &arg_path.to_string_lossy());
-    std::fs::write(&ps1_path, script.as_bytes())
-        .map_err(|e| format!("写 OCR 脚本文件失败: {}", e))?;
+    // Write UTF-8 with BOM. PowerShell 5.1 auto-detects BOM and skips ANSI/GBK fallback;
+    // no BOM = 中文 Windows PS 会用 GBK 解析，即使脚本全 ASCII 也偶发 parser 边界 bug。
+    let mut buf: Vec<u8> = Vec::with_capacity(script.len() + 3);
+    buf.extend_from_slice(&[0xEF, 0xBB, 0xBF]); // UTF-8 BOM
+    buf.extend_from_slice(script.as_bytes());
+    std::fs::write(&ps1_path, &buf).map_err(|e| format!("写 OCR 脚本文件失败: {}", e))?;
 
     // ---- ③ 用 -File 执行，绕过 -Command 引号地狱和 ExecutionPolicy 限制 ----
     // powershell.exe 是 Windows PowerShell 5.1（PS7 pwsh 移除了 WinRT 投影，不能用）
