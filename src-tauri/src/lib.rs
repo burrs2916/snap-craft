@@ -87,6 +87,12 @@ fn cleanup_temp_files() -> Result<(), String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // 启动时第一行日志：用户复现问题第一时间能确认 binary 版本。
+    // 任何时候看不到这一行、或 commit hash 不对，立刻知道装的是旧版。
+    clog!(
+        "boot",
+        "build=7d2f15f-2026-07-22 ocr=优先中文引擎+14条DIAG链路 commit=7d2f15f"
+    );
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())

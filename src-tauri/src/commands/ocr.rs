@@ -36,6 +36,17 @@ pub async fn ocr_image(
     // 总调用计时器：覆盖 预处理 + 切块 + PS 启动 + 解析 + 后处理。
     // 用户的"识别很慢"反馈需要这条 grep 出来。结束时打印 elapsed_ms。
     let total_started = std::time::Instant::now();
+    // 构建版本号 banner —— 用户复现问题时第一眼就能确认"测的是不是新版本"。
+    // 任何时候只要你看到这个 build tag 不对，就能立刻知道 binary 没刷新。
+    // 用 OnceLock 避免每次 OCR 都打印（启动 + 首次调用各一次就够）。
+    use std::sync::OnceLock;
+    static BUILD_BANNER: OnceLock<()> = OnceLock::new();
+    BUILD_BANNER.get_or_init(|| {
+        clog!(
+            "ocr",
+            "build=7d2f15f-2026-07-22 feat=优先中文引擎+全链路诊断(14条DIAG) rust=stable commit=7d2f15f"
+        );
+    });
     clog!(
         "ocr",
         "命令=ocr_image data_url 长度={} 前缀={} lang={:?}",
