@@ -51,6 +51,23 @@ pub async fn ocr_image(
         format!("写入临时文件失败: {}", e)
     })?;
     clog!("ocr", "临时 PNG 已写入: {:?} ({} 字节)", tmp, bytes.len());
+    // 主动分析图像基本特征（图像损坏/过小是 "识别不全" 的常见原因之一）
+    if bytes.len() < 2048 {
+        clog!(
+            "ocr",
+            "⚠️ 图像字节数过小 ({} 字节 < 2KB)，可能是空白/纯色截图，OCR 大概率识别不到内容",
+            bytes.len()
+        );
+    }
+    // 判断 PNG 头部——data URL 前缀已过滤，这里再校验一次二进制签名
+    let magic = bytes.iter().take(8).copied().collect::<Vec<u8>>();
+    let is_png = magic == [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+    clog!(
+        "ocr",
+        "图像签名校验: is_png={} magic={:02X?}",
+        is_png,
+        &magic[..magic.len().min(8)]
+    );
 
     let result = run_native_ocr(&tmp, lang.as_deref());
     // 无论成败都清理临时文件
@@ -59,15 +76,80 @@ pub async fn ocr_image(
     }
 
     match &result {
-        Ok(r) => clog!(
-            "ocr",
-            "识别成功: {} 块, 共 {} 字符",
-            r.blocks.len(),
-            r.text.len()
-        ),
+        Ok(r) => {
+            // 输出前 5 块文本预览 + 关键统计，让 debug.log 自解释
+            let preview: Vec<String> = r
+                .blocks
+                .iter()
+                .take(5)
+                .map(|b| {
+                    let s: String = b.text.chars().take(40).collect();
+                    format!(
+                        "  #{:02}  ({:.3},{:.3},{:.3},{:.3})  \"{}\"",
+                        0, b.x, b.y, b.w, b.h, s
+                    )
+                })
+                .collect();
+            clog!(
+                "ocr",
+                "识别成功: {} 块, 共 {} 字符  预览前 5 块:\n{}",
+                r.blocks.len(),
+                r.text.len(),
+                preview.join("\n")
+            );
+            // 主动分析：字符类别分布 + 疑似乱码判断
+            let (cjk, latin, digit, other, single_char_lines) = analyze_text(r);
+            clog!(
+                "ocr",
+                "文本类别分布: cjk={} latin={} digit={} other={} single_char_lines={}/{}",
+                cjk,
+                latin,
+                digit,
+                other,
+                single_char_lines,
+                r.blocks.len()
+            );
+            // 触发建议：CJK 少 + Latin 多 + 单字符行占比高 → 引擎语言错配
+            if r.blocks.len() >= 5 {
+                let sr = single_char_lines as f64 / r.blocks.len() as f64;
+                if cjk == 0 && latin > 20 && sr > 0.3 {
+                    clog!("ocr", "SUGGEST: 大量单字符 Latin 块可能是「英文 OCR 引擎误识别中文页面」造成的乱码。当前脚本已优先尝试 zh-Hans-CN；若仍失败，请在「设置 → 时间和语言 → 语言」为中文添加「光学字符识别」组件。");
+                } else if sr > 0.5 {
+                    clog!("ocr", "SUGGEST: 单字符块占比 {:.0}% > 50%，可能是图像太糊/字号太小/字体渲染子像素抗锯齿导致识别不稳定。建议截图前放大原图或改截更大尺寸。", sr * 100.0);
+                }
+            }
+        }
         Err(e) => clog!("ocr", "识别失败: {}", e),
     }
     result
+}
+
+/// 分析 OCR 结果的文本类别分布（用于 debug.log 自解释）。
+/// 返回 (cjk, latin, digit, other, single_char_lines)。
+fn analyze_text(r: &OcrResult) -> (usize, usize, usize, usize, usize) {
+    let mut cjk = 0usize;
+    let mut latin = 0usize;
+    let mut digit = 0usize;
+    let mut other = 0usize;
+    let mut single_char_lines = 0usize;
+    for b in &r.blocks {
+        if b.text.chars().count() <= 1 {
+            single_char_lines += 1;
+        }
+        for ch in b.text.chars() {
+            let code = ch as u32;
+            if (0x4E00..=0x9FFF).contains(&code) || (0x3400..=0x4DBF).contains(&code) {
+                cjk += 1;
+            } else if ch.is_ascii_alphabetic() {
+                latin += 1;
+            } else if ch.is_ascii_digit() {
+                digit += 1;
+            } else {
+                other += 1;
+            }
+        }
+    }
+    (cjk, latin, digit, other, single_char_lines)
 }
 
 // ===== macOS：Apple Vision 框架（apple-vision crate，编译期绑定，用户零依赖） =====
@@ -227,20 +309,57 @@ try {
         $task.Result
     }
 
-    # Language selection: prefer langCode -> fallback user profile -> error
+    # Enumerate all installed OCR languages (for DIAG_ENV logging + smart pick)
+    $supported = @()
+    try {
+        foreach ($sl in [Windows.Media.Ocr.OcrEngine]::AvailableRecognizerLanguages) {
+            $supported += $sl.LanguageTag
+        }
+    } catch {}
+
+    # Language selection priority (fixes the "English engine reading Chinese page"
+    # root cause of "incomplete recognition + garbled characters"):
+    #   1) explicit langCode passed from Rust
+    #   2) zh-Hans-CN (Simplified Chinese engine also reads English chars fine;
+    #      the reverse - English engine reading Chinese - produces the exact
+    #      "recognized text incomplete + garbled" symptom the user reported)
+    #   3) zh-Hant-TW  (Traditional Chinese, Taiwan region)
+    #   4) en-US       (fallback for English-only screenshots)
+    #   5) TryCreateFromUserProfileLanguages (system default heuristic)
     $engine = $null
-    if ($langCode -ne '') {
+    $chosenTag = ''
+    $tries = @()
+    if ($langCode -ne '') { $tries += $langCode }
+    $tries += @('zh-Hans-CN','zh-Hans','zh-Hant-TW','zh-Hant','en-US')
+    foreach ($tag in $tries) {
+        if ([string]::IsNullOrEmpty($tag)) { continue }
         try {
-            $l = [Windows.Globalization.Language]::new($langCode)
+            $l = [Windows.Globalization.Language]::new($tag)
             if ([Windows.Media.Ocr.OcrEngine]::IsLanguageSupported($l)) {
                 $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromLanguage($l)
+                if ($engine -ne $null) {
+                    $chosenTag = $tag
+                    break
+                }
             }
         } catch {}
     }
     if ($engine -eq $null) {
         $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromUserProfileLanguages()
+        if ($engine -ne $null -and $engine.RecognizerLanguage -ne $null) {
+            $chosenTag = ($engine.RecognizerLanguage.LanguageTag + ' (user-profile-fallback)')
+        }
     }
     if ($engine -eq $null) { Write-Error 'NO_OCR_ENGINE'; exit 14 }
+
+    # DIAG_ENV: expose engine + supported langs to Rust via stderr (grep-able one-liner)
+    $userProfile = ''
+    try {
+        $upl = @()
+        foreach ($p in [Windows.System.UserProfile.GlobalizationPreferences]::Languages) { $upl += $p }
+        $userProfile = ($upl -join ',')
+    } catch {}
+    [Console]::Error.WriteLine("DIAG_ENV: engine_lang=$chosenTag supported=[$($supported -join ',')] user_profile=[$userProfile]")
 
     # Read image -> decode SoftwareBitmap -> recognize
     $file = AwaitT ([Windows.Storage.StorageFile]::GetFileFromPathAsync($imgPath)) ([Windows.Storage.StorageFile])
@@ -257,6 +376,7 @@ try {
     $result = AwaitT ($engine.RecognizeAsync($bitmap)) ([Windows.Media.Ocr.OcrResult])
     $iw = $bitmap.PixelWidth
     $ih = $bitmap.PixelHeight
+    [Console]::Error.WriteLine("DIAG_IMG: pixel=${iw}x${ih} format=$($bitmap.BitmapPixelFormat) alpha=$($bitmap.BitmapAlphaMode) text_angle=$($result.TextAngle)")
 
     $arr = @()
     foreach ($line in $result.Lines) {
@@ -288,6 +408,28 @@ try {
             h = ($maxY - $minY) / [double]$ih
         }
     }
+    # DIAG_RESULT: summarize what the engine actually saw (character class breakdown +
+    # rough "garbled" heuristic). Emit BEFORE ConvertTo-Json so it lands on stderr even
+    # if serialization somehow fails.
+    $allText = ($arr | ForEach-Object { $_.text }) -join ''
+    $totalChars = $allText.Length
+    $cjkCount = 0
+    $latinCount = 0
+    $digitCount = 0
+    $otherCount = 0
+    foreach ($ch in $allText.ToCharArray()) {
+        $code = [int]$ch
+        if ($code -ge 0x4E00 -and $code -le 0x9FFF) { $cjkCount++ }
+        elseif ($code -ge 0x3400 -and $code -le 0x4DBF) { $cjkCount++ }
+        elseif (($code -ge 0x41 -and $code -le 0x5A) -or ($code -ge 0x61 -and $code -le 0x7A)) { $latinCount++ }
+        elseif ($code -ge 0x30 -and $code -le 0x39) { $digitCount++ }
+        else { $otherCount++ }
+    }
+    # Single-character lines with non-CJK content are a common garble pattern
+    # (e.g. Chinese page misread by English engine spits out isolated 'l','I','1','o','O' etc.)
+    $singleCharLines = ($arr | Where-Object { $_.text.Length -le 1 }).Count
+    [Console]::Error.WriteLine("DIAG_RESULT: lines=$($arr.Count) chars=$totalChars cjk=$cjkCount latin=$latinCount digit=$digitCount other=$otherCount single_char_lines=$singleCharLines")
+
     # Use -InputObject to bypass pipeline (piped arrays get wrapped as {"value":[...]}
     # in PS 5.1); -InputObject with @($arr) always serializes as a JSON array,
     # even for 0 or 1 element (@() enforces array type).
@@ -346,12 +488,43 @@ try {
     let code = output.status.code();
     clog!(
         "ocr",
-        "WinRT OCR 返回: 退出码={:?} 耗时={}ms stdout_len={} stderr={:?}",
+        "WinRT OCR 返回: 退出码={:?} 耗时={}ms stdout_len={} stderr_len={}",
         code,
         started.elapsed().as_millis(),
         stdout.len(),
-        stderr.trim()
+        stderr.len()
     );
+    // 无论成败都透传 PS 侧写到 stderr 的 DIAG_* 诊断行 —— 这些能一眼看出
+    // 引擎选了哪种语言、图像格式、结果字符类别分布。是"识别不全/乱码"排查的关键。
+    for line in stderr.lines() {
+        let t = line.trim();
+        if t.starts_with("DIAG_ENV:")
+            || t.starts_with("DIAG_IMG:")
+            || t.starts_with("DIAG_RESULT:")
+        {
+            clog!("ocr", "PS→ {}", t);
+        }
+    }
+    // stdout 前 400 字节预览，判断 JSON 结构是裸数组还是 {"value":[...]}
+    if !stdout.is_empty() {
+        let preview: String = stdout.chars().take(400).collect();
+        clog!("ocr", "stdout 预览: {}", preview.replace('\n', "\\n"));
+    }
+    // 非 DIAG_* 的 stderr（真实错误）也全量落盘
+    let non_diag_err: String = stderr
+        .lines()
+        .filter(|l| {
+            let t = l.trim();
+            !t.starts_with("DIAG_ENV:")
+                && !t.starts_with("DIAG_IMG:")
+                && !t.starts_with("DIAG_RESULT:")
+                && !t.is_empty()
+        })
+        .collect::<Vec<_>>()
+        .join(" | ");
+    if !non_diag_err.is_empty() {
+        clog!("ocr", "stderr(非 DIAG): {}", non_diag_err);
+    }
 
     if !output.status.success() {
         // 分类错误码 → 用户可读文案
