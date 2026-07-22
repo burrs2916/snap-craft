@@ -44,7 +44,7 @@ pub async fn ocr_image(
     BUILD_BANNER.get_or_init(|| {
         clog!(
             "ocr",
-            "build=7d2f15f-2026-07-22 feat=优先中文引擎+全链路诊断(14条DIAG) rust=stable commit=7d2f15f"
+            "build=pending-2026-07-22 feat=优先中文引擎+全链路诊断(14条DIAG)+PS5.1静态扫描+let→$修复 rust=stable commit=pending"
         );
     });
     clog!(
@@ -659,7 +659,12 @@ try {
         try { $stream.Dispose() } catch {}
     }
 
-    let result = AwaitT ($engine.RecognizeAsync($bitmap)) ([Windows.Media.Ocr.OcrResult])
+    # ⚠️ 血泪铁律（2026-07-22 修）：赋值必须用 `$var = ...`，绝不能写 Rust 风格 `let var = ...`。
+    # 之前 `let result = AwaitT(...)` 写成 Rust 风格 → PS 5.1 不识别 `let` 关键字 →
+    # catchall 报 "无法将 let 项识别为 cmdlet" → OCR 全部失败。PowerShell 7 (pwsh) 才支持
+    # `let` 关键字，本项目强制用 PowerShell 5.1 (powershell.exe)，见 build.rs/win/build.yml。
+    # 提交前必须 grep 这一行附近的 `let ` 关键字。
+    $result = AwaitT ($engine.RecognizeAsync($bitmap)) ([Windows.Media.Ocr.OcrResult])
     $iw = $bitmap.PixelWidth
     $ih = $bitmap.PixelHeight
     # TextAngle 是 IReference<double>（不是 enum）。当 null 或接近 0 时无旋转。
@@ -1809,6 +1814,62 @@ mod tests {
     }
 
     // ===== postprocess_fullwidth_symbols 单元测试 =====
+
+    /// 编译期静态检查：PS 5.1 模板里不能出现 PS 7+ 关键字。
+    /// 2026-07-22 踩坑：之前 `let result = AwaitT(...)` 写成 Rust 风格 → PS 5.1
+    /// 不识别 `let` 关键字 → 全部 OCR 报 "无法将 let 项识别为 cmdlet"。
+    /// 用 file!() + include_str! 扫整个 ocr.rs 源码（编译时嵌入），
+    /// 发现 PS 7 关键字直接 panic，防止回归。
+    /// 不扫注释行（注释以 # / // 开头，整行 PS 注释以 # 开头）。
+    #[test]
+    fn ps5_template_uses_no_ps7_keywords() {
+        const PS7_KEYWORDS: &[&str] = &["let ", "class ", "enum ", "using namespace "];
+        const FORBIDDEN_CMDS: &[&str] = &["Invoke-Expression"]; // 默认 ExecutionPolicy 禁
+
+        // 找 r#"...PS 模板..."# 区域：以 `let script_tpl = r#"` 开头到下一行 `r#";` 结束。
+        // 简化版：直接扫整文件,把 # 开头的整行注释、// 开头的整行 Rust 注释先剥掉。
+        let src = include_str!("ocr.rs");
+        let mut stripped = String::with_capacity(src.len());
+        for line in src.lines() {
+            let t = line.trim_start();
+            if t.starts_with('#') || t.starts_with("//") {
+                continue;
+            }
+            stripped.push_str(line);
+            stripped.push('\n');
+        }
+
+        // 只在 PS 模板区域内报警。
+        // 起点：跳过 `let script_tpl = r#"` 整行（`let` 关键字在 Rust 代码里是合法的）。
+        // 终点：模板末尾 `"#;` 之前。
+        let anchor = "let script_tpl = r#\"";
+        let ps_section_start = stripped
+            .find(anchor)
+            .map(|i| i + anchor.len())
+            .expect("ocr.rs must contain PS template");
+        let ps_section_end = stripped[ps_section_start..]
+            .find("\"#;")
+            .map(|i| ps_section_start + i)
+            .expect("ocr.rs PS template not terminated");
+        let ps_section = &stripped[ps_section_start..ps_section_end];
+
+        for kw in PS7_KEYWORDS {
+            assert!(
+                !ps_section.contains(kw),
+                "PS 5.1 模板包含 PS 7+ 关键字 `{}`，会触发 `无法将 let 项识别为 cmdlet` 错误。\
+                 必须用 `$var = ...` 代替 `let var = ...`。位置附近:\n{}",
+                kw.trim(),
+                &ps_section[ps_section.len().saturating_sub(200)..]
+            );
+        }
+        for cmd in FORBIDDEN_CMDS {
+            assert!(
+                !ps_section.contains(cmd),
+                "PS 5.1 模板包含被禁 cmdlet `{}`（默认 ExecutionPolicy 禁 Invoke-Expression）。",
+                cmd
+            );
+        }
+    }
 
     #[test]
     fn postprocess_digit_zhun_to_celsius() {
