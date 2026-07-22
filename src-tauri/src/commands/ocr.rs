@@ -1073,7 +1073,7 @@ fn detect_ocr_garble_score(blocks: &[OcrBlock]) -> f64 {
         y_groups.entry(quantize_y(b.y)).or_default().push(b);
     }
     let mut fragmented_rows = 0usize;
-    for (_, group) in y_groups.iter() {
+    for group in y_groups.values() {
         if group.len() >= 3 {
             let all_single = group.iter().filter(|b| b.text.chars().count() == 1).count();
             if all_single as f64 / group.len() as f64 > 0.7 {
