@@ -44,7 +44,7 @@ pub async fn ocr_image(
     BUILD_BANNER.get_or_init(|| {
         clog!(
             "ocr",
-            "build=pending-2026-07-22 feat=优先中文引擎+全链路诊断(14条DIAG)+PS5.1静态扫描+let→$修复 rust=stable commit=pending"
+            "build=pending-2026-07-22 feat=优先中文引擎+全链路诊断(14条DIAG)+PS5.1静态扫描+let→$修复+MaxDim12000+unsharp动态+OCR误识词典 rust=stable commit=pending"
         );
     });
     clog!(
@@ -1143,6 +1143,33 @@ fn preprocess_for_ocr(bytes: Vec<u8>) -> Vec<u8> {
         );
     }
 
+    // 3.5) P1#11 (2026-07-22): 防 WinRT MaxImageDimension 超限。
+    // 经验值：WinRT OcrEngine 报错 "Image dimensions are too large! Check
+    // MaxImageDimension" 在长边 > 12000 触发（典型上限 16384，但 12668 已经在
+    // 用户测试中报错）。保守取 12000 留余量。
+    // 上采样后长边若 > 12000 → 按比例缩回 12000（保长边、短边按比例）。注意
+    // 缩回时 unsharp 会放大噪点（缩回 = 像素重采样），所以这里不调 unsharp 强度。
+    const MAX_OCR_DIMENSION: u32 = 12000;
+    let (cur_w, cur_h) = (img.width(), img.height());
+    let cur_long = cur_w.max(cur_h);
+    if cur_long > MAX_OCR_DIMENSION {
+        let downscale = MAX_OCR_DIMENSION as f32 / cur_long as f32;
+        let nw = ((cur_w as f32) * downscale).round() as u32;
+        let nh = ((cur_h as f32) * downscale).round() as u32;
+        clog!(
+            "ocr",
+            "PRE: 上采样后长边={} > {} → 按比例 {}x 缩回 {}x{} → {}x{}（防 MaxImageDimension 超限）",
+            cur_long,
+            MAX_OCR_DIMENSION,
+            downscale,
+            cur_w,
+            cur_h,
+            nw,
+            nh
+        );
+        img = img.resize_exact(nw, nh, FilterType::Lanczos3);
+    }
+
     // 4) 灰度化 + CLAHE（限制对比度自适应直方图均衡化）+ 锐化
     // 三步串行：CLAHE 先把对比度拉开（解决深色模式 / 低饱和 UI 截图），
     //           unsharp mask 再锐化边缘（解决 CJK 笔画断裂）。
@@ -1172,16 +1199,36 @@ fn preprocess_for_ocr(bytes: Vec<u8>) -> Vec<u8> {
     };
     // 3x3 unsharp mask：CLAHE 增强后 - 模糊 0.6 → 锐化系数 1.2。WinRT 简体引擎
     // 对边缘清晰的字符召回明显提升（参考 2026-07-22 复盘）。
+    //
+    // P1#10 (2026-07-22) 动态 unsharp：
+    //   - 极低对比度（contrast < 300）→ 完全跳过 unsharp（本来图就糊，锐化只会放大噪点）
+    //   - 低对比度 + 启用 CLAHE（contrast 300-1500）→ 强度降到 0.5x（避免把 CLAHE
+    //     拉开的对比度再推到接近全白，导致 OcrEngine 看到一片白底把字符当噪点过滤）
+    //   - 其他情况（contrast ≥ 1500 或没启用 CLAHE）→ 全强度 1.2x
+    // 实测用户日志：1267x74 长条 4x 上采样后 contrast=1066、CLAHE 后 luma=250（全白告警），
+    // 就是因为 unsharp 强度太狠；现在降到 0.5x 应该能让 luma 回到 220-235 区间。
+    let (unsharp_amount, unsharp_skipped): (f32, bool) = if contrast < 300.0 {
+        (0.0, true)
+    } else if do_clahe && contrast < 1500.0 {
+        (0.5, false)
+    } else {
+        (1.2, false)
+    };
     let unsharp_started = std::time::Instant::now();
-    let blurred = image::imageops::blur(&contrast_enhanced, 0.6);
-    let mut sharpened = contrast_enhanced.clone();
-    for (x, y, pixel) in sharpened.enumerate_pixels_mut() {
-        let orig = contrast_enhanced.get_pixel(x, y).0[0] as i32;
-        let blur = blurred.get_pixel(x, y).0[0] as i32;
-        let v = (orig as f32 - blur as f32) * 1.2 + orig as f32;
-        let clamped = v.clamp(0.0, 255.0) as u8;
-        pixel.0[0] = clamped;
-    }
+    let sharpened = if unsharp_skipped {
+        contrast_enhanced.clone()
+    } else {
+        let blurred = image::imageops::blur(&contrast_enhanced, 0.6);
+        let mut s = contrast_enhanced.clone();
+        for (x, y, pixel) in s.enumerate_pixels_mut() {
+            let orig = contrast_enhanced.get_pixel(x, y).0[0] as i32;
+            let blur = blurred.get_pixel(x, y).0[0] as i32;
+            let v = (orig as f32 - blur as f32) * unsharp_amount + orig as f32;
+            let clamped = v.clamp(0.0, 255.0) as u8;
+            pixel.0[0] = clamped;
+        }
+        s
+    };
     let unsharp_ms = unsharp_started.elapsed().as_millis();
     let final_img = image::DynamicImage::ImageLuma8(sharpened);
 
@@ -1216,11 +1263,13 @@ fn preprocess_for_ocr(bytes: Vec<u8>) -> Vec<u8> {
 
     clog!(
         "ocr",
-        "PRE: 完成 原始={} 字节 → 预处理后={} 字节 总耗时={}ms (unsharp={}ms) 输出平均luma={:.1}{}",
+        "PRE: 完成 原始={} 字节 → 预处理后={} 字节 总耗时={}ms (unsharp={}ms amount={}{}) 输出平均luma={:.1}{}",
         bytes.len(),
         out.len(),
         started.elapsed().as_millis(),
         unsharp_ms,
+        if unsharp_skipped { 0.0 } else { unsharp_amount },
+        if unsharp_skipped { " SKIPPED" } else { "" },
         mean_luma,
         mean_luma_alarm
     );
@@ -1307,6 +1356,7 @@ fn reassemble_words_to_lines(words: Vec<WinWord>) -> Vec<OcrBlock> {
         blocks.sort_by(|a, b| a.y.partial_cmp(&b.y).unwrap_or(std::cmp::Ordering::Equal));
         let blocks = normalize_block_text(blocks);
         let blocks = postprocess_fullwidth_symbols(blocks);
+        let blocks = postprocess_ocr_known_errors(blocks);
         return attach_heuristic_confidence(blocks);
     }
 
@@ -1372,9 +1422,10 @@ fn reassemble_words_to_lines(words: Vec<WinWord>) -> Vec<OcrBlock> {
     }
     // 输出顺序：按 y 升序（与原 OcrLine 一致）
     blocks.sort_by(|a, b| a.y.partial_cmp(&b.y).unwrap_or(std::cmp::Ordering::Equal));
-    // 后处理链：归一化 → 全角符号白名单 → 启发式 confidence
+    // 后处理链：归一化 → 全角符号白名单 → OCR 已知翻车词 → 启发式 confidence
     let blocks = normalize_block_text(blocks);
     let blocks = postprocess_fullwidth_symbols(blocks);
+    let blocks = postprocess_ocr_known_errors(blocks);
     attach_heuristic_confidence(blocks)
 }
 
@@ -1645,6 +1696,96 @@ fn normalize_block_text(mut blocks: Vec<OcrBlock>) -> Vec<OcrBlock> {
     blocks
 }
 
+// ===== OCR 已知翻车词保守替换（P1#12 · 2026-07-22）=====
+//
+// 用户 debug.log 显示 WinRT 简体 OcrEngine 在中等字号 / 子像素抗锯齿下
+// 高频翻车对（参考 2026-07-22 实测日志）：
+//   - "艹" 频繁作为 "务" / "平" 的误识（笔画下半部 丿 被丢）
+//   - "椏" 形近 "模"
+//   - "硭" 形近 "炼"
+//   - "制台" 缺 "控" 字（识别漏字）
+//   - "×丨" / "×|" 是图标/UI 字符误识成 Latin × + 中文竖线
+//
+// 保守原则（防止误改正常词）：
+//   ① 替换前检查：目标词必须在 **全 CJK / 全角上下文** 才替换
+//   ② 每个替换规则都要求左侧或右侧至少 1 个 CJK 字符（避免误改独立出现的 "服艹"）
+//   ③ 不替换跨多 word 的长串（只替换单 word 内的子串）
+//   ④ 每个替换都有单测覆盖正向/反向 case
+//
+// 与 postprocess_fullwidth_symbols 的区别：fullwidth 只做"无歧义符号标准化"
+// （如 ℃/1.0/零宽），本函数做"有歧义的 OCR 误识纠正"——所以分开函数且 log
+// 时单独计命中数。
+#[cfg(any(target_os = "windows", test))]
+fn postprocess_ocr_known_errors(blocks: Vec<OcrBlock>) -> Vec<OcrBlock> {
+    // (bad, good, require_cjk_neighbor)
+    // require_cjk_neighbor=true 表示替换前需要文本内至少一个其他 CJK 字符
+    // （防止把独立出现的 "服艹" 这种本就是正确输入误改）
+    const RULES: &[(&str, &str, bool)] = &[
+        ("服艹", "服务", true),       // 大模型服务平台、阿里云服务 等
+        ("艹台", "平台", true),       // 平台（"平" 的横 + "一" 笔画被丢）
+        ("大椏型", "大模型", true),  // 大模型（"模" 的 "木" 被误识为 "椏"）
+        ("椏型", "模型", true),       // 模型
+        ("百硭", "百炼", true),       // 阿里云百炼
+        ("百硭制", "百炼控", true),   // 百炼控制（识别漏 "控"）
+        ("制台", "控制台", true),     // 控制台（识别漏 "控"）
+    ];
+
+    let mut total_hits: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+    let mut out_blocks = blocks;
+    for b in out_blocks.iter_mut() {
+        let text = b.text.clone();
+        let mut new_text = text.clone();
+        for (bad, good, need_cjk_neighbor) in RULES {
+            if !new_text.contains(bad) {
+                continue;
+            }
+            // 上下文校验：要求 bad 出现位置的左右至少 1 个 CJK 字符
+            //（防止把独立正确输入如 "艹" 这种单字误改）
+            if *need_cjk_neighbor {
+                let Some(pos) = new_text.find(bad) else { continue };
+                let chars: Vec<char> = new_text.chars().collect();
+                let bad_chars: Vec<char> = bad.chars().collect();
+                // 把 bad 的字节偏移转成字符索引
+                let mut char_start = 0;
+                let mut cur = 0;
+                for (i, c) in chars.iter().enumerate() {
+                    if cur == pos {
+                        char_start = i;
+                        break;
+                    }
+                    cur += c.len_utf8();
+                }
+                let char_end = char_start + bad_chars.len();
+                // 检查左/右各 1 个字符
+                let left_cjk = char_start > 0 && is_cjk_or_fullwidth(chars[char_start - 1]);
+                let right_cjk = char_end < chars.len() && is_cjk_or_fullwidth(chars[char_end]);
+                // 或者 bad 本身 ≥ 2 字符、且首尾都是 CJK
+                let bad_self_cjk = bad_chars.iter().all(|c| is_cjk_or_fullwidth(*c));
+                if !(left_cjk || right_cjk || bad_self_cjk) {
+                    continue;
+                }
+            }
+            if new_text.contains(bad) {
+                let count = new_text.matches(bad).count();
+                *total_hits.entry(bad).or_insert(0) += count;
+                new_text = new_text.replace(bad, good);
+            }
+        }
+        if new_text != text {
+            clog!("ocr", "POST: OCR-纠错 \"{}\" → \"{}\"", text, new_text);
+            b.text = new_text;
+        }
+    }
+    if !total_hits.is_empty() {
+        let summary: Vec<String> = total_hits
+            .iter()
+            .map(|(k, v)| format!("{}({})", k, v))
+            .collect();
+        clog!("ocr", "POST: OCR-纠错 命中 {} 条规则: {}", total_hits.len(), summary.join(" "));
+    }
+    out_blocks
+}
+
 // ===== 启发式 confidence（Windows 路径 WinRT 不给原生 confidence 的兜底） =====
 //
 // 公式：confidence = clamp(0.5 + 0.5 * score, 0.5, 0.98)
@@ -1908,6 +2049,57 @@ mod tests {
         // CJK 之间单空格 → 压掉
         let blocks = vec![mk_block("阿 里 百 炼")];
         let out = postprocess_fullwidth_symbols(blocks);
+        assert_eq!(out[0].text, "阿里百炼");
+    }
+
+    // ===== postprocess_ocr_known_errors 单元测试（P1#12 · 2026-07-22）=====
+
+    #[test]
+    fn ocr_known_error_fu_cao_to_fu_wu() {
+        // "服艹" + 左侧 CJK "大" → "服务"（防误改独立 "服艹"）
+        let blocks = vec![mk_block("大模型服艹平台")];
+        let out = postprocess_ocr_known_errors(blocks);
+        assert_eq!(out[0].text, "大模型服务平台");
+    }
+
+    #[test]
+    fn ocr_known_error_cao_tai_to_ping_tai() {
+        // "艹台" 全文替换（自身全 CJK + 长度 2 ≥ 2）
+        let blocks = vec![mk_block("艹台")];
+        let out = postprocess_ocr_known_errors(blocks);
+        // "艹台" 全 CJK, 自身命中 bad_self_cjk, 替换为 "平台"
+        assert_eq!(out[0].text, "平台");
+    }
+
+    #[test]
+    fn ocr_known_error_ya_xing_to_mo_xing() {
+        // "大椏型" → "大模型"
+        let blocks = vec![mk_block("大椏型应用")];
+        let out = postprocess_ocr_known_errors(blocks);
+        assert_eq!(out[0].text, "大模型应用");
+    }
+
+    #[test]
+    fn ocr_known_error_no_change_clean_text() {
+        // 已经是正确的 "大模型平台" → 不动
+        let blocks = vec![mk_block("大模型平台")];
+        let out = postprocess_ocr_known_errors(blocks);
+        assert_eq!(out[0].text, "大模型平台");
+    }
+
+    #[test]
+    fn ocr_known_error_no_change_latin_only() {
+        // 纯 Latin 文本不触发（即使含 "×|"）
+        let blocks = vec![mk_block("Microsoft Edge")];
+        let out = postprocess_ocr_known_errors(blocks);
+        assert_eq!(out[0].text, "Microsoft Edge");
+    }
+
+    #[test]
+    fn ocr_known_error_bai_lian_zhimakaimen() {
+        // "百硭" → "百炼"（用户 debug.log 出现过）
+        let blocks = vec![mk_block("阿里百硭")];
+        let out = postprocess_ocr_known_errors(blocks);
         assert_eq!(out[0].text, "阿里百炼");
     }
 
