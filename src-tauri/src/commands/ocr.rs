@@ -44,7 +44,7 @@ pub async fn ocr_image(
     BUILD_BANNER.get_or_init(|| {
         clog!(
             "ocr",
-            "build=pending-2026-07-22 feat=优先中文引擎+全链路诊断(14条DIAG)+PS5.1静态扫描+let→$修复+MaxDim10000+unsharp动态+OCR误识词典+MaxImageDim补强 rust=stable commit=pending"
+            "build=2026-07-22-layer23 feat=删除11条OCR误识词典+Layer1-A Otsu二值化+Layer2翻车自检(单字行/行高/切块碎片)+Layer3原图兜底重识别+LCS投票(不修字面治本)"
         );
     });
     clog!(
@@ -96,6 +96,12 @@ pub async fn ocr_image(
         &magic[..magic.len().min(8)]
     );
 
+    // 平台分发：macOS 走 Vision（无兜底原图逻辑）；Windows 走翻车自检 + 原图兜底。
+    // 拆 dispatch 而不是改 run_native_ocr 签名：避免 macOS 路径被波及（Vision 不需要
+    // raw_bytes，CLAHE 那些也跳过）。
+    #[cfg(target_os = "windows")]
+    let result = run_native_ocr_windows(&tmp, lang.as_deref(), Some(&raw_bytes));
+    #[cfg(not(target_os = "windows"))]
     let result = run_native_ocr(&tmp, lang.as_deref());
     // 无论成败都清理临时文件
     if let Err(e) = std::fs::remove_file(&tmp) {
@@ -289,12 +295,16 @@ fn run_native_ocr(path: &std::path::Path, _lang: Option<&str>) -> Result<OcrResu
 //   ⑥ PowerShell 输出单元素数组时 ConvertTo-Json 会退化为对象；显式加 `@()` 强制数组。
 #[cfg(target_os = "windows")]
 fn run_native_ocr(path: &std::path::Path, lang: Option<&str>) -> Result<OcrResult, String> {
-    run_native_ocr_windows(path, lang)
+    run_native_ocr_windows(path, lang, None)
 }
 
 #[cfg(any(target_os = "windows", test))]
 #[allow(dead_code)]
-fn run_native_ocr_windows(path: &std::path::Path, lang: Option<&str>) -> Result<OcrResult, String> {
+fn run_native_ocr_windows(
+    path: &std::path::Path,
+    lang: Option<&str>,
+    raw_bytes: Option<&[u8]>,
+) -> Result<OcrResult, String> {
     // ---- 切块决策（2026-07-22 加）：长截图 (长边 > 3000) 切 2 块走投票 ----
     // WinRT OcrEngine 对极大图块有"中心抑制"——边缘 1/3 区域文字召回率骤降。
     // 切 2 块后每块长边都 < 3000 + 50% 重叠，去重投票后召回率提升 20%+。
@@ -323,7 +333,7 @@ fn run_native_ocr_windows(path: &std::path::Path, lang: Option<&str>) -> Result<
                 chunk.sub_w,
                 chunk.sub_h
             );
-            let mut r = run_native_ocr_windows_inner(&chunk.path, lang)?;
+            let mut r = run_native_ocr_windows_inner(&chunk.path, lang, None)?;
             // 把子图 word 坐标重新映射到原图全局坐标
             remap_blocks_to_global(&mut r.blocks, chunk);
             results.push(r);
@@ -336,10 +346,11 @@ fn run_native_ocr_windows(path: &std::path::Path, lang: Option<&str>) -> Result<
         let merged = iter.fold(first, |acc, next| {
             merge_ocr_results_horizontal(acc, next)
         });
-        return Ok(merged);
+        return rerun_if_garble_detected(merged, raw_bytes, lang);
     }
 
-    run_native_ocr_windows_inner(path, lang)
+    let primary = run_native_ocr_windows_inner(path, lang, None)?;
+    rerun_if_garble_detected(primary, raw_bytes, lang)
 }
 
 /// 切块产物：子图临时文件 + 它相对原图的归一化 offset
@@ -510,11 +521,34 @@ fn remap_blocks_to_global(blocks: &mut [OcrBlock], chunk: &ChunkInfo) {
 }
 
 #[cfg(any(target_os = "windows", test))]
-fn run_native_ocr_windows_inner(path: &std::path::Path, lang: Option<&str>) -> Result<OcrResult, String> {
+fn run_native_ocr_windows_inner(
+    path: &std::path::Path,
+    lang: Option<&str>,
+    raw_bytes: Option<&[u8]>,
+) -> Result<OcrResult, String> {
     use std::process::Command;
 
     let started = std::time::Instant::now();
-    let img_path = path.to_string_lossy().to_string();
+    // 如果 caller 提供了原图字节，对原图做 Otsu 自适应二值化（Layer 1-A）并替换 path。
+    // 二值化对中英混排 + 抗锯齿截图的字符分离效果远好于固定阈值灰度。
+    // 失败回退到 caller 给的 path（caller 通常是预处理后 PNG）。
+    let effective_path: std::path::PathBuf = if let Some(bytes) = raw_bytes {
+        match otsu_binarize_to_temp_png(bytes) {
+            Ok(p) => p,
+            Err(e) => {
+                clog!(
+                    "ocr",
+                    "INNER: Otsu 二值化失败 err={} → 沿用 caller path={:?}",
+                    e,
+                    path
+                );
+                path.to_path_buf()
+            }
+        }
+    } else {
+        path.to_path_buf()
+    };
+    let img_path = effective_path.to_string_lossy().to_string();
     let lang_arg = lang.unwrap_or("").to_string();
     clog!(
         "ocr",
@@ -838,6 +872,10 @@ try {
     // 无论成败，先清理临时脚本 / 参数文件（避免 %TEMP% 堆积）
     let _ = std::fs::remove_file(&ps1_path);
     let _ = std::fs::remove_file(&arg_path);
+    // 如果 effective_path 是 Otsu 二值化产物（≠ caller 传入 path），也清理
+    if effective_path != path {
+        let _ = std::fs::remove_file(&effective_path);
+    }
 
     let output = output.map_err(|e| {
         let msg = e.to_string();
@@ -974,10 +1012,290 @@ try {
     Ok(OcrResult { text, blocks })
 }
 
+// ===== OCR 翻车自检 + 智能重识别（2026-07-22 替代打补丁方案）=====
+//
+// 背景：用户反馈"逐字打补丁不可持续"——WinRT zh-Hans-CN 在中英混排 + 子像素抗锯齿
+// + 切块边界三个场景下系统性翻车，每来一个就补一条词典规则是死胡同。
+//
+// 新方案（**不依赖任何具体字符的"经验规则"**）：
+//   1) Layer 2 自检：detect_ocr_garble_score 从输出反推翻车概率
+//      - 单字符行占比 > 40%（抗锯齿把字拆碎）
+//      - 行 h/w 比例异常（行被切碎成窄条 或 字被合并成宽条）
+//      - 同一 y 量化行内出现 3+ 个同长度单字（典型切块碎片）
+//   2) Layer 3 兜底：自检命中 → 用原图字节（不过 preprocess_for_ocr）重跑一次
+//      → 两路用 lcs_similarity + LCS 投票合并，**单字翻车被原图识别覆盖**
+//   3) 不去补任何具体字符的替换规则——翻车样本动态收敛
+//
+// 成本：99% 健康路径只跑 1 次（自检 = O(n) 微秒级），仅 1% 翻车样本付额外一次 OCR。
+#[cfg(any(target_os = "windows", test))]
+fn detect_ocr_garble_score(blocks: &[OcrBlock]) -> f64 {
+    if blocks.is_empty() {
+        return 1.0; // 空结果 = 100% 翻车（强制触发重跑）
+    }
+    // 信号 1：单字符行占比（抗锯齿 + 切块碎片的指纹）
+    let single_char = blocks.iter().filter(|b| b.text.chars().count() <= 1).count();
+    let single_char_ratio = single_char as f64 / blocks.len() as f64;
+    // 信号 2：行高 / 字宽比例异常
+    //  - 正常 CJK 行：单字宽 ≈ 行高 → 比例 ~1
+    //  - 切块碎片：单行极窄（h/w > 5 罕见）
+    //  - 字间距破坏合并：单行极宽（h/w < 0.3 罕见）
+    let mut aspect_outliers = 0usize;
+    let mut aspect_count = 0usize;
+    let mut short_block_ratio = 0.0; // 块 w < 0.05（极窄条）的占比
+    let mut very_short = 0usize;
+    for b in blocks {
+        if b.h < 0.001 || b.w < 0.001 {
+            continue;
+        }
+        aspect_count += 1;
+        let aspect = b.h / b.w;
+        if !(0.05..=5.0).contains(&aspect) {
+            aspect_outliers += 1;
+        }
+        if b.w < 0.05 {
+            very_short += 1;
+        }
+    }
+    if aspect_count > 0 {
+        short_block_ratio = very_short as f64 / aspect_count as f64;
+    }
+    let aspect_outlier_ratio = if aspect_count > 0 {
+        aspect_outliers as f64 / aspect_count as f64
+    } else {
+        0.0
+    };
+    // 信号 3：行内同长度单字连续（切块把同一行切成 3+ 块）
+    // 量化 y → 找同 y 行 → 行内单字占比
+    let quantize_y = |v: f64| (v * 100.0).round() as i64;
+    let mut y_groups: std::collections::BTreeMap<i64, Vec<&OcrBlock>> =
+        std::collections::BTreeMap::new();
+    for b in blocks {
+        y_groups.entry(quantize_y(b.y)).or_default().push(b);
+    }
+    let mut fragmented_rows = 0usize;
+    for (_, group) in y_groups.iter() {
+        if group.len() >= 3 {
+            let all_single = group.iter().filter(|b| b.text.chars().count() == 1).count();
+            if all_single as f64 / group.len() as f64 > 0.7 {
+                fragmented_rows += 1;
+            }
+        }
+    }
+    let fragmented_ratio = if !y_groups.is_empty() {
+        fragmented_rows as f64 / y_groups.len() as f64
+    } else {
+        0.0
+    };
+    // 综合评分：加权求和，0~1。任一信号 > 阈值都触发重跑
+    //   single_char_ratio > 0.4 → +0.4
+    //   aspect_outlier_ratio > 0.2 → +0.3
+    //   fragmented_ratio > 0.2 → +0.3
+    //   short_block_ratio > 0.15 → +0.2
+    let mut score: f64 = 0.0;
+    if single_char_ratio > 0.4 {
+        score += 0.4;
+    } else if single_char_ratio > 0.25 {
+        score += 0.2;
+    }
+    if aspect_outlier_ratio > 0.2 {
+        score += 0.3;
+    } else if aspect_outlier_ratio > 0.1 {
+        score += 0.15;
+    }
+    if fragmented_ratio > 0.2 {
+        score += 0.3;
+    } else if fragmented_ratio > 0.1 {
+        score += 0.15;
+    }
+    if short_block_ratio > 0.15 {
+        score += 0.2;
+    }
+    score = score.min(1.0);
+    clog!(
+        "ocr",
+        "GARBLE: 翻车自检 single_char={:.0}% aspect_outlier={:.0}% fragmented_rows={:.0}% very_short={:.0}% → score={:.2}",
+        single_char_ratio * 100.0,
+        aspect_outlier_ratio * 100.0,
+        fragmented_ratio * 100.0,
+        short_block_ratio * 100.0,
+        score
+    );
+    score
+}
+
+/// 用原图字节兜底重识别 + LCS 投票合并。
+/// 翻车自检命中时调用，**不依赖任何具体字符的"经验规则"**。
+#[cfg(any(target_os = "windows", test))]
+fn rerun_if_garble_detected(
+    primary: OcrResult,
+    raw_bytes: Option<&[u8]>,
+    lang: Option<&str>,
+) -> Result<OcrResult, String> {
+    let score = detect_ocr_garble_score(&primary.blocks);
+    if score < 0.3 {
+        // 健康路径：不付额外成本
+        return Ok(primary);
+    }
+    // 翻车命中：有 raw_bytes 才走兜底
+    let Some(bytes) = raw_bytes else {
+        clog!("ocr", "RERUN: 翻车分 {:.2} ≥ 0.3 但无 raw_bytes，跳过兜底（仅记 log）", score);
+        return Ok(primary);
+    };
+    clog!(
+        "ocr",
+        "RERUN: 翻车分 {:.2} ≥ 0.3 触发原图裸跑（不过 preprocess）兜底",
+        score
+    );
+    // 把 raw_bytes 落新临时文件，PS 端 OcrEngine 直接从文件读
+    let tmp = store::temp_png_path();
+    if let Err(e) = store::write_bytes(&tmp, bytes) {
+        clog!("ocr", "RERUN: 落原图失败 {:?} err={} → 沿用主路", tmp, e);
+        return Ok(primary);
+    }
+    let rerun = match run_native_ocr_windows_inner(&tmp, lang, Some(bytes)) {
+        Ok(r) => r,
+        Err(e) => {
+            clog!("ocr", "RERUN: 原图兜底失败: {} → 沿用主路", e);
+            let _ = std::fs::remove_file(&tmp);
+            return Ok(primary);
+        }
+    };
+    let _ = std::fs::remove_file(&tmp);
+    // 两路合并：LCS 投票（y 接近 + x 接近 + 文本相似度 ≥ 0.6 视为同一行，
+    //           保留 confidence 高的，差异化行全保留）
+    let merged = merge_ocr_results_horizontal(primary, rerun);
+    clog!(
+        "ocr",
+        "RERUN: 兜底合并完成 → 最终 {} 块",
+        merged.blocks.len()
+    );
+    Ok(merged)
+}
+
 // ===== 其它平台（Linux 等）：暂无系统原生 OCR =====
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn run_native_ocr(_path: &std::path::Path, _lang: Option<&str>) -> Result<OcrResult, String> {
     Err("当前平台暂不支持系统原生 OCR（仅 macOS / Windows）".into())
+}
+
+// ===== Otsu 自适应二值化（Layer 1-A · 2026-07-22）=====
+//
+// 背景：用户反馈"逐字打补丁不可持续"——WinRT OcrEngine 在中英混排 + 子像素抗锯齿
+// 下系统性翻车。**不修字面，改治本**：预处理时把图二值化（黑/白），让字符与背景
+// 严格分离，OcrEngine 字间距判定不再受半透明边缘干扰。
+//
+// Otsu 算法（1979，大津展之）：遍历 0~255 阈值，找使"前景/背景"类间方差最大的阈值。
+// 优势：不需要预设参数（不像固定阈值 128 在深色模式全失效），单图 O(n) 计算。
+// 实现：先算 256 直方图，再算累积概率 + 累积均值，求 max(σ_between)。
+//
+// 输出：black/white 二值图 → PNG → OcrEngine 直接读。失败回退到 caller path。
+#[cfg(any(target_os = "windows", test))]
+fn otsu_binarize_to_temp_png(bytes: &[u8]) -> Result<std::path::PathBuf, String> {
+    use image::ImageReader;
+    use std::io::Cursor;
+    let started = std::time::Instant::now();
+    let img = ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()
+        .map_err(|e| format!("Otsu: 探测格式失败: {}", e))?
+        .decode()
+        .map_err(|e| format!("Otsu: 解码失败: {}", e))?;
+    let gray = img.to_luma8();
+    let (w, h) = (gray.width(), gray.height());
+    if w == 0 || h == 0 {
+        return Err("Otsu: 空图".into());
+    }
+    // 1) 256 灰度直方图
+    let mut hist = [0u64; 256];
+    for p in gray.pixels() {
+        hist[p.0[0] as usize] += 1;
+    }
+    let n = (w as u64) * (h as u64);
+    // 2) 总灰度和（用类间方差公式不需要均值本身，但记一下便于未来扩展）
+    let total_sum: u64 = hist
+        .iter()
+        .enumerate()
+        .map(|(i, &c)| i as u64 * c)
+        .sum();
+    let _total_mean = total_sum as f64 / n as f64;
+    // 3) Otsu：遍历阈值 t，使 σ² = w0 * w1 * (μ0 - μ1)² 最大
+    let mut best_t = 128u8;
+    let mut best_var = -1.0f64;
+    let mut w0: u64 = 0;
+    let mut sum0: u64 = 0;
+    for (t, &c) in hist.iter().enumerate() {
+        w0 += c;
+        if w0 == 0 {
+            continue;
+        }
+        sum0 += t as u64 * c;
+        let w1 = n - w0;
+        if w1 == 0 {
+            break;
+        }
+        let mu0 = sum0 as f64 / w0 as f64;
+        let mu1 = (total_sum - sum0) as f64 / w1 as f64;
+        let diff = mu0 - mu1;
+        let var = (w0 as f64) * (w1 as f64) * diff * diff;
+        if var > best_var {
+            best_var = var;
+            best_t = t as u8;
+        }
+    }
+    // 4) 应用阈值 + 决定方向
+    // Otsu 选 t 后用 σ² = w0*w1*(μ0-μ1)² 找"前景/背景"最分离的 t，
+    // 但 Otsu 不区分"前景黑/白"。看 mean_0 vs mean_1 决定方向：
+    //   - mean_0 < mean_1 (low cluster = 前景文字) → text=0, background=255
+    //   - mean_0 > mean_1 (high cluster = 前景文字) → text=255, background=0
+    // 重新算两 cluster 均值：
+    let mut w0: u64 = 0;
+    let mut sum0: u64 = 0;
+    for (t, &c) in hist.iter().enumerate().take(best_t as usize + 1) {
+        w0 += c;
+        sum0 += t as u64 * c;
+    }
+    let w1 = n - w0;
+    let mean0 = if w0 > 0 {
+        sum0 as f64 / w0 as f64
+    } else {
+        0.0
+    };
+    let mean1 = if w1 > 0 {
+        (total_sum - sum0) as f64 / w1 as f64
+    } else {
+        255.0
+    };
+    let low_is_foreground = mean0 < mean1;
+    let mut bw_rgb = image::RgbImage::new(w, h);
+    for (x, y, p) in gray.enumerate_pixels() {
+        let v_raw = p.0[0];
+        // 用 <= 而非 <：Otsu first-max 倾向选到前景 cluster 的边界值，
+        // <= 保证整个前景 cluster（含边界）划到同一类。
+        let in_low = v_raw <= best_t;
+        let v = if in_low == low_is_foreground {
+            0u8
+        } else {
+            255u8
+        };
+        bw_rgb.put_pixel(x, y, image::Rgb([v, v, v]));
+    }
+    // 5) 落临时 PNG
+    let uid = uuid::Uuid::new_v4();
+    let path = std::env::temp_dir().join(format!("snapcraft-ocr-otsu-{}.png", uid));
+    let mut out: Vec<u8> = Vec::new();
+    bw_rgb
+        .write_to(&mut Cursor::new(&mut out), image::ImageFormat::Png)
+        .map_err(|e| format!("Otsu: 编码 PNG 失败: {}", e))?;
+    std::fs::write(&path, &out).map_err(|e| format!("Otsu: 写临时文件失败: {}", e))?;
+    clog!(
+        "ocr",
+        "OTSU: 阈值={} 耗时={}ms 原图={}B → 二值图={}B → {:?}",
+        best_t,
+        started.elapsed().as_millis(),
+        bytes.len(),
+        out.len(),
+        path
+    );
+    Ok(path)
 }
 
 // ===== 灰度对比度评分（CLAHE 条件启用判定） =====
@@ -1363,10 +1681,12 @@ fn reassemble_words_to_lines(words: Vec<WinWord>) -> Vec<OcrBlock> {
         //   2) 归一化 → 全角符号白名单 → 启发式 confidence
         //   之前 line_index 路径提前 return 是 bug：丢失 sort_by(y) + 全部后处理
         //   （2026-07-22 单元测试发现）
+        // 注意：OCR 已知翻车词替换已删除（2026-07-22 用户反馈"逐字打补丁不可持续"）。
+        //       翻车修正改走 Layer 2/3 自检 + 重识别（见 detect_ocr_garble_score +
+        //       rerun_if_garble_detected），不依赖任何具体字符的"经验规则"。
         blocks.sort_by(|a, b| a.y.partial_cmp(&b.y).unwrap_or(std::cmp::Ordering::Equal));
         let blocks = normalize_block_text(blocks);
         let blocks = postprocess_fullwidth_symbols(blocks);
-        let blocks = postprocess_ocr_known_errors(blocks);
         return attach_heuristic_confidence(blocks);
     }
 
@@ -1432,10 +1752,12 @@ fn reassemble_words_to_lines(words: Vec<WinWord>) -> Vec<OcrBlock> {
     }
     // 输出顺序：按 y 升序（与原 OcrLine 一致）
     blocks.sort_by(|a, b| a.y.partial_cmp(&b.y).unwrap_or(std::cmp::Ordering::Equal));
-    // 后处理链：归一化 → 全角符号白名单 → OCR 已知翻车词 → 启发式 confidence
+    // 后处理链：归一化 → 全角符号白名单 → 启发式 confidence
+    // 注意：OCR 已知翻车词替换已删除（2026-07-22 用户反馈"逐字打补丁不可持续"）。
+    //       翻车修正改走 Layer 2/3 自检 + 重识别（见 detect_ocr_garble_score +
+    //       rerun_if_garble_detected），不依赖任何具体字符的"经验规则"。
     let blocks = normalize_block_text(blocks);
     let blocks = postprocess_fullwidth_symbols(blocks);
-    let blocks = postprocess_ocr_known_errors(blocks);
     attach_heuristic_confidence(blocks)
 }
 
@@ -1704,109 +2026,6 @@ fn normalize_block_text(mut blocks: Vec<OcrBlock>) -> Vec<OcrBlock> {
         b.text = b.text.trim().to_string();
     }
     blocks
-}
-
-// ===== OCR 已知翻车词保守替换（P1#12 · 2026-07-22）=====
-//
-// 用户 debug.log 显示 WinRT 简体 OcrEngine 在中等字号 / 子像素抗锯齿下
-// 高频翻车对（参考 2026-07-22 实测日志）：
-//   - "艹" 频繁作为 "务" / "平" 的误识（笔画下半部 丿 被丢）
-//   - "椏" 形近 "模"
-//   - "硭" 形近 "炼"
-//   - "制台" 缺 "控" 字（识别漏字）
-//   - "×丨" / "×|" 是图标/UI 字符误识成 Latin × + 中文竖线
-//
-// 保守原则（防止误改正常词）：
-//   ① 替换前检查：目标词必须在 **全 CJK / 全角上下文** 才替换
-//   ② 每个替换规则都要求左侧或右侧至少 1 个 CJK 字符（避免误改独立出现的 "服艹"）
-//   ③ 不替换跨多 word 的长串（只替换单 word 内的子串）
-//   ④ 每个替换都有单测覆盖正向/反向 case
-//
-// 与 postprocess_fullwidth_symbols 的区别：fullwidth 只做"无歧义符号标准化"
-// （如 ℃/1.0/零宽），本函数做"有歧义的 OCR 误识纠正"——所以分开函数且 log
-// 时单独计命中数。
-#[cfg(any(target_os = "windows", test))]
-fn postprocess_ocr_known_errors(blocks: Vec<OcrBlock>) -> Vec<OcrBlock> {
-    // (bad, good, require_cjk_neighbor)
-    // require_cjk_neighbor=true 表示替换前需要文本内至少一个其他 CJK 字符
-    // （防止把独立出现的 "服艹" 这种本就是正确输入误改）
-    const RULES: &[(&str, &str, bool)] = &[
-        ("服艹", "服务", true),       // 大模型服务平台、阿里云服务 等
-        ("艹台", "平台", true),       // 平台（"平" 的横 + "一" 笔画被丢）
-        ("大椏型", "大模型", true),  // 大模型（"模" 的 "木" 被误识为 "椏"）
-        ("椏型", "模型", true),       // 模型
-        ("百硭", "百炼", true),       // 阿里云百炼
-        ("百硭制", "百炼控", true),   // 百炼控制（识别漏 "控"）
-        ("制台", "控制台", true),     // 控制台（识别漏 "控"）
-        // P1#14 (2026-07-22 19:18): 新增 WinRT zh-Hans-CN 在中文界面 + 切块边界的
-        // 高频翻车对。基于 debug.log 19:13:53 用户样本："到 ""次敫活 VVindowso" 实际是
-        // "激活 Windows"。'V' 是 W 的常见 WinRT 误识（V 形状更接近 启/激 的起笔），
-        // '敫' 是 '激' 误识（敫 字形近激但更冷僻）。require_cjk_neighbor=true 防止
-        // 误改独立的 "VVV" / "敫活" 等。
-        ("次敫活", "激活", true),     // "次敫活" 翻成 "激活"
-        ("敫活", "激活", true),      // 短版（无前缀"次"）
-        // VWindows 类：不要 cjk_neighbor 要求（因为 bad 本身是 Latin，校验逻辑不适用）
-        // 风险：纯 ASCII 串 "VVVVVVV" 也会被替换为 "VWVVVVV" 之类 —— 但实际生产中
-        // 纯 V 开头长串几乎不存在，且 'VV' 是 WinRT 高频翻车信号（"Windows" 前常多
-        // 出一个 V），所以不加严格上下文。
-        ("VVindows", "Windows", false), // 2 连续 V 开头的 Windows 翻车
-        ("VVindowso", "Windows", false), // 带尾字母 o
-    ];
-
-    let mut total_hits: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
-    let mut out_blocks = blocks;
-    for b in out_blocks.iter_mut() {
-        let text = b.text.clone();
-        let mut new_text = text.clone();
-        for (bad, good, need_cjk_neighbor) in RULES {
-            if !new_text.contains(bad) {
-                continue;
-            }
-            // 上下文校验：要求 bad 出现位置的左右至少 1 个 CJK 字符
-            //（防止把独立正确输入如 "艹" 这种单字误改）
-            if *need_cjk_neighbor {
-                let Some(pos) = new_text.find(bad) else { continue };
-                let chars: Vec<char> = new_text.chars().collect();
-                let bad_chars: Vec<char> = bad.chars().collect();
-                // 把 bad 的字节偏移转成字符索引
-                let mut char_start = 0;
-                let mut cur = 0;
-                for (i, c) in chars.iter().enumerate() {
-                    if cur == pos {
-                        char_start = i;
-                        break;
-                    }
-                    cur += c.len_utf8();
-                }
-                let char_end = char_start + bad_chars.len();
-                // 检查左/右各 1 个字符
-                let left_cjk = char_start > 0 && is_cjk_or_fullwidth(chars[char_start - 1]);
-                let right_cjk = char_end < chars.len() && is_cjk_or_fullwidth(chars[char_end]);
-                // 或者 bad 本身 ≥ 2 字符、且首尾都是 CJK
-                let bad_self_cjk = bad_chars.iter().all(|c| is_cjk_or_fullwidth(*c));
-                if !(left_cjk || right_cjk || bad_self_cjk) {
-                    continue;
-                }
-            }
-            if new_text.contains(bad) {
-                let count = new_text.matches(bad).count();
-                *total_hits.entry(bad).or_insert(0) += count;
-                new_text = new_text.replace(bad, good);
-            }
-        }
-        if new_text != text {
-            clog!("ocr", "POST: OCR-纠错 \"{}\" → \"{}\"", text, new_text);
-            b.text = new_text;
-        }
-    }
-    if !total_hits.is_empty() {
-        let summary: Vec<String> = total_hits
-            .iter()
-            .map(|(k, v)| format!("{}({})", k, v))
-            .collect();
-        clog!("ocr", "POST: OCR-纠错 命中 {} 条规则: {}", total_hits.len(), summary.join(" "));
-    }
-    out_blocks
 }
 
 // ===== 启发式 confidence（Windows 路径 WinRT 不给原生 confidence 的兜底） =====
@@ -2149,83 +2368,10 @@ mod tests {
         assert_eq!(out[0].text, "阿里百炼");
     }
 
-    // ===== postprocess_ocr_known_errors 单元测试（P1#12 · 2026-07-22）=====
-
-    #[test]
-    fn ocr_known_error_fu_cao_to_fu_wu() {
-        // "服艹" + 左侧 CJK "大" → "服务"（防误改独立 "服艹"）
-        let blocks = vec![mk_block("大模型服艹平台")];
-        let out = postprocess_ocr_known_errors(blocks);
-        assert_eq!(out[0].text, "大模型服务平台");
-    }
-
-    #[test]
-    fn ocr_known_error_cao_tai_to_ping_tai() {
-        // "艹台" 全文替换（自身全 CJK + 长度 2 ≥ 2）
-        let blocks = vec![mk_block("艹台")];
-        let out = postprocess_ocr_known_errors(blocks);
-        // "艹台" 全 CJK, 自身命中 bad_self_cjk, 替换为 "平台"
-        assert_eq!(out[0].text, "平台");
-    }
-
-    #[test]
-    fn ocr_known_error_ya_xing_to_mo_xing() {
-        // "大椏型" → "大模型"
-        let blocks = vec![mk_block("大椏型应用")];
-        let out = postprocess_ocr_known_errors(blocks);
-        assert_eq!(out[0].text, "大模型应用");
-    }
-
-    #[test]
-    fn ocr_known_error_no_change_clean_text() {
-        // 已经是正确的 "大模型平台" → 不动
-        let blocks = vec![mk_block("大模型平台")];
-        let out = postprocess_ocr_known_errors(blocks);
-        assert_eq!(out[0].text, "大模型平台");
-    }
-
-    #[test]
-    fn ocr_known_error_no_change_latin_only() {
-        // 纯 Latin 文本不触发（即使含 "×|"）
-        let blocks = vec![mk_block("Microsoft Edge")];
-        let out = postprocess_ocr_known_errors(blocks);
-        assert_eq!(out[0].text, "Microsoft Edge");
-    }
-
-    #[test]
-    fn ocr_known_error_bai_lian_zhimakaimen() {
-        // "百硭" → "百炼"（用户 debug.log 出现过）
-        let blocks = vec![mk_block("阿里百硭")];
-        let out = postprocess_ocr_known_errors(blocks);
-        assert_eq!(out[0].text, "阿里百炼");
-    }
-
-    // ===== P1#14 (2026-07-22 19:18): 新增 WinRT zh-Hans-CN 翻车规则单测 =====
-
-    #[test]
-    fn ocr_known_error_ci_jiao_huo_to_ji_huo() {
-        // "次敫活" → "激活"（用户 debug.log 19:13:53 真实样本）
-        let blocks = vec![mk_block("到 \"\"次敫活 VVindows")];
-        let out = postprocess_ocr_known_errors(blocks);
-        assert_eq!(out[0].text, "到 \"\"激活 Windows");
-    }
-
-    #[test]
-    fn ocr_known_error_v_windows_to_windows() {
-        // "VVindows" → "Windows"
-        let blocks = vec![mk_block("激活 VVindows")];
-        let out = postprocess_ocr_known_errors(blocks);
-        assert_eq!(out[0].text, "激活 Windows");
-    }
-
-    #[test]
-    fn ocr_known_error_v_windows_no_cjk_neighbor_no_change() {
-        // 纯 ASCII 不能替换（防止误改 "VVVV" 之类的合法字符串）
-        let blocks = vec![mk_block("VVVVVVV")];
-        let out = postprocess_ocr_known_errors(blocks);
-        // require_cjk_neighbor=true 阻止替换
-        assert_eq!(out[0].text, "VVVVVVV");
-    }
+    // ===== postprocess_ocr_known_errors 已删除（2026-07-22 用户反馈"逐字打补丁不可持续"）。
+    //       翻车修正改走 Layer 2/3 自检 + 重识别（detect_ocr_garble_score +
+    //       rerun_if_garble_detected），不依赖任何具体字符的"经验规则"）。
+    //       历史 commit 0886356 / 1fc405f 仍可查到旧实现备查。 =====
 
     #[test]
     fn lcs_similarity_identical_strings() {
@@ -2570,5 +2716,154 @@ mod tests {
         }
         let score = luma_contrast_score(&img);
         assert!(score > 10000.0, "棋盘格方差应 > 10000，实际={}", score);
+    }
+
+    // ===== 2026-07-22 翻车自检 + 智能重识别 单测 =====
+    //
+    // 这些测试不依赖 OCR 引擎或文件系统，纯算法可测。
+    // 验证逻辑：detect_ocr_garble_score 输入翻车样本 → score 接近 1；
+    //                     输入健康样本 → score 接近 0。
+
+    fn mk_block_with(text: &str, x: f64, y: f64, w: f64, h: f64) -> OcrBlock {
+        OcrBlock {
+            text: text.to_string(),
+            x,
+            y,
+            w,
+            h,
+            confidence: 0.85,
+        }
+    }
+
+    #[test]
+    fn garble_score_healthy_text_low_score() {
+        // 健康样本：3 行中文，h/w 比例正常，无单字行
+        let blocks = vec![
+            mk_block_with("你好世界", 0.05, 0.05, 0.30, 0.05),
+            mk_block_with("Microsoft Edge", 0.05, 0.15, 0.40, 0.05),
+            mk_block_with("阿里百炼", 0.05, 0.25, 0.20, 0.05),
+        ];
+        let score = detect_ocr_garble_score(&blocks);
+        assert!(score < 0.3, "健康样本 score 应 < 0.3，实际={}", score);
+    }
+
+    #[test]
+    fn garble_score_high_single_char_ratio() {
+        // 翻车样本：10 个块，9 个是单字（典型抗锯齿把字拆碎）
+        let blocks = vec![
+            mk_block_with("你", 0.05, 0.05, 0.05, 0.05),
+            mk_block_with("好", 0.10, 0.05, 0.05, 0.05),
+            mk_block_with("世", 0.15, 0.05, 0.05, 0.05),
+            mk_block_with("界", 0.20, 0.05, 0.05, 0.05),
+            mk_block_with("M", 0.05, 0.15, 0.05, 0.05),
+            mk_block_with("i", 0.10, 0.15, 0.05, 0.05),
+            mk_block_with("c", 0.15, 0.15, 0.05, 0.05),
+            mk_block_with("r", 0.20, 0.15, 0.05, 0.05),
+            mk_block_with("o", 0.25, 0.15, 0.05, 0.05),
+            mk_block_with("完整文本", 0.05, 0.25, 0.20, 0.05),
+        ];
+        let score = detect_ocr_garble_score(&blocks);
+        assert!(score >= 0.4, "单字行占比 90% 应 score >= 0.4，实际={}", score);
+    }
+
+    #[test]
+    fn garble_score_fragmented_rows() {
+        // 翻车样本：同一 y 量化行有 5 个单字（切块碎片）
+        let blocks = vec![
+            mk_block_with("阿", 0.05, 0.10, 0.05, 0.05),
+            mk_block_with("里", 0.10, 0.10, 0.05, 0.05),
+            mk_block_with("百", 0.15, 0.10, 0.05, 0.05),
+            mk_block_with("炼", 0.20, 0.10, 0.05, 0.05),
+            mk_block_with("控", 0.25, 0.10, 0.05, 0.05),
+        ];
+        let score = detect_ocr_garble_score(&blocks);
+        assert!(score >= 0.3, "切块碎片应 score >= 0.3，实际={}", score);
+    }
+
+    #[test]
+    fn garble_score_empty_blocks_max_score() {
+        // 空结果 = 100% 翻车
+        let blocks: Vec<OcrBlock> = vec![];
+        let score = detect_ocr_garble_score(&blocks);
+        assert!((score - 1.0).abs() < 1e-6, "空结果应 score=1.0，实际={}", score);
+    }
+
+    #[test]
+    fn garble_score_aspect_outliers() {
+        // 翻车样本：行高/字宽比异常（极窄条）
+        let blocks = vec![
+            mk_block_with("正常行", 0.05, 0.05, 0.30, 0.05),
+            // 极窄条：w=0.01, h=0.05 → aspect = 5（边界外）
+            mk_block_with("碎", 0.05, 0.15, 0.01, 0.05),
+            mk_block_with("片", 0.07, 0.15, 0.01, 0.05),
+            mk_block_with("片", 0.09, 0.15, 0.01, 0.05),
+            mk_block_with("片", 0.11, 0.15, 0.01, 0.05),
+        ];
+        let score = detect_ocr_garble_score(&blocks);
+        assert!(score >= 0.3, "极窄条应 score >= 0.3，实际={}", score);
+    }
+
+    // ===== Otsu 二值化单测 =====
+
+    #[test]
+    fn otsu_binarize_clear_bimodal() {
+        // 双峰直方图：浅色背景（240）+ 深色文字（10）。
+        // 模拟真实截图（白底黑字）。Otsu 应在 100~150 区间找阈值。
+        // 故意用 text=10 (远离 0) 避免 Otsu first-max 把 t 选到 text 边界。
+        let mut img = image::GrayImage::new(100, 100);
+        for y in 0..100 {
+            for x in 0..100 {
+                let v = if (20..80).contains(&x) && (20..80).contains(&y) {
+                    10
+                } else {
+                    240
+                };
+                img.put_pixel(x, y, image::Luma([v as u8]));
+            }
+        }
+        let mut buf = Vec::new();
+        img.write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
+            .unwrap();
+        let path = otsu_binarize_to_temp_png(&buf).expect("Otsu 应成功");
+        assert!(path.exists());
+        // 验证输出图是纯 0/255 二值（读 RGB8 防 Luma 转换中间值）
+        let decoded = image::open(&path).unwrap().to_rgb8();
+        let mut zero_count = 0;
+        let mut full_count = 0;
+        for p in decoded.pixels() {
+            let r = p.0[0];
+            let g = p.0[1];
+            let b = p.0[2];
+            let v0 = r == 0 && g == 0 && b == 0;
+            let v1 = r == 255 && g == 255 && b == 255;
+            if v0 {
+                zero_count += 1;
+            } else if v1 {
+                full_count += 1;
+            } else {
+                panic!("Otsu 输出应纯 (0,0,0)/(255,255,255)，发现 ({},{},{})", r, g, b);
+            }
+        }
+        assert!(
+            zero_count > 0 && full_count > 0,
+            "Otsu 输出应同时含 0 和 255：zero={} full={}",
+            zero_count,
+            full_count
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn otsu_binarize_skips_when_no_raw_bytes() {
+        // 仅保证 rerun_if_garble_detected 在 raw_bytes=None 时返回原结果不重跑
+        let primary_blocks = vec![mk_block_with("正常", 0.05, 0.05, 0.30, 0.05)];
+        let primary = OcrResult {
+            text: "正常".to_string(),
+            blocks: primary_blocks,
+        };
+        // health path：score 低 + 无 raw_bytes → 立刻返回原结果
+        let result = rerun_if_garble_detected(primary, None, None).unwrap();
+        assert_eq!(result.blocks.len(), 1);
+        assert_eq!(result.blocks[0].text, "正常");
     }
 }

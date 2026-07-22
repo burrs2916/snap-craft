@@ -91,7 +91,7 @@ pub fn run() {
     // 任何时候看不到这一行、或 commit hash 不对，立刻知道装的是旧版。
     clog!(
         "boot",
-        "build=pending-2026-07-22 ocr=优先中文引擎+14条DIAG链路+let→$修复+PS5.1静态扫描+MaxDim10000+unsharp动态+OCR误识词典+MaxImageDim补强 commit=pending"
+        "build=2026-07-22-layer23 ocr=删除11条OCR误识词典+Layer1-A Otsu二值化+Layer2翻车自检+Layer3原图兜底重识别(不修字面治本) commit=pending"
     );
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
