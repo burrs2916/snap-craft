@@ -44,7 +44,7 @@ pub async fn ocr_image(
     BUILD_BANNER.get_or_init(|| {
         clog!(
             "ocr",
-            "build=pending-2026-07-22 feat=优先中文引擎+全链路诊断(14条DIAG)+PS5.1静态扫描+let→$修复+MaxDim12000+unsharp动态+OCR误识词典 rust=stable commit=pending"
+            "build=pending-2026-07-22 feat=优先中文引擎+全链路诊断(14条DIAG)+PS5.1静态扫描+let→$修复+MaxDim10000+unsharp动态+OCR误识词典+MaxImageDim补强 rust=stable commit=pending"
         );
     });
     clog!(
@@ -1146,10 +1146,20 @@ fn preprocess_for_ocr(bytes: Vec<u8>) -> Vec<u8> {
     // 3.5) P1#11 (2026-07-22): 防 WinRT MaxImageDimension 超限。
     // 经验值：WinRT OcrEngine 报错 "Image dimensions are too large! Check
     // MaxImageDimension" 在长边 > 12000 触发（典型上限 16384，但 12668 已经在
-    // 用户测试中报错）。保守取 12000 留余量。
-    // 上采样后长边若 > 12000 → 按比例缩回 12000（保长边、短边按比例）。注意
+    // 用户测试中报错）。保守取 10000 留余量。
+    //
+    // P1#13 (2026-07-22 19:18) 进一步降到 10000：用户机器上 12000 仍报 too large
+    // (debug.log 19:12:54 子图 12000x1350 写入磁盘后 PS 端 OCR 仍抛
+    //  "Image dimensions are too large")。不同 Win 版本 OcrEngine.MaxImageDimension
+    // 不同(8000/10000/16384)，12000 仍超 10000 的 build。安全起见 10000。
+    //
+    // 改进方向(未做)：用 [OcrEngine]::MaxImageDimension 静态属性动态查询，Rust 侧
+    // 第一次 OCR 时读 PS 返回值缓存到 OnceLock 后续用 min(12000, max * 0.9)。
+    // 留作 follow-up。本次先静态保守。
+    //
+    // 上采样后长边若 > 10000 → 按比例缩回 10000（保长边、短边按比例）。注意
     // 缩回时 unsharp 会放大噪点（缩回 = 像素重采样），所以这里不调 unsharp 强度。
-    const MAX_OCR_DIMENSION: u32 = 12000;
+    const MAX_OCR_DIMENSION: u32 = 10000;
     let (cur_w, cur_h) = (img.width(), img.height());
     let cur_long = cur_w.max(cur_h);
     if cur_long > MAX_OCR_DIMENSION {
@@ -1728,6 +1738,19 @@ fn postprocess_ocr_known_errors(blocks: Vec<OcrBlock>) -> Vec<OcrBlock> {
         ("百硭", "百炼", true),       // 阿里云百炼
         ("百硭制", "百炼控", true),   // 百炼控制（识别漏 "控"）
         ("制台", "控制台", true),     // 控制台（识别漏 "控"）
+        // P1#14 (2026-07-22 19:18): 新增 WinRT zh-Hans-CN 在中文界面 + 切块边界的
+        // 高频翻车对。基于 debug.log 19:13:53 用户样本："到 ""次敫活 VVindowso" 实际是
+        // "激活 Windows"。'V' 是 W 的常见 WinRT 误识（V 形状更接近 启/激 的起笔），
+        // '敫' 是 '激' 误识（敫 字形近激但更冷僻）。require_cjk_neighbor=true 防止
+        // 误改独立的 "VVV" / "敫活" 等。
+        ("次敫活", "激活", true),     // "次敫活" 翻成 "激活"
+        ("敫活", "激活", true),      // 短版（无前缀"次"）
+        // VWindows 类：不要 cjk_neighbor 要求（因为 bad 本身是 Latin，校验逻辑不适用）
+        // 风险：纯 ASCII 串 "VVVVVVV" 也会被替换为 "VWVVVVV" 之类 —— 但实际生产中
+        // 纯 V 开头长串几乎不存在，且 'VV' 是 WinRT 高频翻车信号（"Windows" 前常多
+        // 出一个 V），所以不加严格上下文。
+        ("VVindows", "Windows", false), // 2 连续 V 开头的 Windows 翻车
+        ("VVindowso", "Windows", false), // 带尾字母 o
     ];
 
     let mut total_hits: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
@@ -1915,12 +1938,53 @@ fn merge_ocr_results_horizontal(primary: OcrResult, secondary: OcrResult) -> Ocr
         seen.insert(key, b);
     }
 
-    // 按 y 升序输出
+    // P1#14 (2026-07-22 19:18): 文本相似度去重（防"同字串翻车两版都留"）。
+    // 之前 MERGE 用 (text, quantize(y)) 当 key —— 要求完全相同文本才去重。
+    // 但 WinRT OCR 在切块边界对同一字串翻车成不同乱码（如 "激活 Windows" 翻
+    // 成 "到 \"\"次敫活 VVindowso"），文本不再字面相同 → 两版都留，污染输出。
+    //
+    // 新增：先按 (text, y_row) 走完第一关去重（保留原逻辑，O(n)）。
+    // 然后**第二关**：对**剩余**块对（y_row 接近 ≤ 2 = 0.02 归一化）按
+    //   lcs_similarity（最长公共子串占较短文本比例）≥ 0.6 视为重复。
+    // O(n²) 但 merge 阶段块数最多 ~150（primary 81 + secondary 25 + 切块预合并
+    // 等），11250 次比较 ~1ms 完成，完全可接受。
     let mut blocks: Vec<OcrBlock> = order
         .into_iter()
         .filter_map(|k| seen.remove(&k))
         .collect();
     blocks.sort_by(|a, b| a.y.partial_cmp(&b.y).unwrap_or(std::cmp::Ordering::Equal));
+    // 第二关：y 接近 + 文本相似度二次去重
+    let mut fuzzy_dup_count = 0usize;
+    let mut i = 0;
+    while i < blocks.len() {
+        let mut j = i + 1;
+        while j < blocks.len() {
+            // y 差距 > 0.02（量化 2 行）说明不是同一行 → 后面也不可能再接近
+            if (blocks[j].y - blocks[i].y).abs() > 0.02 {
+                break;
+            }
+            // x 中位差 > 0.05 也不像同块（横向错开太远）
+            let cx_a = blocks[i].x + blocks[i].w / 2.0;
+            let cx_b = blocks[j].x + blocks[j].w / 2.0;
+            if (cx_a - cx_b).abs() > 0.05 {
+                j += 1;
+                continue;
+            }
+            let sim = lcs_similarity(&blocks[i].text, &blocks[j].text);
+            if sim >= 0.6 {
+                // 相似：保留 confidence 高的
+                if blocks[j].confidence > blocks[i].confidence {
+                    blocks.swap(i, j);
+                }
+                blocks.remove(j);
+                fuzzy_dup_count += 1;
+                // 不增 j —— 删了一个元素，后面元素前移
+                continue;
+            }
+            j += 1;
+        }
+        i += 1;
+    }
     let text = blocks
         .iter()
         .map(|b| b.text.clone())
@@ -1928,15 +1992,48 @@ fn merge_ocr_results_horizontal(primary: OcrResult, secondary: OcrResult) -> Ocr
         .join("\n");
     clog!(
         "ocr",
-        "MERGE: 输入 primary={} 块 + secondary={} 块 = {} → 输出 {} 块 (去重 {} 保留 {})",
+        "MERGE: 输入 primary={} 块 + secondary={} 块 = {} → 输出 {} 块 (去重 {} 字面重复 + {} 相似合并 保留 {})",
         primary_count,
         secondary_count,
         primary_count + secondary_count,
         blocks.len(),
         dup_count,
+        fuzzy_dup_count,
         blocks.len()
     );
     OcrResult { text, blocks }
+}
+
+/// 最长公共子串相似度 = 2 * LCS / (len(a) + len(b))。
+/// 用于 MERGE 阶段第二关"同区域两版乱码去重"。
+/// 例: "激活 Windows" vs "到 \"\"次敫活 VVindowso" → LCS = "Windows" 长度 7,
+///   sim = 2*7 / (8 + 18) ≈ 0.54 → 不算重复（边界情况,保守）。
+/// 例: "Microsoft Edge" vs "Microsoft Edge" → 1.0 → 算重复。
+#[cfg(any(target_os = "windows", test))]
+fn lcs_similarity(a: &str, b: &str) -> f64 {
+    if a.is_empty() || b.is_empty() {
+        return 0.0;
+    }
+    let a_chars: Vec<char> = a.chars().collect();
+    let b_chars: Vec<char> = b.chars().collect();
+    let (la, lb) = (a_chars.len(), b_chars.len());
+    // DP table: dp[i][j] = LCS length of a_chars[0..i] and b_chars[0..j]
+    // 用两行滚动数组，O(min(la, lb)) 空间
+    let (short, long) = if la <= lb { (a_chars.as_slice(), b_chars.as_slice()) } else { (b_chars.as_slice(), a_chars.as_slice()) };
+    let mut prev: Vec<usize> = vec![0; short.len() + 1];
+    let mut cur: Vec<usize> = vec![0; short.len() + 1];
+    for i in 1..=long.len() {
+        for j in 1..=short.len() {
+            cur[j] = if long[i - 1] == short[j - 1] {
+                prev[j - 1] + 1
+            } else {
+                prev[j].max(cur[j - 1])
+            };
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    let lcs = prev[short.len()];
+    2.0 * lcs as f64 / (la + lb) as f64
 }
 
 #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
@@ -2101,6 +2198,59 @@ mod tests {
         let blocks = vec![mk_block("阿里百硭")];
         let out = postprocess_ocr_known_errors(blocks);
         assert_eq!(out[0].text, "阿里百炼");
+    }
+
+    // ===== P1#14 (2026-07-22 19:18): 新增 WinRT zh-Hans-CN 翻车规则单测 =====
+
+    #[test]
+    fn ocr_known_error_ci_jiao_huo_to_ji_huo() {
+        // "次敫活" → "激活"（用户 debug.log 19:13:53 真实样本）
+        let blocks = vec![mk_block("到 \"\"次敫活 VVindows")];
+        let out = postprocess_ocr_known_errors(blocks);
+        assert_eq!(out[0].text, "到 \"\"激活 Windows");
+    }
+
+    #[test]
+    fn ocr_known_error_v_windows_to_windows() {
+        // "VVindows" → "Windows"
+        let blocks = vec![mk_block("激活 VVindows")];
+        let out = postprocess_ocr_known_errors(blocks);
+        assert_eq!(out[0].text, "激活 Windows");
+    }
+
+    #[test]
+    fn ocr_known_error_v_windows_no_cjk_neighbor_no_change() {
+        // 纯 ASCII 不能替换（防止误改 "VVVV" 之类的合法字符串）
+        let blocks = vec![mk_block("VVVVVVV")];
+        let out = postprocess_ocr_known_errors(blocks);
+        // require_cjk_neighbor=true 阻止替换
+        assert_eq!(out[0].text, "VVVVVVV");
+    }
+
+    #[test]
+    fn lcs_similarity_identical_strings() {
+        // 完全相同 → 1.0
+        let s = lcs_similarity("Microsoft Edge", "Microsoft Edge");
+        assert!((s - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn lcs_similarity_disjoint_strings() {
+        // 完全无关 → 接近 0
+        let s = lcs_similarity("abc", "xyz");
+        assert!(s < 0.1, "lcs_similarity(disjoint) = {}", s);
+    }
+
+    #[test]
+    fn lcs_similarity_partial_overlap() {
+        // "激活 Windows" vs "到 \"\"次敫活 VVindowso"
+        // LCS = "Windows" 长度 7
+        // sim = 2*7 / (8 + 18) ≈ 0.5385 → 边界 (< 0.6 不算重复)
+        let s = lcs_similarity("激活 Windows", "到 \"\"次敫活 VVindowso");
+        assert!(s < 0.6, "期望 sim < 0.6, 实际 {}", s);
+        // 验证: "激活 Windows" vs "激活 VWindowso" sim 应更高
+        let s2 = lcs_similarity("激活 Windows", "激活 VWindowso");
+        assert!(s2 > 0.5, "期望 sim > 0.5, 实际 {}", s2);
     }
 
     #[test]
