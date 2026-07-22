@@ -1260,7 +1260,7 @@ fn reassemble_words_to_lines(words: Vec<WinWord>) -> Vec<OcrBlock> {
         }
         let mut blocks: Vec<OcrBlock> = Vec::with_capacity(groups.len());
         for (_, mut group) in groups {
-            group.sort_by(|a, b| a.word_index.cmp(&b.word_index));
+            group.sort_by_key(|a| a.word_index);
             // 行 box = 各 word box 的 union
             let mut min_x = 1.0_f64;
             let mut min_y = 1.0_f64;
@@ -1732,7 +1732,7 @@ fn merge_ocr_results_horizontal(primary: OcrResult, secondary: OcrResult) -> Ocr
     let mut order: Vec<(String, i64)> = Vec::new();
     let mut dup_count = 0usize;
 
-    for b in primary.blocks.into_iter().chain(secondary.blocks.into_iter()) {
+    for b in primary.blocks.into_iter().chain(secondary.blocks) {
         let text_key = b.text.trim().to_string();
         if text_key.is_empty() {
             continue;
