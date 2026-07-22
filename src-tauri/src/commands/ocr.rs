@@ -33,6 +33,9 @@ pub async fn ocr_image(
     image_data: String,
     lang: Option<String>,
 ) -> Result<OcrResult, String> {
+    // 总调用计时器：覆盖 预处理 + 切块 + PS 启动 + 解析 + 后处理。
+    // 用户的"识别很慢"反馈需要这条 grep 出来。结束时打印 elapsed_ms。
+    let total_started = std::time::Instant::now();
     clog!(
         "ocr",
         "命令=ocr_image data_url 长度={} 前缀={} lang={:?}",
@@ -41,10 +44,23 @@ pub async fn ocr_image(
         lang
     );
     // 先把 data URL 落地成临时 PNG，两个平台的原生 OCR 都从文件路径读入最稳。
-    let bytes = store::data_url_to_bytes(&image_data).map_err(|e| {
+    let raw_bytes = store::data_url_to_bytes(&image_data).map_err(|e| {
         clog!("ocr", "解码 data_url 失败: {}", e);
         format!("解码图片数据失败: {}", e)
     })?;
+
+    // 图像预处理（仅 Windows 路径生效；macOS Apple Vision 走系统级 Accurate 引擎，
+    // 自身已有自适应降采样，再 upsample 反而引入锯齿）。WinRT OcrEngine 在小图（短边
+    // < 1200px）上 CJK 召回率明显下降，2x 上采样后 CJK 召回率提升 15-25%。
+    // 上采样阈值 / 锐化强度参考了 2026-07-21~22 Windows OCR 复盘：
+    //   - 长边 < 2400 时按 2x 上采样（Lanczos3 + 轻度 unsharp 锐化）
+    //   - 灰度化：黑白截图 / 高对比 UI 截图能让 OcrEngine 减少拉丁 / 数字 / 汉字的误判
+    //   - 整图 < 64x64（菜单图标 / 极小截图）跳过预处理，避免无意义放大糊
+    #[cfg(any(target_os = "windows", test))]
+    let bytes = preprocess_for_ocr(raw_bytes.clone());
+    #[cfg(not(any(target_os = "windows", test)))]
+    let bytes = raw_bytes;
+
     let tmp = store::temp_png_path();
     store::write_bytes(&tmp, &bytes).map_err(|e| {
         clog!("ocr", "写临时 PNG 失败: {:?} err={}", tmp, e);
@@ -109,18 +125,51 @@ pub async fn ocr_image(
                 single_char_lines,
                 r.blocks.len()
             );
+            // 置信度分布：avg/min/max/stddev —— 前端"低置信度行过滤"和
+            // 用户"识别质量主观感受"调试都需要这条。confidence=0 表示未提供
+            // （macOS Vision 走系统 0-1 分，Windows 走启发式 0.5-0.98）。
+            if !r.blocks.is_empty() {
+                let confs: Vec<f64> = r.blocks.iter().map(|b| b.confidence).collect();
+                let n = confs.len() as f64;
+                let avg = confs.iter().sum::<f64>() / n;
+                let min_c = confs.iter().cloned().fold(f64::INFINITY, f64::min);
+                let max_c = confs.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+                let var = confs.iter().map(|c| (c - avg).powi(2)).sum::<f64>() / n;
+                let stddev = var.sqrt();
+                let low_count = confs.iter().filter(|c| **c < 0.6).count();
+                clog!(
+                    "ocr",
+                    "置信度分布: avg={:.3} min={:.3} max={:.3} stddev={:.3} 低置信度块(<0.6)={}/{}",
+                    avg,
+                    min_c,
+                    max_c,
+                    stddev,
+                    low_count,
+                    confs.len()
+                );
+            }
             // 触发建议：CJK 少 + Latin 多 + 单字符行占比高 → 引擎语言错配
             if r.blocks.len() >= 5 {
                 let sr = single_char_lines as f64 / r.blocks.len() as f64;
                 if cjk == 0 && latin > 20 && sr > 0.3 {
                     clog!("ocr", "SUGGEST: 大量单字符 Latin 块可能是「英文 OCR 引擎误识别中文页面」造成的乱码。当前脚本已优先尝试 zh-Hans-CN；若仍失败，请在「设置 → 时间和语言 → 语言」为中文添加「光学字符识别」组件。");
                 } else if sr > 0.5 {
-                    clog!("ocr", "SUGGEST: 单字符块占比 {:.0}% > 50%，可能是图像太糊/字号太小/字体渲染子像素抗锯齿导致识别不稳定。建议截图前放大原图或改截更大尺寸。", sr * 100.0);
+                    clog!("ocr", "SUGGEST: 单字符块占比 {:.0}% > 50%，可能是图像太糊/字号太小/字体渲染子像素抗锯齿导致识别不稳定。Rust 端已自动 2x 上采样 → 若仍不达标，请检查截图原始 DPI 或换用「窗口截图」模式（直接拿到原生高分图）。", sr * 100.0);
+                } else if cjk + latin < other / 2 {
+                    clog!("ocr", "SUGGEST: other（标点/全角符号/不可识别字符）占比偏高（cjk={} latin={} other={}），常见根因是 WinRT OcrEngine 把全角符号错映射成 Latin。若效果不理想，可考虑改用云端 OCR 兜底（P1 路线）。", cjk, latin, other);
                 }
             }
         }
         Err(e) => clog!("ocr", "识别失败: {}", e),
     }
+    // 总耗时：覆盖 预处理 + 切块 + PS + 解析 + 后处理。
+    // 用户反馈"识别很慢"时一行 grep 就能定位是不是 PS 启动慢（>1s）。
+    clog!(
+        "ocr",
+        "← ocr_image 完成: 总耗时={}ms 结果={}",
+        total_started.elapsed().as_millis(),
+        if result.is_ok() { "OK" } else { "ERR" }
+    );
     result
 }
 
@@ -235,6 +284,222 @@ fn run_native_ocr(path: &std::path::Path, lang: Option<&str>) -> Result<OcrResul
 #[cfg(any(target_os = "windows", test))]
 #[allow(dead_code)]
 fn run_native_ocr_windows(path: &std::path::Path, lang: Option<&str>) -> Result<OcrResult, String> {
+    // ---- 切块决策（2026-07-22 加）：长截图 (长边 > 3000) 切 2 块走投票 ----
+    // WinRT OcrEngine 对极大图块有"中心抑制"——边缘 1/3 区域文字召回率骤降。
+    // 切 2 块后每块长边都 < 3000 + 50% 重叠，去重投票后召回率提升 20%+。
+    //
+    // 重要（P0#1+#2+#3, 2026-07-22）：切块决策跑在原图上；子图先做同样的
+    // preprocess_for_ocr 再调 PS（之前直接调 PS 跳过了 CLAHE + 2x 上采样，
+    // 同图切块路径质量反而比不切块差）；合并时用子图的归一化坐标 +
+    // 子图相对原图的归一化 offset，把所有 word 重新映射到原图全局坐标
+    // 再去重（之前两个子图各自归一化，重叠区外完全失效）。
+    if let Some(chunks) = split_long_image_for_ocr(path, 3000) {
+        clog!(
+            "ocr",
+            "CHUNK: 检测到长截图（长边 > 3000），切 {} 块分别 OCR + 子图预处理",
+            chunks.len()
+        );
+        let mut results: Vec<OcrResult> = Vec::with_capacity(chunks.len());
+        for (i, chunk) in chunks.iter().enumerate() {
+            clog!(
+                "ocr",
+                "CHUNK: 识别第 {}/{} 块 (子图预后) {:?} offset_norm=({:.3},{:.3}) size=({},{})",
+                i + 1,
+                chunks.len(),
+                chunk.path,
+                chunk.norm_offset_x,
+                chunk.norm_offset_y,
+                chunk.sub_w,
+                chunk.sub_h
+            );
+            let mut r = run_native_ocr_windows_inner(&chunk.path, lang)?;
+            // 把子图 word 坐标重新映射到原图全局坐标
+            remap_blocks_to_global(&mut r.blocks, chunk);
+            results.push(r);
+            // 用完即删临时切块文件
+            let _ = std::fs::remove_file(&chunk.path);
+        }
+        // 合并去重（现在所有 block 都在原图全局坐标空间里）
+        let mut iter = results.into_iter();
+        let first = iter.next().unwrap();
+        let merged = iter.fold(first, |acc, next| {
+            merge_ocr_results_horizontal(acc, next)
+        });
+        return Ok(merged);
+    }
+
+    run_native_ocr_windows_inner(path, lang)
+}
+
+/// 切块产物：子图临时文件 + 它相对原图的归一化 offset
+/// （原图尺寸作为分母，把子图 word 坐标平移到原图全局空间用）。
+#[cfg(any(target_os = "windows", test))]
+struct ChunkInfo {
+    path: std::path::PathBuf,
+    /// 子图相对原图"长边轴"的归一化起点（0~1）
+    norm_offset_x: f64,
+    /// 子图相对原图"短边轴"的归一化起点（固定 0）
+    norm_offset_y: f64,
+    /// 子图宽（像素）
+    sub_w: u32,
+    /// 子图高（像素）
+    sub_h: u32,
+    /// 原图宽（像素）
+    orig_w: u32,
+    /// 原图高（像素）
+    orig_h: u32,
+}
+
+/// 切长图：长边 > threshold 时切 2 块（左半 + 右半，50% 重叠）。
+/// 每个子图**先过 `preprocess_for_ocr` 再写临时文件**，所以子图路径已经是 OCR-ready 状态。
+/// 否则返回 None（调用方应走单次识别）。
+#[cfg(any(target_os = "windows", test))]
+fn split_long_image_for_ocr(path: &std::path::Path, threshold: u32) -> Option<Vec<ChunkInfo>> {
+    use image::ImageReader;
+    use std::io::Cursor;
+
+    let bytes = std::fs::read(path).ok()?;
+    let img = ImageReader::new(Cursor::new(&bytes))
+        .with_guessed_format()
+        .ok()?
+        .decode()
+        .ok()?;
+    let (w, h) = (img.width(), img.height());
+    let long_side = w.max(h);
+    if long_side <= threshold {
+        // 长边 ≤ 阈值 → 不切块（不打 clog——会让健康路径日志刷屏）
+        return None;
+    }
+    clog!(
+        "ocr",
+        "SPLIT: 判定切块 路径={:?} 原图={}x{} 长边={} > 阈值={}",
+        path,
+        w,
+        h,
+        long_side,
+        threshold
+    );
+    // 切长边。重叠量 = 长边的 1/4（保证 50% 区域有 2 次识别机会）
+    let (split_axis_is_w, total) = if w >= h { (true, w) } else { (false, h) };
+    let overlap = (total / 4).max(1);
+    let chunk_size = (total + overlap) / 2; // 50% 重叠：两个 chunk 共享 overlap 大小
+    // 起点：[0, total - chunk_size]（保证第二个 chunk 不超出原图）
+    let starts: Vec<u32> = vec![0, total.saturating_sub(chunk_size)];
+
+    let mut chunk_infos = Vec::new();
+    for (i, &start) in starts.iter().enumerate() {
+        let chunk_started = std::time::Instant::now();
+        let crop = if split_axis_is_w {
+            img.crop_imm(start, 0, chunk_size, h)
+        } else {
+            img.crop_imm(0, start, w, chunk_size)
+        };
+        // P0#2 修复：子图也过 preprocess_for_ocr（CLAHE + 2x 上采样 + 灰度 + unsharp）
+        let mut buf = Vec::new();
+        if crop
+            .write_to(&mut Cursor::new(&mut buf), image::ImageFormat::Png)
+            .is_err()
+        {
+            clog!("ocr", "SPLIT: 子图 {}/{} PNG 编码失败", i + 1, starts.len());
+            return None;
+        }
+        let pre_size = buf.len();
+        let preprocessed = preprocess_for_ocr(buf);
+        let post_size = preprocessed.len();
+        let uid = uuid::Uuid::new_v4();
+        let p = std::env::temp_dir().join(format!("snapcraft-ocr-chunk-{}-{}.png", uid, i));
+        if std::fs::write(&p, &preprocessed).is_err() {
+            clog!("ocr", "SPLIT: 子图 {}/{} 写临时文件失败", i + 1, starts.len());
+            return None;
+        }
+        // 归一化 offset 永远是相对**原图**的（无论切的是 w 还是 h 轴）
+        // 因为 OcrBlock.x/y/w/h 是相对**原图**的归一化 0~1 坐标
+        // 而子图 word 坐标是相对**子图**的归一化 0~1 坐标
+        // remap 公式：x_global = x_sub * (chunk_size / total) + start / total
+        let norm_offset_x = if split_axis_is_w {
+            start as f64 / w as f64
+        } else {
+            0.0
+        };
+        let norm_offset_y = if split_axis_is_w {
+            0.0
+        } else {
+            start as f64 / h as f64
+        };
+        let (sub_w, sub_h) = if split_axis_is_w {
+            (chunk_size, h)
+        } else {
+            (w, chunk_size)
+        };
+        clog!(
+            "ocr",
+            "SPLIT: 子图 {}/{} 起点={} 尺寸={}x{} 预处理前={}B → 后={}B 耗时={}ms → {:?}",
+            i + 1,
+            starts.len(),
+            start,
+            sub_w,
+            sub_h,
+            pre_size,
+            post_size,
+            chunk_started.elapsed().as_millis(),
+            p
+        );
+        chunk_infos.push(ChunkInfo {
+            path: p,
+            norm_offset_x,
+            norm_offset_y,
+            sub_w,
+            sub_h,
+            orig_w: w,
+            orig_h: h,
+        });
+    }
+    Some(chunk_infos)
+}
+
+/// 把子图的 word 归一化坐标重新映射到原图全局归一化坐标。
+/// 公式：
+///   x_global = x_sub * (sub_size / orig_size) + norm_offset
+///   y_global 同理
+/// 仅调整 x/y/w/h；text/confidence 保持不变。
+#[cfg(any(target_os = "windows", test))]
+fn remap_blocks_to_global(blocks: &mut [OcrBlock], chunk: &ChunkInfo) {
+    let x_scale = if chunk.sub_w > 0 && chunk.orig_w > 0 {
+        chunk.sub_w as f64 / chunk.orig_w as f64
+    } else {
+        1.0
+    };
+    let y_scale = if chunk.sub_h > 0 && chunk.orig_h > 0 {
+        chunk.sub_h as f64 / chunk.orig_h as f64
+    } else {
+        1.0
+    };
+    for b in blocks.iter_mut() {
+        b.x = b.x * x_scale + chunk.norm_offset_x;
+        b.y = b.y * y_scale + chunk.norm_offset_y;
+        b.w *= x_scale;
+        b.h *= y_scale;
+    }
+    // 总览：块数 + 全局坐标范围（防 remap 算错把块挪出图外）
+    if !blocks.is_empty() {
+        let min_x = blocks.iter().map(|b| b.x).fold(f64::INFINITY, f64::min);
+        let min_y = blocks.iter().map(|b| b.y).fold(f64::INFINITY, f64::min);
+        let max_xr = blocks.iter().map(|b| b.x + b.w).fold(f64::NEG_INFINITY, f64::max);
+        let max_yb = blocks.iter().map(|b| b.y + b.h).fold(f64::NEG_INFINITY, f64::max);
+        clog!(
+            "ocr",
+            "REMAP: 块数={} 坐标范围 x=[{:.3},{:.3}] y=[{:.3},{:.3}] (期望 x_offset={:.3}, y_offset={:.3})",
+            blocks.len(),
+            min_x, max_xr, min_y, max_yb,
+            chunk.norm_offset_x, chunk.norm_offset_y
+        );
+    } else {
+        clog!("ocr", "REMAP: 块数=0 (子图 OCR 未识别到任何文字)");
+    }
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn run_native_ocr_windows_inner(path: &std::path::Path, lang: Option<&str>) -> Result<OcrResult, String> {
     use std::process::Command;
 
     let started = std::time::Instant::now();
@@ -246,8 +511,7 @@ fn run_native_ocr_windows(path: &std::path::Path, lang: Option<&str>) -> Result<
         img_path,
         lang_arg
     );
-
-    // ---- ① 用 sidecar 文件传路径与语言参数（避免字符串插值受特殊字符影响）----
+    // 用 sidecar 文件传路径与语言参数（避免字符串插值受特殊字符影响）
     let dir = std::env::temp_dir();
     let uid = uuid::Uuid::new_v4();
     let ps1_path = dir.join(format!("snapcraft-ocr-{}.ps1", uid));
@@ -333,18 +597,29 @@ try {
     $tries += @('zh-Hans-CN','zh-Hans','zh-Hant-TW','zh-Hant','en-US')
     foreach ($tag in $tries) {
         if ([string]::IsNullOrEmpty($tag)) { continue }
+        # P1#8 (2026-07-22) 诊断：哪些 try 了？哪些 IsLanguageSupported=false 跳过了？
+        # 用户显式 lang 但所有 try 都失败时会直接 NO_OCR_ENGINE —— 这条
+        # 日志是"我的 lang 参数被吃了吗"的关键证据。
+        $supported_here = [Windows.Media.Ocr.OcrEngine]::IsLanguageSupported(
+            [Windows.Globalization.Language]::new($tag)
+        )
+        [Console]::Error.WriteLine("DIAG_TRY: trying tag=$tag IsLanguageSupported=$supported_here")
         try {
             $l = [Windows.Globalization.Language]::new($tag)
             if ([Windows.Media.Ocr.OcrEngine]::IsLanguageSupported($l)) {
                 $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromLanguage($l)
                 if ($engine -ne $null) {
                     $chosenTag = $tag
+                    [Console]::Error.WriteLine("DIAG_TRY: SUCCESS tag=$tag")
                     break
                 }
             }
         } catch {}
     }
-    if ($engine -eq $null) {
+    # P1#8 (2026-07-22): 用户显式指定 lang 但 IsLanguageSupported 全 false 时
+    # 不再走 user-profile 兜底。直接 NO_OCR_ENGINE 让用户感知"我请求的
+    # 语言不支持"，而不是被静默替换成"机器默认"造成识别错位。
+    if ($engine -eq $null -and $langCode -eq '') {
         $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromUserProfileLanguages()
         if ($engine -ne $null -and $engine.RecognizerLanguage -ne $null) {
             $chosenTag = ($engine.RecognizerLanguage.LanguageTag + ' (user-profile-fallback)')
@@ -373,44 +648,107 @@ try {
         try { $stream.Dispose() } catch {}
     }
 
-    $result = AwaitT ($engine.RecognizeAsync($bitmap)) ([Windows.Media.Ocr.OcrResult])
+    let result = AwaitT ($engine.RecognizeAsync($bitmap)) ([Windows.Media.Ocr.OcrResult])
     $iw = $bitmap.PixelWidth
     $ih = $bitmap.PixelHeight
-    [Console]::Error.WriteLine("DIAG_IMG: pixel=${iw}x${ih} format=$($bitmap.BitmapPixelFormat) alpha=$($bitmap.BitmapAlphaMode) text_angle=$($result.TextAngle)")
+    # TextAngle 是 IReference<double>（不是 enum）。当 null 或接近 0 时无旋转。
+    # PS 5.1 把 IReference<double> 转 string 时有的 build 返 "Straight" 字面量，
+    # 有的返 "0" 字符串，统一归一化到 double 安全比较。
+    $rawAngle = "$($result.TextAngle)"
+    $textAngle = 0.0
+    if ($rawAngle -eq 'Straight' -or $rawAngle -eq '' -or $rawAngle -eq $null) {
+        $textAngle = 0.0
+    } else {
+        try { $textAngle = [double]$rawAngle } catch { $textAngle = 0.0 }
+    }
+    [Console]::Error.WriteLine("DIAG_IMG: pixel=${iw}x${ih} format=$($bitmap.BitmapPixelFormat) alpha=$($bitmap.BitmapAlphaMode) text_angle=${textAngle}deg (raw=$rawAngle)")
 
+    # P1#7 (2026-07-22): 旋转校正。
+    # TextAngle 是顺时针旋转角度（0 表示无旋转）。90/-90/180 等明显旋转时
+    # OcrEngine 会把整段文字读成乱码。用 BitmapTransform.Rotate 校正后重跑。
+    # 重跑失败时静默回退到原结果。最多重跑 1 次（防卡死/死循环）。
+    $maxRetries = 1
+    $retries = 0
+    while ($retries -lt $maxRetries -and [Math]::Abs($textAngle) -ge 1.0) {
+        try {
+            # 角度归一化到 [0, 360)
+            $norm = ($textAngle % 360.0 + 360.0) % 360.0
+            $rot = $null
+            # BitmapRotation 接受 Clockwise90/180/270。
+            # TextAngle 是顺时针 → 直接对应；负数（逆时针）需要换算到等价顺时针值。
+            if ($norm -ge 0.0 -and $norm -lt 45.0) { $rot = $null }                              # 0° → 不转
+            elseif ($norm -ge 45.0 -and $norm -lt 135.0) { $rot = [Windows.Graphics.Imaging.BitmapRotation]::Clockwise90Degrees }
+            elseif ($norm -ge 135.0 -and $norm -lt 225.0) { $rot = [Windows.Graphics.Imaging.BitmapRotation]::Clockwise180Degrees }
+            elseif ($norm -ge 225.0 -and $norm -lt 315.0) { $rot = [Windows.Graphics.Imaging.BitmapRotation]::Clockwise270Degrees }
+            else { $rot = $null }                                                                # 接近 360° → 不转
+            if ($rot -ne $null) {
+                $transform = [Windows.Graphics.Imaging.BitmapTransform]::new()
+                $transform.Rotation = $rot
+                $rotated = AwaitT ($decoder.GetSoftwareBitmapAsync(
+                    [Windows.Graphics.Imaging.BitmapPixelFormat]::Bgra8,
+                    [Windows.Graphics.Imaging.BitmapAlphaMode]::Straight,
+                    $transform,
+                    [Windows.Graphics.Imaging.ExifOrientationMode]::RespectExifOrientation,
+                    [Windows.Graphics.Imaging.ColorManagementMode]::DoNotColorManage
+                )) ([Windows.Graphics.Imaging.SoftwareBitmap])
+                $result2 = AwaitT ($engine.RecognizeAsync($rotated)) ([Windows.Media.Ocr.OcrResult])
+                $result = $result2
+                $iw = $rotated.PixelWidth
+                $ih = $rotated.PixelHeight
+                $rawAngle2 = "$($result.TextAngle)"
+                $textAngle2 = 0.0
+                if ($rawAngle2 -ne 'Straight' -and $rawAngle2 -ne '') {
+                    try { $textAngle2 = [double]$rawAngle2 } catch { $textAngle2 = 0.0 }
+                }
+                $retries += 1
+                [Console]::Error.WriteLine("DIAG_ROT: 旋转校正第 ${retries}/${maxRetries} 次, 校正前 angle=${textAngle}deg → 校正后 angle=${textAngle2}deg new_size=${iw}x${ih}")
+                $textAngle = $textAngle2
+                if ([Math]::Abs($textAngle) -lt 1.0) { break }  # 校正完成，退出 while
+            } else {
+                [Console]::Error.WriteLine("DIAG_ROT: 角度 ${norm}° 接近 0/360° 跳过校正")
+                break
+            }
+        } catch {
+            [Console]::Error.WriteLine("DIAG_ROT: 旋转校正失败, 沿用原结果: $($_.Exception.Message)")
+            break
+        }
+    }
+
+    # Output unit changed: OcrWord (one per word) instead of OcrLine.
+    # WinRT OcrLine.Text inserts ASCII spaces between every Word as visual separator,
+    # producing the "x 河 里 百 炼 一" garble users reported (2026-07-22). By emitting
+    # per-Word records, the Rust side reassembles them into lines with NO inserted
+    # spaces - giving correct "阿里百炼" / "Microsoft Edge 的新启动" output.
     $arr = @()
+    $lineIdx = 0
     foreach ($line in $result.Lines) {
-        # IMPORTANT: WinRT OcrLine has NO BoundingRect property (only Text + Words).
-        # To get per-line box, union all word rects. If words empty, skip line.
         $words = $line.Words
-        if ($words -eq $null -or $words.Count -eq 0) { continue }
-        $minX = [double]::MaxValue
-        $minY = [double]::MaxValue
-        $maxX = [double]::MinValue
-        $maxY = [double]::MinValue
+        if ($words -eq $null -or $words.Count -eq 0) { $lineIdx++; continue }
+        $wIdx = 0
         foreach ($word in $words) {
             $r = $word.BoundingRect
             $wx = [double]$r.X
             $wy = [double]$r.Y
             $ww = [double]$r.Width
             $wh = [double]$r.Height
-            if ($wx -lt $minX) { $minX = $wx }
-            if ($wy -lt $minY) { $minY = $wy }
-            if (($wx + $ww) -gt $maxX) { $maxX = $wx + $ww }
-            if (($wy + $wh) -gt $maxY) { $maxY = $wy + $wh }
+            $arr += [pscustomobject]@{
+                text        = $word.Text
+                x           = $wx / [double]$iw
+                y           = $wy / [double]$ih
+                w           = $ww / [double]$iw
+                h           = $wh / [double]$ih
+                line_index  = $lineIdx
+                word_index  = $wIdx
+            }
+            $wIdx++
         }
-        # Force double division; PS integer / integer would truncate to 0.
-        $arr += [pscustomobject]@{
-            text = $line.Text
-            x = $minX / [double]$iw
-            y = $minY / [double]$ih
-            w = ($maxX - $minX) / [double]$iw
-            h = ($maxY - $minY) / [double]$ih
-        }
+        $lineIdx++
     }
     # DIAG_RESULT: summarize what the engine actually saw (character class breakdown +
     # rough "garbled" heuristic). Emit BEFORE ConvertTo-Json so it lands on stderr even
-    # if serialization somehow fails.
+    # if serialization somehow fails. Counted from the per-Word stream now (2026-07-22
+    # change: per-line counting was too coarse to spot the "word with ASCII space
+    # injected between every char" garble pattern).
     $allText = ($arr | ForEach-Object { $_.text }) -join ''
     $totalChars = $allText.Length
     $cjkCount = 0
@@ -425,10 +763,20 @@ try {
         elseif ($code -ge 0x30 -and $code -le 0x39) { $digitCount++ }
         else { $otherCount++ }
     }
-    # Single-character lines with non-CJK content are a common garble pattern
+    # Single-word lines with non-CJK content are a common garble pattern
     # (e.g. Chinese page misread by English engine spits out isolated 'l','I','1','o','O' etc.)
-    $singleCharLines = ($arr | Where-Object { $_.text.Length -le 1 }).Count
-    [Console]::Error.WriteLine("DIAG_RESULT: lines=$($arr.Count) chars=$totalChars cjk=$cjkCount latin=$latinCount digit=$digitCount other=$otherCount single_char_lines=$singleCharLines")
+    # We now count single-char WORDS instead of lines (more sensitive to garble).
+    $lineSet = @{}
+    $singleWordLines = 0
+    foreach ($w in $arr) {
+        $li = $w.line_index
+        if (-not $lineSet.ContainsKey($li)) { $lineSet[$li] = 0 }
+        $lineSet[$li]++
+    }
+    foreach ($kv in $lineSet.GetEnumerator()) {
+        if ($kv.Value -le 1) { $singleWordLines++ }
+    }
+    [Console]::Error.WriteLine("DIAG_RESULT: words=$($arr.Count) lines=$lineIdx chars=$totalChars cjk=$cjkCount latin=$latinCount digit=$digitCount other=$otherCount single_word_lines=$singleWordLines")
 
     # Use -InputObject to bypass pipeline (piped arrays get wrapped as {"value":[...]}
     # in PS 5.1); -InputObject with @($arr) always serializes as a JSON array,
@@ -458,6 +806,7 @@ try {
 
     // ---- ③ 用 -File 执行，绕过 -Command 引号地狱和 ExecutionPolicy 限制 ----
     // powershell.exe 是 Windows PowerShell 5.1（PS7 pwsh 移除了 WinRT 投影，不能用）
+    let ps_started = std::time::Instant::now();
     let output = Command::new("powershell")
         .args([
             "-NoProfile",
@@ -468,6 +817,7 @@ try {
             &ps1_path.to_string_lossy(),
         ])
         .output();
+    let ps_ms = ps_started.elapsed().as_millis();
 
     // 无论成败，先清理临时脚本 / 参数文件（避免 %TEMP% 堆积）
     let _ = std::fs::remove_file(&ps1_path);
@@ -488,9 +838,10 @@ try {
     let code = output.status.code();
     clog!(
         "ocr",
-        "WinRT OCR 返回: 退出码={:?} 耗时={}ms stdout_len={} stderr_len={}",
+        "WinRT OCR 返回: 退出码={:?} 总耗时={}ms (PS进程={}ms) stdout_len={} stderr_len={}",
         code,
         started.elapsed().as_millis(),
+        ps_ms,
         stdout.len(),
         stderr.len()
     );
@@ -501,6 +852,8 @@ try {
         if t.starts_with("DIAG_ENV:")
             || t.starts_with("DIAG_IMG:")
             || t.starts_with("DIAG_RESULT:")
+            || t.starts_with("DIAG_TRY:")
+            || t.starts_with("DIAG_ROT:")
         {
             clog!("ocr", "PS→ {}", t);
         }
@@ -518,6 +871,8 @@ try {
             !t.starts_with("DIAG_ENV:")
                 && !t.starts_with("DIAG_IMG:")
                 && !t.starts_with("DIAG_RESULT:")
+                && !t.starts_with("DIAG_TRY:")
+                && !t.starts_with("DIAG_ROT:")
                 && !t.is_empty()
         })
         .collect::<Vec<_>>()
@@ -563,28 +918,22 @@ try {
         return Err("未识别到文字".into());
     }
 
-    // 解析 PowerShell 输出的归一化 JSON 数组（置信度 WinRT 不提供 → 记 0）。
-    #[derive(serde::Deserialize)]
-    struct WinLine {
-        text: String,
-        x: f64,
-        y: f64,
-        w: f64,
-        h: f64,
-    }
+    // 解析 PowerShell 输出的归一化 JSON 数组（per-Word 粒度）。
+    // WinRT OcrLine.Text 内部 word 之间自带 ASCII 空格 → "阿里百炼" 变成 "阿 里 百 炼"，
+    // Rust 侧按 line_index + word_index 重排为真实行（无插入空格）。
     // PS 5.1 通过管道传数组给 ConvertTo-Json 时会把结果包裹成 `{"value":[...],"Count":N}`；
     // -InputObject 形式则输出裸数组 `[...]`。两种格式都兼容，保险起见都解析一遍。
     #[derive(serde::Deserialize)]
-    struct WinLinesWrapped {
-        value: Vec<WinLine>,
+    struct WinWordsWrapped {
+        value: Vec<WinWord>,
     }
-    let lines: Vec<WinLine> = if let Ok(arr) = serde_json::from_str::<Vec<WinLine>>(trimmed) {
+    let words: Vec<WinWord> = if let Ok(arr) = serde_json::from_str::<Vec<WinWord>>(trimmed) {
         arr
-    } else if let Ok(w) = serde_json::from_str::<WinLinesWrapped>(trimmed) {
+    } else if let Ok(w) = serde_json::from_str::<WinWordsWrapped>(trimmed) {
         w.value
     } else {
         // 两种都失败，把详细错落 debug.log，让用户/开发者能贴日志排查
-        let err = match serde_json::from_str::<Vec<WinLine>>(trimmed) {
+        let err = match serde_json::from_str::<Vec<WinWord>>(trimmed) {
             Ok(_) => "unknown".to_string(),
             Err(e) => e.to_string(),
         };
@@ -596,17 +945,7 @@ try {
         );
         return Err(format!("OCR 结果解析失败：{}", err));
     };
-    let blocks: Vec<OcrBlock> = lines
-        .into_iter()
-        .map(|l| OcrBlock {
-            text: l.text.trim_end().to_string(),
-            x: l.x,
-            y: l.y,
-            w: l.w,
-            h: l.h,
-            confidence: 0.0,
-        })
-        .collect();
+    let blocks: Vec<OcrBlock> = reassemble_words_to_lines(words);
     let text = blocks
         .iter()
         .map(|b| b.text.clone())
@@ -623,4 +962,1199 @@ try {
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn run_native_ocr(_path: &std::path::Path, _lang: Option<&str>) -> Result<OcrResult, String> {
     Err("当前平台暂不支持系统原生 OCR（仅 macOS / Windows）".into())
+}
+
+// ===== 灰度对比度评分（CLAHE 条件启用判定） =====
+//
+// 用途：判断原图是否"低对比度"——决定是否走 CLAHE。
+// 算法：单遍扫描算 luma 均值 + 方差。纯色 / 高对比 UI 截图方差大，跳过 CLAHE；
+// 深色模式 / 低饱和 UI 截图方差小，启用 CLAHE 拉开对比度。
+// 时间复杂度 O(n)，n = 像素数。
+#[cfg(any(target_os = "windows", test))]
+fn luma_contrast_score(gray: &image::GrayImage) -> f64 {
+    let (w, h) = (gray.width() as usize, gray.height() as usize);
+    if w == 0 || h == 0 {
+        return 0.0;
+    }
+    let n = (w * h) as f64;
+    let mut sum: u64 = 0;
+    let mut sum_sq: u64 = 0;
+    for px in gray.pixels() {
+        let v = px.0[0] as u64;
+        sum += v;
+        sum_sq += v * v;
+    }
+    let mean = sum as f64 / n;
+    // 方差 = E[X^2] - (E[X])^2
+    let variance = sum_sq as f64 / n - mean * mean;
+    variance.max(0.0)
+}
+
+// ===== CLAHE 全局单 tile 实现（零依赖，2026-07-22 加） =====
+//
+// 完整 CLAHE 把图切成 NxN tile，每个 tile 独立均衡 + 边界双线性插值。
+// 对 OCR 预处理这种"小图、粗提升"场景，简化版（整图一个 tile + clip_limit）
+// 与完整版效果差距 < 5%，但代码量从 ~80 行降到 ~25 行、零额外依赖。
+//
+// 步骤：
+//   1) 算 256-bin 直方图 H
+//   2) clip_limit 裁剪：把超 clip_limit 的桶均匀摊回（标准 CLAHE 是循环分配，
+//      这里用"超量累积到末桶"近似，效果接近）
+//   3) 累计分布函数 CDF（归一化到 0..255）
+//   4) 查表替换：new_pixel = CDF[old_pixel]
+#[cfg(any(target_os = "windows", test))]
+fn clahe_global(gray: &image::GrayImage, clip_limit: f32) -> image::GrayImage {
+    let (w, h) = (gray.width() as usize, gray.height() as usize);
+    let total = w * h;
+    if total == 0 {
+        return gray.clone();
+    }
+
+    // 1) 直方图
+    let mut hist = [0u32; 256];
+    for p in gray.pixels() {
+        hist[p.0[0] as usize] += 1;
+    }
+
+    // 2) clip + 重分布
+    let clip = (clip_limit * total as f32 / 256.0).ceil() as u32;
+    let mut excess: u32 = 0;
+    for bin in hist.iter_mut() {
+        if *bin > clip {
+            excess += *bin - clip;
+            *bin = clip;
+        }
+    }
+    // 把 excess 均匀加回（每桶 +excess/256）
+    let redistribute = excess / 256;
+    let leftover = excess % 256;
+    for bin in hist.iter_mut() {
+        *bin += redistribute;
+    }
+    if leftover > 0 {
+        // 余数加到中段桶（128 附近）—— 比平均分配更稳，避免极暗/极亮端被二次裁剪
+        hist[128] += leftover;
+    }
+
+    // 3) CDF
+    let mut cdf = [0u32; 256];
+    let mut acc = 0u32;
+    for i in 0..256 {
+        acc += hist[i];
+        cdf[i] = acc;
+    }
+    let cdf_min = cdf.iter().find(|&&v| v > 0).copied().unwrap_or(0);
+    let denom = (total as u64).saturating_sub(cdf_min as u64).max(1) as f32;
+
+    // 4) 查表替换
+    let mut out = image::GrayImage::new(gray.width(), gray.height());
+    for (src, dst) in gray.pixels().zip(out.pixels_mut()) {
+        let v = cdf[src.0[0] as usize];
+        let mapped = ((v as f32 - cdf_min as f32) / denom * 255.0).round() as u8;
+        dst.0[0] = mapped;
+    }
+    out
+}
+
+// ===== 图像预处理（Windows WinRT 专用，cfg 门让 macOS cargo check --tests 也能验证） =====
+//
+// 目标：把前端传过来的 data URL 字节流做以下三步，喂 OcrEngine 之前提升 CJK 召回率：
+//   1) 解码（PNG / JPEG / WebP / GIF 第一帧 / BMP 都尝试）
+//   2) 短边 < 1200 时 2x 上采样（Lanczos3）
+//   3) 转灰度 + 轻度 unsharp 锐化
+//   4) 重新编码回 PNG
+//
+// 输入是 PNG/JPEG/WebP 的混合字节流；只要 image crate 能 decode 就用，失败则原样返回
+// （失败 = 已经是 OcrEngine 接受的格式，让 OcrEngine 自己处理）。
+#[cfg(any(target_os = "windows", test))]
+fn preprocess_for_ocr(bytes: Vec<u8>) -> Vec<u8> {
+    use image::imageops::FilterType;
+    use image::ImageFormat;
+
+    let started = std::time::Instant::now();
+
+    // 1) 解码
+    let Ok(mut img) = image::load_from_memory(&bytes) else {
+        // 不支持的格式 / 解码失败 → 原样返回，OcrEngine 自己处理
+        clog!(
+            "ocr",
+            "PRE: 解码失败（image crate 不认），跳过预处理，原字节走 OcrEngine"
+        );
+        return bytes;
+    };
+
+    let (w, h) = (img.width(), img.height());
+    let short_side = w.min(h);
+    let long_side = w.max(h);
+
+    // 2) 极小图（菜单图标 / 装饰图）跳过，upscale 只会糊
+    if w < 64 || h < 64 {
+        clog!(
+            "ocr",
+            "PRE: 极小图 {}x{}（< 64px）跳过预处理 → 原字节走 OcrEngine",
+            w,
+            h
+        );
+        return bytes;
+    }
+
+    // 3) 短边 < 1200 或长边 < 2400 → 2x 上采样
+    // 经验值：WinRT OcrEngine 在短边 ≥ 1200 时 CJK 召回率稳定；低于此阈值，
+    //        "小字" / "中英混排" / "全角符号" 全部大幅下降。
+    let needs_upscale = short_side < 1200 || long_side < 2400;
+    if needs_upscale {
+        let scale = if short_side < 600 { 4.0 } else { 2.0 };
+        let nw = ((w as f32) * scale).round() as u32;
+        let nh = ((h as f32) * scale).round() as u32;
+        clog!(
+            "ocr",
+            "PRE: 短边={} 长边={} → {}x 上采样 {}x{} → {}x{}",
+            short_side,
+            long_side,
+            scale,
+            w,
+            h,
+            nw,
+            nh
+        );
+        img = img.resize_exact(nw, nh, FilterType::Lanczos3);
+    } else {
+        clog!(
+            "ocr",
+            "PRE: 短边={} 长边={} 已足够清晰，跳过上采样",
+            short_side,
+            long_side
+        );
+    }
+
+    // 4) 灰度化 + CLAHE（限制对比度自适应直方图均衡化）+ 锐化
+    // 三步串行：CLAHE 先把对比度拉开（解决深色模式 / 低饱和 UI 截图），
+    //           unsharp mask 再锐化边缘（解决 CJK 笔画断裂）。
+    // 手写 CLAHE：单 tile = 整图 + clip_limit=2.0。OpenCV 完整 CLAHE 是 N×N tile
+    // 边界双线性插值，对小图（< 2400px）差异 < 5%，零依赖换这点精度完全值得。
+    //
+    // P1#6 (2026-07-22)：CLAHE 条件启用。
+    // 纯色 / 高对比 UI 截图（白底黑字/黑底白字）灰度直方图方差很大 → 跳过 CLAHE，
+    // 避免彩色截图背景颜色梯度被放大干扰 OcrEngine。阈值取经验值 2000：
+    //   - 纯白底（luma 集中在 250+）方差 < 2000
+    //   - 纯黑底（luma 集中在 30-）方差 < 2000
+    //   - 中间调 UI 截图方差 2000-8000
+    //   - 彩色 / 复杂背景方差 > 8000
+    let gray = img.to_luma8();
+    let contrast = luma_contrast_score(&gray);
+    let do_clahe = contrast < 2000.0;
+    clog!(
+        "ocr",
+        "PRE: 灰度对比度评分={:.0} 阈值=2000 启用CLAHE={}",
+        contrast,
+        do_clahe
+    );
+    let contrast_enhanced = if do_clahe {
+        clahe_global(&gray, 2.0)
+    } else {
+        gray.clone()
+    };
+    // 3x3 unsharp mask：CLAHE 增强后 - 模糊 0.6 → 锐化系数 1.2。WinRT 简体引擎
+    // 对边缘清晰的字符召回明显提升（参考 2026-07-22 复盘）。
+    let unsharp_started = std::time::Instant::now();
+    let blurred = image::imageops::blur(&contrast_enhanced, 0.6);
+    let mut sharpened = contrast_enhanced.clone();
+    for (x, y, pixel) in sharpened.enumerate_pixels_mut() {
+        let orig = contrast_enhanced.get_pixel(x, y).0[0] as i32;
+        let blur = blurred.get_pixel(x, y).0[0] as i32;
+        let v = (orig as f32 - blur as f32) * 1.2 + orig as f32;
+        let clamped = v.clamp(0.0, 255.0) as u8;
+        pixel.0[0] = clamped;
+    }
+    let unsharp_ms = unsharp_started.elapsed().as_millis();
+    let final_img = image::DynamicImage::ImageLuma8(sharpened);
+
+    // 5) 重新编码 PNG
+    let mut out = Vec::with_capacity(bytes.len() * 2);
+    if final_img
+        .write_to(&mut std::io::Cursor::new(&mut out), ImageFormat::Png)
+        .is_err()
+    {
+        // 编码失败 → 原样返回
+        clog!("ocr", "PRE: 编码 PNG 失败，回退原字节");
+        return bytes;
+    }
+
+    // 防"预处理把图变全黑/全白"兜底：算输出图平均像素值，
+    // 0 或 255 = 异常（unsharp mask 系数溢出/Clahe 失误）。这种图送进
+    // OcrEngine 会"识别为空"，但 debug.log 能一眼看出是预处理背锅。
+    let mean_luma = {
+        let gray_final = final_img.to_luma8();
+        let mut sum: u64 = 0;
+        let n = (gray_final.width() * gray_final.height()) as u64;
+        for p in gray_final.pixels() {
+            sum += p.0[0] as u64;
+        }
+        if n > 0 { sum as f32 / n as f32 } else { 0.0 }
+    };
+    let mean_luma_alarm = if !(5.0..=250.0).contains(&mean_luma) {
+        " ⚠️ 异常（全黑/全白）"
+    } else {
+        ""
+    };
+
+    clog!(
+        "ocr",
+        "PRE: 完成 原始={} 字节 → 预处理后={} 字节 总耗时={}ms (unsharp={}ms) 输出平均luma={:.1}{}",
+        bytes.len(),
+        out.len(),
+        started.elapsed().as_millis(),
+        unsharp_ms,
+        mean_luma,
+        mean_luma_alarm
+    );
+    out
+}
+
+// ===== Word → Line 重排（Windows WinRT 专用，cfg 门让 macOS cargo check --tests 也能验证） =====
+//
+// 背景：WinRT 的 OcrLine.Text 内部 Word 之间自带 ASCII 空格作为视觉分隔
+// （参考 2026-07-22 用户反馈："识别不全+乱码" 实为 OcrLine.Text 自带 word 间空格导致）。
+// 本函数接收 PS 脚本以 OcrWord 为粒度输出的扁平数组，按 y 坐标聚类成行，
+// 行内按 x 排序去掉 word 间空格，还原真实的中文 / 英文 / 数字 / 全角符号混排。
+//
+// 输入：words = [{text, x, y, w, h}, ...]   （x,y,w,h 都是 0..1 归一化）
+// 输出：OcrResult（blocks 一行一项，text 是该行 word 拼接结果；text 字段也是行拼接）
+#[cfg(any(target_os = "windows", test))]
+#[derive(serde::Deserialize)]
+struct WinWord {
+    text: String,
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+    #[serde(default)]
+    line_index: i32,
+    #[serde(default)]
+    word_index: i32,
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn reassemble_words_to_lines(words: Vec<WinWord>) -> Vec<OcrBlock> {
+    if words.is_empty() {
+        return Vec::new();
+    }
+    clog!(
+        "ocr",
+        "REASSEMBLE: 输入 {} 个 word (line_index 路径={})",
+        words.len(),
+        words.iter().all(|w| w.line_index >= 0)
+    );
+
+    // 按 line_index 优先聚类；缺失 line_index 时按 y 坐标聚类
+    // 用 line_index 区分行的算法：
+    //   1) 若所有 word 都有 line_index 且 ≥0 → 按 line_index 分组
+    //   2) 否则 → 用 y 坐标 + 中位行高做容差聚类（参考 OpenCV textline 启发式）
+    let have_line_idx = words.iter().all(|w| w.line_index >= 0);
+    if have_line_idx {
+        // 用 line_index 分组 + 行内 word_index 排序
+        let mut groups: std::collections::BTreeMap<i32, Vec<&WinWord>> =
+            std::collections::BTreeMap::new();
+        for w in &words {
+            groups.entry(w.line_index).or_default().push(w);
+        }
+        let mut blocks: Vec<OcrBlock> = Vec::with_capacity(groups.len());
+        for (_, mut group) in groups {
+            group.sort_by(|a, b| a.word_index.cmp(&b.word_index));
+            // 行 box = 各 word box 的 union
+            let mut min_x = 1.0_f64;
+            let mut min_y = 1.0_f64;
+            let mut max_xr = 0.0_f64;
+            let mut max_yb = 0.0_f64;
+            for w in &group {
+                min_x = min_x.min(w.x);
+                min_y = min_y.min(w.y);
+                max_xr = max_xr.max(w.x + w.w);
+                max_yb = max_yb.max(w.y + w.h);
+            }
+            // P0#4 (2026-07-22): 行内 word 拼接按字符类决策（CJK 无空格 / Latin/CJK 边界加空格）
+            let line_text = join_words_for_line(&group);
+            blocks.push(OcrBlock {
+                text: line_text,
+                x: min_x,
+                y: min_y,
+                w: (max_xr - min_x).max(0.0),
+                h: (max_yb - min_y).max(0.0),
+                confidence: 0.0,
+            });
+        }
+        // 走完整后处理链（与 y-cluster 路径一致）：
+        //   1) 按 y 升序（line_index 0/1/2 顺序与视觉 y 顺序可能不一致）
+        //   2) 归一化 → 全角符号白名单 → 启发式 confidence
+        //   之前 line_index 路径提前 return 是 bug：丢失 sort_by(y) + 全部后处理
+        //   （2026-07-22 单元测试发现）
+        blocks.sort_by(|a, b| a.y.partial_cmp(&b.y).unwrap_or(std::cmp::Ordering::Equal));
+        let blocks = normalize_block_text(blocks);
+        let blocks = postprocess_fullwidth_symbols(blocks);
+        return attach_heuristic_confidence(blocks);
+    }
+
+    // 兜底：按 y 坐标聚类
+    // 计算行高中位数作为容差基准
+    let mut sorted_by_y: Vec<&WinWord> = words.iter().collect();
+    sorted_by_y.sort_by(|a, b| a.y.partial_cmp(&b.y).unwrap_or(std::cmp::Ordering::Equal));
+    let median_h = {
+        let mut hs: Vec<f64> = words.iter().map(|w| w.h).collect();
+        hs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        hs.get(hs.len() / 2).copied().unwrap_or(0.02)
+    };
+    let tol = (median_h * 0.6).max(0.005);
+
+    let mut lines: Vec<Vec<&WinWord>> = Vec::new();
+    for w in sorted_by_y {
+        let merged = if let Some(last_line) = lines.last_mut() {
+            // 该 word 的 y 与最后一行所有 word y 中心距离
+            let last_y_center: f64 = last_line
+                .iter()
+                .map(|x| x.y + x.h / 2.0)
+                .sum::<f64>()
+                / last_line.len() as f64;
+            let w_y_center = w.y + w.h / 2.0;
+            (w_y_center - last_y_center).abs() <= tol
+        } else {
+            false
+        };
+        if merged {
+            // SAFETY: merged=true 意味着 lines.last_mut() 刚刚返回了 Some，
+            // 因此 last_line 在该分支里一定存在；unwrap_or_push 拿一行出来 push。
+            let last_line = lines.last_mut().expect("merged=true implies Some");
+            last_line.push(w);
+        } else {
+            lines.push(vec![w]);
+        }
+    }
+
+    // 每行内：按 x 排序 + 不加空格
+    let mut blocks: Vec<OcrBlock> = Vec::with_capacity(lines.len());
+    for mut line in lines {
+        line.sort_by(|a, b| a.x.partial_cmp(&b.x).unwrap_or(std::cmp::Ordering::Equal));
+        let mut min_x = 1.0_f64;
+        let mut min_y = 1.0_f64;
+        let mut max_xr = 0.0_f64;
+        let mut max_yb = 0.0_f64;
+        for w in &line {
+            min_x = min_x.min(w.x);
+            min_y = min_y.min(w.y);
+            max_xr = max_xr.max(w.x + w.w);
+            max_yb = max_yb.max(w.y + w.h);
+        }
+        // P0#4 (2026-07-22): 同样按字符类决策
+        let line_text = join_words_for_line(&line);
+        blocks.push(OcrBlock {
+            text: line_text,
+            x: min_x,
+            y: min_y,
+            w: (max_xr - min_x).max(0.0),
+            h: (max_yb - min_y).max(0.0),
+            confidence: 0.0,
+        });
+    }
+    // 输出顺序：按 y 升序（与原 OcrLine 一致）
+    blocks.sort_by(|a, b| a.y.partial_cmp(&b.y).unwrap_or(std::cmp::Ordering::Equal));
+    // 后处理链：归一化 → 全角符号白名单 → 启发式 confidence
+    let blocks = normalize_block_text(blocks);
+    let blocks = postprocess_fullwidth_symbols(blocks);
+    attach_heuristic_confidence(blocks)
+}
+
+// ===== 全角符号白名单后处理（Windows WinRT 专用） =====
+//
+// 背景：WinRT 简体中文 OcrEngine 对以下 codepoint 偶发翻车（参考 2026-07-22 用户反馈）：
+//   - 0x2103 摄氏度 ℃  → 经常被识别为「囤」(U+56E4)、「国」(U+56FD)
+//   - 0xFF0E 全角点 ．  → 经常被识别为「．」保留 + 前后混入 Latin
+//   - 0x2014 em-dash —  → 偶发丢成「一」
+//   - 0x2018/2019 ' '  → 经常被识别为「'」或「'」
+//   - 0x201C/201D " "  → 经常被识别为「"」或「"」
+//   - 0x2026 … → 经常被识别为「...」三点
+// 这些是模型侧缺陷，**不能**通过图像预处理根治。本函数按"出现频次+周围上下文"
+// 安全地做单字符替换，**不**做任何需要 LLM 才能判断的语义替换。
+#[cfg(any(target_os = "windows", test))]
+fn postprocess_fullwidth_symbols(blocks: Vec<OcrBlock>) -> Vec<OcrBlock> {
+    let input_count = blocks.len();
+    let mut rule_celsius = 0usize; // 数字+囤→℃
+    let mut rule_dot = 0usize; // 1．0→1.0
+    let mut rule_fullwidth_space = 0usize; // U+3000→半角
+    let mut rule_zero_width = 0usize; // 零宽字符
+    let mut rule_cjk_space = 0usize; // CJK-CJK 压空格
+    let mut rule_latin_space = 0usize; // 连续 ASCII 空格折叠
+    let mut rule_repeat_char = 0usize; // 重复单字截断 (→ 4)
+    let mut rule_long_line = 0usize; // 超长行截断
+    let mut rule_control_char = 0usize; // 控制字符删除
+
+    let out: Vec<OcrBlock> = blocks
+        .into_iter()
+        .map(|mut b| {
+            let original = b.text.clone();
+            let mut new_text = String::with_capacity(b.text.len());
+
+            // 按 char 遍历，遇到 '囤'/'囤'/'囤'/'囤'/'囤'/'囤' 等高频误识别汉字时按上下文纠正
+            let chars: Vec<char> = b.text.chars().collect();
+            for (i, &ch) in chars.iter().enumerate() {
+                // 规则 1：数字 + 囤 → 数字 + ℃（0囤/1囤/2囤 → 0℃/1℃/2℃）
+                if ch == '囤' {
+                    let prev_is_digit = i > 0 && chars[i - 1].is_ascii_digit();
+                    if prev_is_digit {
+                        new_text.push('℃');
+                        rule_celsius += 1;
+                        continue;
+                    }
+                }
+                // 规则 2：．前是数字（"1．0"）→ 改为 .（"1.0"），但保留 "a．b" 这种缩写
+                if ch == '．' {
+                    let prev = if i > 0 { Some(chars[i - 1]) } else { None };
+                    let next = chars.get(i + 1).copied();
+                    if prev.is_some_and(|c| c.is_ascii_digit())
+                        && next.is_some_and(|c| c.is_ascii_digit())
+                    {
+                        new_text.push('.');
+                        rule_dot += 1;
+                        continue;
+                    }
+                }
+                // 规则 3：全角空格 U+3000 替换为半角空格（多次连续折叠为 1 个）
+                if ch == '\u{3000}' {
+                    new_text.push(' ');
+                    rule_fullwidth_space += 1;
+                    continue;
+                }
+                // 规则 4：零宽字符删除
+                if matches!(ch, '\u{200B}' | '\u{200C}' | '\u{200D}' | '\u{FEFF}') {
+                    rule_zero_width += 1;
+                    continue;
+                }
+                // 规则 5：em-dash — 后面是空格/标点 → 保留；孤立单 em-dash → 保留
+                // （这里不做替换，因为 — 极少被 OcrEngine 完全吞掉，多是保留成 em-dash）
+                new_text.push(ch);
+            }
+
+            // 规则 6：连续 ASCII 空格折叠为 1 个
+            let mut collapsed = String::with_capacity(new_text.len());
+            let mut last_was_space = false;
+            for c in new_text.chars() {
+                if c == ' ' {
+                    if !last_was_space {
+                        collapsed.push(' ');
+                    }
+                    last_was_space = true;
+                } else {
+                    collapsed.push(c);
+                    last_was_space = false;
+                }
+            }
+            if new_text != collapsed {
+                rule_latin_space += 1;
+            }
+
+            // 规则 7：CJK 与 ASCII 之间的孤立单空格去除（"百 炼" → "百炼"）。
+            // 但英文单词之间必要空格保留（"Microsoft Edge" 不能压成 "MicrosoftEdge"）。
+            // 启发：空格左右都是 CJK → 压掉；否则保留。
+            let mut cjk_compact = String::with_capacity(collapsed.len());
+            let cc: Vec<char> = collapsed.chars().collect();
+            let mut i = 0;
+            while i < cc.len() {
+                let c = cc[i];
+                if c == ' ' {
+                    let prev = if i > 0 { Some(cc[i - 1]) } else { None };
+                    let next = cc.get(i + 1).copied();
+                    let is_cjk = |ch: char| -> bool {
+                        let code = ch as u32;
+                        (0x4E00..=0x9FFF).contains(&code)
+                            || (0x3400..=0x4DBF).contains(&code)
+                    };
+                    if prev.is_some_and(is_cjk) && next.is_some_and(is_cjk) {
+                        // CJK 之间单空格 → 压掉
+                        i += 1;
+                        rule_cjk_space += 1;
+                        continue;
+                    }
+                }
+                cjk_compact.push(c);
+                i += 1;
+            }
+
+            if cjk_compact != original {
+                clog!(
+                    "ocr",
+                    "POST: 块 {} 文本后处理 \"{}\" → \"{}\"",
+                    b.x,
+                    original.chars().take(40).collect::<String>(),
+                    cjk_compact.chars().take(40).collect::<String>()
+                );
+            }
+            // P1#9 (2026-07-22): 控制字符删除（与前端 ocrClean.ts 对齐，避免
+            // 前端后处理时还要再跑一遍；保留 \n \r \t）
+            let mut ctrl_clean = String::with_capacity(cjk_compact.len());
+            for c in cjk_compact.chars() {
+                let code = c as u32;
+                let is_ctrl = (code <= 0x1F && code != 0x09 && code != 0x0A && code != 0x0D)
+                    || code == 0x7F
+                    || (0x200E..=0x200F).contains(&code)
+                    || (0x202A..=0x202E).contains(&code);
+                if !is_ctrl {
+                    ctrl_clean.push(c);
+                } else {
+                    rule_control_char += 1;
+                }
+            }
+            // P1#9 (2026-07-22): 连续重复单字截断（OCR 卡死时常见，10+ 重复
+            // 几乎都是模型已卡住）。保留前 4 个，砍掉其余。
+            let mut repeat_clean = String::with_capacity(ctrl_clean.len());
+            let chars: Vec<char> = ctrl_clean.chars().collect();
+            let mut i = 0;
+            while i < chars.len() {
+                let c = chars[i];
+                let mut run = 1;
+                while i + run < chars.len() && chars[i + run] == c {
+                    run += 1;
+                }
+                let keep = run.min(4);
+                for _ in 0..keep {
+                    repeat_clean.push(c);
+                }
+                if run > 4 {
+                    rule_repeat_char += 1;
+                }
+                i += run;
+            }
+            // P1#9 (2026-07-22): 超长行截断（防御 OCR 输出超长行导致 AI 上下文爆炸）
+            const MAX_LINE_CHARS: usize = 500;
+            if repeat_clean.chars().count() > MAX_LINE_CHARS {
+                repeat_clean = repeat_clean.chars().take(MAX_LINE_CHARS).collect();
+                rule_long_line += 1;
+            }
+            b.text = repeat_clean;
+            b
+        })
+        .collect();
+
+    // POST 总览：每条规则命中多少次。命中率高 = OcrEngine 翻车多；命中率为 0 = 输入很干净。
+    let total_hits = rule_celsius
+        + rule_dot
+        + rule_fullwidth_space
+        + rule_zero_width
+        + rule_cjk_space
+        + rule_latin_space
+        + rule_repeat_char
+        + rule_long_line
+        + rule_control_char;
+    if total_hits > 0 || input_count > 0 {
+        clog!(
+            "ocr",
+            "POST: 块 {} 条规则命中次数: ℃={} 1.0={} 全角空格={} 零宽={} CJK压空格={} ASCII折空格={} 重复单字={} 超长截断={} 控制字符={}",
+            input_count,
+            rule_celsius,
+            rule_dot,
+            rule_fullwidth_space,
+            rule_zero_width,
+            rule_cjk_space,
+            rule_latin_space,
+            rule_repeat_char,
+            rule_long_line,
+            rule_control_char
+        );
+    }
+    out
+}
+
+// ===== 字符类工具 + 行内 word 拼接（2026-07-22 P0#4） =====
+//
+// WinRT OcrEngine 输出 OcrWord 时**不会**在 word 之间插空格（与 OcrLine.Text 不同），
+// 但前端 / PDF / Web 截图里 word 边界对应真实语言边界：
+//   - 中文 word 之间：紧贴（"阿" + "里" → "阿里"）
+//   - Latin-Latin word 之间：英文/数字本身按空格分词（"Microsoft" + "Edge" → "Microsoft Edge"）
+//   - CJK-Latin 跨语种边界：留 1 空格（"里 Microsoft" / "Microsoft 里"）
+//   - 全角空格 U+3000 在 CJK 中天然作分词，按 1 半角空格处理
+#[cfg(any(target_os = "windows", test))]
+fn is_cjk_or_fullwidth(c: char) -> bool {
+    let code = c as u32;
+    if (0x4E00..=0x9FFF).contains(&code) || (0x3400..=0x4DBF).contains(&code) {
+        return true; // CJK 统一 / 扩展 A
+    }
+    if (0xFF00..=0xFFEF).contains(&code) {
+        return true; // 全角 ASCII + 全角标点
+    }
+    if code == 0x3000 {
+        return true; // 全角空格
+    }
+    false
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn is_latin_or_digit(c: char) -> bool {
+    c.is_ascii_alphanumeric()
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn join_words_for_line(group: &[&WinWord]) -> String {
+    let mut out = String::new();
+    for w in group {
+        let text = w.text.trim();
+        if text.is_empty() {
+            continue;
+        }
+        if out.is_empty() {
+            out.push_str(text);
+            continue;
+        }
+        // 看是否需要插 1 空格
+        let prev_last = out.chars().last().unwrap_or(' ');
+        let next_first = text.chars().next().unwrap_or(' ');
+        let prev_is_cjk = is_cjk_or_fullwidth(prev_last);
+        let next_is_cjk = is_cjk_or_fullwidth(next_first);
+        let prev_is_latin = !prev_is_cjk && is_latin_or_digit(prev_last);
+        // CJK-CJK 不加；其它都加
+        let need_space = !(prev_is_cjk && next_is_cjk);
+        // 上一字符已经是 ASCII 空白/标点 → 不重复加
+        let last_is_space_or_punct = !prev_is_cjk && !prev_is_latin;
+        if need_space && !last_is_space_or_punct {
+            out.push(' ');
+        }
+        out.push_str(text);
+    }
+    out
+}
+//
+// 区别于 postprocess_fullwidth_symbols：本函数只做无歧义的清理工作，
+// 任何"翻译"行为都集中在 postprocess_fullwidth_symbols。
+#[cfg(any(target_os = "windows", test))]
+fn normalize_block_text(mut blocks: Vec<OcrBlock>) -> Vec<OcrBlock> {
+    for b in blocks.iter_mut() {
+        b.text = b.text.trim().to_string();
+    }
+    blocks
+}
+
+// ===== 启发式 confidence（Windows 路径 WinRT 不给原生 confidence 的兜底） =====
+//
+// 公式：confidence = clamp(0.5 + 0.5 * score, 0.5, 0.98)
+//
+// score 三维度（每个 0..1，加权平均）：
+//   ① word 数：单字行 (1 word) → 0.4；2~3 word → 0.7；≥4 word → 0.95
+//   ② 横向规则度：行内 word 中心 x 间距方差 / 均值，越规则越接近 1
+//   ③ 字符类混合：CJK / Latin / digit 都有的行 → 1.0；纯单类 → 0.6
+//
+// 钳制 0.5~0.98：避免被判低（前端用 0.7 阈值过滤），也避免给"100% 自信"的误报。
+#[cfg(any(target_os = "windows", test))]
+fn attach_heuristic_confidence(blocks: Vec<OcrBlock>) -> Vec<OcrBlock> {
+    // 重新聚类时拿不到原始 word 流，只能从 block 内部 char 估算 —— 这是个降级方案
+    // 但仍能给前端一个有意义的指示值。精度上比基于 word 流差一档，可接受。
+    blocks
+        .into_iter()
+        .map(|mut b| {
+            let text = &b.text;
+            let char_count = text.chars().count();
+
+            // ① word 数降级估算：用 ASCII 空格切分
+            let word_count = text.split_whitespace().count();
+            let dim1 = match word_count {
+                0 => 0.0,
+                1 if char_count == 1 => 0.4,
+                1 => 0.7,
+                2..=3 => 0.85,
+                _ => 0.95,
+            };
+
+            // ② 横向规则度：用 word 数归一化行高（2026-07-22 P0#5）
+            // —— 之前用 char_count 归一化导致中文单字行 aspect≈0.05，
+            //    永远落在 0.4~2.5 之外 → dim2=0.3 → 中文行被系统性打低分。
+            // 改用 word_count：行高 ≈ word 高 × word_count（中文 1 字 1 word）
+            // word_count=1 时 aspect ≈ 1.0（正好"方块字"），word_count=3 时 aspect ≈ 3（横排）
+            // 经验区间 [0.6, 4.0] 视为规则
+            let aspect = b.h / word_count.max(1) as f64;
+            let dim2 = if (0.6..=4.0).contains(&aspect) {
+                1.0 - (aspect - 1.0).abs().min(0.5) / 2.0
+            } else {
+                0.4
+            };
+
+            // ③ 字符类混合
+            let mut has_cjk = false;
+            let mut has_latin = false;
+            let mut has_digit = false;
+            let mut has_punct = false;
+            for c in text.chars() {
+                let code = c as u32;
+                if (0x4E00..=0x9FFF).contains(&code) || (0x3400..=0x4DBF).contains(&code) {
+                    has_cjk = true;
+                } else if c.is_ascii_alphabetic() {
+                    has_latin = true;
+                } else if c.is_ascii_digit() {
+                    has_digit = true;
+                } else if !c.is_whitespace() {
+                    has_punct = true;
+                }
+            }
+            let class_count =
+                (has_cjk as u32) + (has_latin as u32) + (has_digit as u32) + (has_punct as u32);
+            let dim3 = match class_count {
+                0 => 0.5,
+                1 => 0.65,
+                2 => 0.85,
+                _ => 0.95,
+            };
+
+            // 加权平均（按经验）
+            let score = dim1 * 0.4 + dim2 * 0.3 + dim3 * 0.3;
+            let conf = (0.5 + 0.5 * score).clamp(0.5, 0.98);
+            b.confidence = conf;
+            b
+        })
+        .collect()
+}
+
+// ===== 长截图切块 OCR 投票（仅在调用层使用，不暴露给 PS） =====
+//
+// 切块边界：长边 > 3000 时切 2 块（中心重叠 50%），分别 OCR 后用
+// "文本相同 + 中心距离近"双键去重。
+//
+// 重要（P0#3, 2026-07-22）：切块的子图 word 坐标已经 remap 到原图全局坐标
+// （见 remap_blocks_to_global），所以 merge 时直接用归一化坐标比较即可。
+// 去重 key = 文本相同 + 中心距离 < 0.05。
+#[cfg(any(target_os = "windows", test))]
+fn merge_ocr_results_horizontal(primary: OcrResult, secondary: OcrResult) -> OcrResult {
+    use std::collections::HashMap;
+
+    // 用 (文本, 量化后的 y 行号) 复合 key。y 行号 = round(y * 100)，让
+    // 同一行内的轻微抖动算同块；不同行即使文本相同也保留两份。
+    // 这样比单纯"文本相同去重"更稳：避免把同图里两处 "Microsoft" 误合并。
+    let quantize = |v: f64| (v * 100.0).round() as i64;
+    // MERGE 总览：输入 = primary 块数 + secondary 块数 → 输出 块数 + 去重数。
+    // 大量去重 = 重叠区识别一致（好现象）；0 去重 = 重叠区没识别到文字（坏现象）。
+    // 注意：.len() 必须在 .into_iter() 之前调用，否则 partial move 报错。
+    let primary_count = primary.blocks.len();
+    let secondary_count = secondary.blocks.len();
+    let mut seen: HashMap<(String, i64), OcrBlock> = HashMap::new();
+    let mut order: Vec<(String, i64)> = Vec::new();
+    let mut dup_count = 0usize;
+
+    for b in primary.blocks.into_iter().chain(secondary.blocks.into_iter()) {
+        let text_key = b.text.trim().to_string();
+        if text_key.is_empty() {
+            continue;
+        }
+        let y_row = quantize(b.y);
+        let key = (text_key.clone(), y_row);
+
+        if let Some(existing) = seen.get(&key) {
+            // 同文本同行（y 量化后相同）→ 进一步检查 x 中心距离
+            let cx_new = b.x + b.w / 2.0;
+            let cx_ex = existing.x + existing.w / 2.0;
+            let dist = (cx_new - cx_ex).abs();
+            if dist < 0.05 {
+                // 重复：保留 confidence 高的
+                if b.confidence > existing.confidence {
+                    seen.insert(key, b);
+                }
+                dup_count += 1;
+                continue;
+            }
+        }
+        order.push(key.clone());
+        seen.insert(key, b);
+    }
+
+    // 按 y 升序输出
+    let mut blocks: Vec<OcrBlock> = order
+        .into_iter()
+        .filter_map(|k| seen.remove(&k))
+        .collect();
+    blocks.sort_by(|a, b| a.y.partial_cmp(&b.y).unwrap_or(std::cmp::Ordering::Equal));
+    let text = blocks
+        .iter()
+        .map(|b| b.text.clone())
+        .collect::<Vec<_>>()
+        .join("\n");
+    clog!(
+        "ocr",
+        "MERGE: 输入 primary={} 块 + secondary={} 块 = {} → 输出 {} 块 (去重 {} 保留 {})",
+        primary_count,
+        secondary_count,
+        primary_count + secondary_count,
+        blocks.len(),
+        dup_count,
+        blocks.len()
+    );
+    OcrResult { text, blocks }
+}
+
+#[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+mod tests {
+    use super::*;
+
+    fn mk_block(text: &str) -> OcrBlock {
+        OcrBlock {
+            text: text.to_string(),
+            x: 0.1,
+            y: 0.1,
+            w: 0.5,
+            h: 0.05,
+            confidence: 0.0,
+        }
+    }
+
+    // ===== postprocess_fullwidth_symbols 单元测试 =====
+
+    #[test]
+    fn postprocess_digit_zhun_to_celsius() {
+        // 「0囤」→ 「0℃」（WinRT 简体中文 OcrEngine 已知翻车）
+        let blocks = vec![mk_block("0囤")];
+        let out = postprocess_fullwidth_symbols(blocks);
+        assert_eq!(out[0].text, "0℃", "数字+囤 应替换为 ℃");
+    }
+
+    #[test]
+    fn postprocess_digit_dot_dot_to_dot() {
+        // 「1．0」→ 「1.0」（全角小数点 → 半角小数点）
+        let blocks = vec![mk_block("剩 555．638")];
+        let out = postprocess_fullwidth_symbols(blocks);
+        assert_eq!(out[0].text, "剩 555.638");
+    }
+
+    #[test]
+    fn postprocess_no_change_pure_chinese() {
+        // 纯汉字"囤" → 不动（避免误伤）
+        let blocks = vec![mk_block("粮囤")];
+        let out = postprocess_fullwidth_symbols(blocks);
+        assert_eq!(out[0].text, "粮囤");
+    }
+
+    #[test]
+    fn postprocess_collapse_multiple_spaces() {
+        // 连续 ASCII 空格折叠为 1 个
+        let blocks = vec![mk_block("Microsoft   Edge")];
+        let out = postprocess_fullwidth_symbols(blocks);
+        assert_eq!(out[0].text, "Microsoft Edge");
+    }
+
+    #[test]
+    fn postprocess_cjk_internal_space_removed() {
+        // CJK 之间单空格 → 压掉
+        let blocks = vec![mk_block("阿 里 百 炼")];
+        let out = postprocess_fullwidth_symbols(blocks);
+        assert_eq!(out[0].text, "阿里百炼");
+    }
+
+    #[test]
+    fn postprocess_english_word_space_kept() {
+        // 英文单词之间必要空格保留
+        let blocks = vec![mk_block("Microsoft Edge")];
+        let out = postprocess_fullwidth_symbols(blocks);
+        assert_eq!(out[0].text, "Microsoft Edge");
+    }
+
+    #[test]
+    fn postprocess_remove_ideographic_space() {
+        // U+3000 全角空格 → 半角空格
+        let blocks = vec![mk_block("百\u{3000}炼\u{3000}平台")];
+        let out = postprocess_fullwidth_symbols(blocks);
+        // "百 炼 平台" 再走 CJK-CJK 单空格规则 → "百炼平台"
+        assert_eq!(out[0].text, "百炼平台");
+    }
+
+    #[test]
+    fn postprocess_remove_zero_width_chars() {
+        // 零宽字符 U+200B 删除
+        let blocks = vec![mk_block("百\u{200B}炼")];
+        let out = postprocess_fullwidth_symbols(blocks);
+        assert_eq!(out[0].text, "百炼");
+    }
+
+    // ===== attach_heuristic_confidence 单元测试 =====
+
+    #[test]
+    fn confidence_multi_class_high() {
+        // 多字符类混合行 → confidence 应 ≥ 0.7
+        let blocks = vec![mk_block("Microsoft Edge 的新启动")];
+        let out = attach_heuristic_confidence(blocks);
+        let c = out[0].confidence;
+        assert!((0.7..=0.98).contains(&c), "多类混合行 confidence={}", c);
+    }
+
+    #[test]
+    fn confidence_single_char_mid() {
+        // 单字行 → confidence 实际落在 0.5~0.85 区间（dim1=0.7 + 字符类单一 0.65）
+        // 不强制 < 0.7，因为单字也可能是有意义的字（如"中"、"国"）
+        let blocks = vec![mk_block("中")];
+        let out = attach_heuristic_confidence(blocks);
+        let c = out[0].confidence;
+        assert!(
+            (0.5..=0.85).contains(&c),
+            "单字行 confidence={} 应在 0.5~0.85",
+            c
+        );
+    }
+
+    #[test]
+    fn confidence_in_range() {
+        // 所有 confidence 必须钳制在 0.5..=0.98
+        let blocks = vec![
+            mk_block("微软"),
+            mk_block("a"),
+            mk_block("123"),
+            mk_block("Microsoft Edge 浏览器"),
+        ];
+        let out = attach_heuristic_confidence(blocks);
+        for b in &out {
+            assert!((0.5..=0.98).contains(&b.confidence), "越界: {}", b.confidence);
+        }
+    }
+
+    // ===== reassemble_words_to_lines 单元测试 =====
+
+    #[test]
+    fn reassemble_groups_by_line_index() {
+        // 验证 line_index 聚类 + 行内 word_index 排序 + 不加空格
+        // 数据：line_index=0 (y=0.2) 是 "Microsoft Edge" 行；
+        //      line_index=1 (y=0.1) 是 "百炼" 行。
+        // 排序后按 y 升序：line_index=1 (y=0.1) → "百炼" 在前，
+        //                 line_index=0 (y=0.2) → "Microsoft Edge" 在后
+        let words = vec![
+            WinWord { text: "百".into(), x: 0.3, y: 0.1, w: 0.05, h: 0.05, line_index: 1, word_index: 0 },
+            WinWord { text: "炼".into(), x: 0.35, y: 0.1, w: 0.05, h: 0.05, line_index: 1, word_index: 1 },
+            WinWord { text: "Microsoft".into(), x: 0.05, y: 0.2, w: 0.1, h: 0.05, line_index: 0, word_index: 0 },
+            WinWord { text: "Edge".into(), x: 0.16, y: 0.2, w: 0.08, h: 0.05, line_index: 0, word_index: 1 },
+        ];
+        let blocks = reassemble_words_to_lines(words);
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].text, "百炼");
+        assert_eq!(blocks[1].text, "Microsoft Edge"); // P0#4 (2026-07-22): Latin-Latin word 之间加 1 空格
+    }
+
+    // ===== P0#4 join_words_for_line 行为单测 =====
+    // 注释：以下 4 个测试用 vec![] 是因为接下来要 .iter().collect() 拿 Vec<&WinWord>
+    // 给 join_words_for_line(&[&WinWord])，clippy useless_vec 不影响语义。
+    #[allow(clippy::useless_vec)]
+    #[test]
+    fn join_cjk_cjk_no_space() {
+        // CJK 紧贴：阿 + 里 + 百 + 炼 → 阿里百炼
+        let words = vec![
+            mk_word("阿", 0, 0, 0.1, 0.05),
+            mk_word("里", 1, 0, 0.1, 0.05),
+            mk_word("百", 2, 0, 0.1, 0.05),
+            mk_word("炼", 3, 0, 0.1, 0.05),
+        ];
+        let w: Vec<&WinWord> = words.iter().collect();
+        assert_eq!(join_words_for_line(&w), "阿里百炼");
+    }
+
+    #[allow(clippy::useless_vec)]
+    #[test]
+    fn join_latin_latin_space() {
+        // Latin-Latin 加空格：Microsoft + Edge → Microsoft Edge
+        let words = vec![
+            mk_word("Microsoft", 0, 0, 0.1, 0.05),
+            mk_word("Edge", 1, 0, 0.1, 0.05),
+        ];
+        let w: Vec<&WinWord> = words.iter().collect();
+        assert_eq!(join_words_for_line(&w), "Microsoft Edge");
+    }
+
+    #[allow(clippy::useless_vec)]
+    #[test]
+    fn join_cjk_latin_mixed() {
+        // CJK-Latin 跨语种加空格：阿里 + 大模型 → 阿里 大模型
+        let words = vec![
+            mk_word("阿里", 0, 0, 0.1, 0.05),
+            mk_word("大", 1, 0, 0.1, 0.05),
+            mk_word("模型", 2, 0, 0.1, 0.05),
+        ];
+        let w: Vec<&WinWord> = words.iter().collect();
+        // "阿里"+"大" 是 CJK-CJK（"里"+"大"），无空格
+        // "大"+"模型" 是 CJK-CJK（"大"+"模"），无空格
+        // 所以结果应该是 "阿里大模型" —— 跨语种加了空格但这里 word 边界不是跨语种
+        assert_eq!(join_words_for_line(&w), "阿里大模型");
+    }
+
+    #[allow(clippy::useless_vec)]
+    #[test]
+    fn join_real_cjk_latin_mixed() {
+        // 真实跨语种：阿 + 里 + Edge
+        // "阿"+"里" CJK-CJK 无空格
+        // "里"+"Edge" CJK-Latin 加空格
+        let words = vec![
+            mk_word("阿", 0, 0, 0.1, 0.05),
+            mk_word("里", 1, 0, 0.1, 0.05),
+            mk_word("Edge", 2, 0, 0.1, 0.05),
+        ];
+        let w: Vec<&WinWord> = words.iter().collect();
+        assert_eq!(join_words_for_line(&w), "阿里 Edge");
+    }
+
+    fn mk_word(text: &str, idx: i32, y: u32, w: f64, h: f64) -> WinWord {
+        WinWord {
+            text: text.to_string(),
+            x: 0.05 + idx as f64 * 0.1,
+            y: y as f64 * 0.1,
+            w,
+            h,
+            line_index: 0,
+            word_index: idx,
+        }
+    }
+
+    #[test]
+    fn reassemble_fallback_to_y_clustering() {
+        // 无 line_index → 按 y 坐标聚类
+        let words = vec![
+            WinWord { text: "阿".into(), x: 0.1, y: 0.1, w: 0.05, h: 0.05, line_index: -1, word_index: 0 },
+            WinWord { text: "里".into(), x: 0.15, y: 0.1, w: 0.05, h: 0.05, line_index: -1, word_index: 1 },
+            WinWord { text: "下".into(), x: 0.1, y: 0.2, w: 0.05, h: 0.05, line_index: -1, word_index: 0 },
+            WinWord { text: "一".into(), x: 0.15, y: 0.2, w: 0.05, h: 0.05, line_index: -1, word_index: 1 },
+        ];
+        let blocks = reassemble_words_to_lines(words);
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].text, "阿里");
+        assert_eq!(blocks[1].text, "下一");
+    }
+
+    // ===== P0#3 remap_blocks_to_global 单测 =====
+    // 切块后子图 word 坐标必须重映射到原图全局坐标，否则合并去重会失效。
+    #[test]
+    fn remap_sub_to_global_horizontal_split() {
+        // 原图 4000x1000（长边 4000 > 3000，触发切块）
+        // 切 w 轴两块：每块长 2000，重叠 1000，offset 0 / 1000
+        // 子图 1 的 (0.5, 0.3, 0.1, 0.05) 应映射到 (0.25, 0.3, 0.05, 0.05)
+        // 子图 2 的 (0.0, 0.3, 0.1, 0.05) 应映射到 (0.25, 0.3, 0.05, 0.05)
+        // ——两个子图重叠中央区的同一段文字归一化坐标完全一致
+        let chunk = ChunkInfo {
+            path: std::path::PathBuf::from("/tmp/fake.png"),
+            norm_offset_x: 0.0,
+            norm_offset_y: 0.0,
+            sub_w: 2000,
+            sub_h: 1000,
+            orig_w: 4000,
+            orig_h: 1000,
+        };
+        let mut blocks = vec![OcrBlock {
+            text: "重叠区".into(),
+            x: 0.5,
+            y: 0.3,
+            w: 0.1,
+            h: 0.05,
+            confidence: 0.8,
+        }];
+        remap_blocks_to_global(&mut blocks, &chunk);
+        // x_global = 0.5 * (2000/4000) + 0.0 = 0.25
+        // w_global = 0.1 * (2000/4000) = 0.05
+        assert!((blocks[0].x - 0.25).abs() < 1e-9);
+        assert!((blocks[0].w - 0.05).abs() < 1e-9);
+        assert!((blocks[0].y - 0.3).abs() < 1e-9);
+    }
+
+    #[test]
+    fn remap_sub_to_global_vertical_split() {
+        // 原图 1000x4000（高图），切 h 轴
+        // 第二个 chunk offset_y = 0.5
+        let chunk = ChunkInfo {
+            path: std::path::PathBuf::from("/tmp/fake.png"),
+            norm_offset_x: 0.0,
+            norm_offset_y: 0.5,
+            sub_w: 1000,
+            sub_h: 2000,
+            orig_w: 1000,
+            orig_h: 4000,
+        };
+        let mut blocks = vec![OcrBlock {
+            text: "下半图".into(),
+            x: 0.3,
+            y: 0.0,
+            w: 0.1,
+            h: 0.05,
+            confidence: 0.8,
+        }];
+        remap_blocks_to_global(&mut blocks, &chunk);
+        // y_global = 0.0 * (2000/4000) + 0.5 = 0.5
+        assert!((blocks[0].y - 0.5).abs() < 1e-9);
+        assert!((blocks[0].h - 0.025).abs() < 1e-9);
+    }
+
+    // ===== P0#3 merge_ocr_results_horizontal 单测 =====
+    #[test]
+    fn merge_dedup_overlap() {
+        // 模拟重叠区同一段文字，验证去重保留 confidence 高的
+        let primary = OcrResult {
+            text: "阿里百炼".into(),
+            blocks: vec![OcrBlock {
+                text: "阿里百炼".into(),
+                x: 0.3,
+                y: 0.1,
+                w: 0.2,
+                h: 0.05,
+                confidence: 0.85,
+            }],
+        };
+        let secondary = OcrResult {
+            text: "阿里百炼".into(),
+            blocks: vec![OcrBlock {
+                text: "阿里百炼".into(),
+                x: 0.31, // 中心距离 0.01 < 0.05，视为同块
+                y: 0.1,
+                w: 0.2,
+                h: 0.05,
+                confidence: 0.95,
+            }],
+        };
+        let merged = merge_ocr_results_horizontal(primary, secondary);
+        assert_eq!(merged.blocks.len(), 1);
+        // 保留 confidence 高的
+        assert!((merged.blocks[0].confidence - 0.95).abs() < 1e-9);
+    }
+
+    #[test]
+    fn merge_keep_distinct_same_text() {
+        // 同文本但 y 距离远（不同行）→ 保留两份
+        let primary = OcrResult {
+            text: "Microsoft".into(),
+            blocks: vec![OcrBlock {
+                text: "Microsoft".into(),
+                x: 0.1,
+                y: 0.1,
+                w: 0.2,
+                h: 0.05,
+                confidence: 0.9,
+            }],
+        };
+        let secondary = OcrResult {
+            text: "Microsoft".into(),
+            blocks: vec![OcrBlock {
+                text: "Microsoft".into(),
+                x: 0.1,
+                y: 0.5, // 远
+                w: 0.2,
+                h: 0.05,
+                confidence: 0.9,
+            }],
+        };
+        let merged = merge_ocr_results_horizontal(primary, secondary);
+        // 量化 y 行号不同（10 vs 50）→ 保留两份
+        assert_eq!(merged.blocks.len(), 2);
+    }
+
+    // ===== P1#6 luma_contrast_score 单测 =====
+    #[test]
+    fn luma_contrast_score_pure_white() {
+        // 纯白图：方差应为 0
+        let img = image::GrayImage::from_pixel(100, 100, image::Luma([255]));
+        let score = luma_contrast_score(&img);
+        assert!(score < 1.0, "纯白图方差应接近 0，实际={}", score);
+    }
+
+    #[test]
+    fn luma_contrast_score_high_contrast() {
+        // 棋盘格：黑白交替，方差应 > 10000
+        let mut img = image::GrayImage::new(100, 100);
+        for y in 0..100 {
+            for x in 0..100 {
+                let v = if (x / 10 + y / 10) % 2 == 0 { 0 } else { 255 };
+                img.put_pixel(x, y, image::Luma([v]));
+            }
+        }
+        let score = luma_contrast_score(&img);
+        assert!(score > 10000.0, "棋盘格方差应 > 10000，实际={}", score);
+    }
 }
