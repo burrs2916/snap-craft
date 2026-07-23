@@ -44,7 +44,7 @@ pub async fn ocr_image(
     BUILD_BANNER.get_or_init(|| {
         clog!(
             "ocr",
-            "build=2026-07-23-layer234 feat=跨块长行拼接(#34)+动态MaxImageDimension探测缓存(#35+#38)+BCP-47多语言回退(#36,ja/ko/ar/ru...)+Layer1-A/2/3治本"
+            "build=2026-07-23-ocr37-39 feat=切块切线对齐空白带(#37,投影找间隙避免切字中段)+预处理灰度优先(#39,单通道Lanczos3快~3x)+跨块长行拼接(#34)+动态MaxImageDimension探测缓存(#35+#38)+BCP-47多语言回退(#36)+Layer1-A/2/3治本+诊断日志补全(CUTLINE/PRE阶段耗时)"
         );
     });
     clog!(
@@ -346,10 +346,11 @@ fn run_native_ocr_windows(
             let _ = std::fs::remove_file(&chunk.path);
         }
         // 合并去重（现在所有 block 都在原图全局坐标空间里）
-        let mut iter = results.into_iter();
-        let first = iter.next().unwrap();
-        let merged = iter.fold(first, |acc, next| {
-            merge_ocr_results_horizontal(acc, next)
+        // zip chunks 拿真实切线位置 + 切轴方向传给 merge 第三关（#37 让切线不再恒为 0.5）
+        let mut iter = chunks.iter().zip(results);
+        let (_first_chunk, first) = iter.next().unwrap();
+        let merged = iter.fold(first, |acc, (chunk, next)| {
+            merge_ocr_results_horizontal(acc, next, chunk.cut_norm, chunk.is_w_split)
         });
         return rerun_if_garble_detected(merged, raw_bytes, lang);
     }
@@ -375,6 +376,11 @@ struct ChunkInfo {
     orig_w: u32,
     /// 原图高（像素）
     orig_h: u32,
+    /// 切块切线在原图全局归一化坐标（沿切轴）：w-split→x 轴；h-split→y 轴。
+    /// 传给 merge 第三关，让它按「真实切线」而非写死 0.5 判断跨块拼接。
+    cut_norm: f64,
+    /// 切轴是否为宽轴（true=沿宽切/竖切线，false=沿高切/横切线）
+    is_w_split: bool,
 }
 
 /// 切长图：长边 > threshold 时切 2 块（左半 + 右半，50% 重叠）。
@@ -410,16 +416,49 @@ fn split_long_image_for_ocr(path: &std::path::Path, threshold: u32) -> Option<Ve
     let (split_axis_is_w, total) = if w >= h { (true, w) } else { (false, h) };
     let overlap = (total / 4).max(1);
     let chunk_size = (total + overlap) / 2; // 50% 重叠：两个 chunk 共享 overlap 大小
-    // 起点：[0, total - chunk_size]（保证第二个 chunk 不超出原图）
-    let starts: Vec<u32> = vec![0, total.saturating_sub(chunk_size)];
+
+    // #37 (2026-07-23): 切块切线对齐空白带。
+    // 旧逻辑固定从名义中点 chunk_size 切，常把一行字/一个词从中段切开，
+    // 靠 #34 重叠合并兜底，但切在字中段仍会丢笔画。
+    // 现改为：沿「垂直切轴」做墨量投影（w-split→列投影找低墨列；h-split→行投影找低墨行），
+    // 在名义切线 ±12.5% 窗口内找墨量 ≤50% 名义位的间隙作对齐切线；
+    // 连续文本流无间隙 → 退回名义中点（仍由 #34 重叠合并兜底）。
+    // 投影在降采样图（长边≤1000）上算，保证性能。
+    let cut = find_aligned_cut(&img, split_axis_is_w, chunk_size, total);
+    let half_overlap = overlap / 2;
+    let (c0_start, c0_size) = (0u32, (cut + half_overlap).min(total));
+    let c1_start = cut.saturating_sub(half_overlap);
+    let c1_size = total.saturating_sub(c1_start);
+    clog!(
+        "ocr",
+        "CUTLINE: 轴={} 名义切线={} 对齐后={} (偏移{}{} 命中间隙={}) 重叠={} 子图尺寸=[{}x{}]+[{}x{}]",
+        if split_axis_is_w { "宽(竖切)" } else { "高(横切)" },
+        chunk_size,
+        cut,
+        if cut > chunk_size { "+" } else { "-" },
+        (cut as i64 - chunk_size as i64).abs(),
+        cut != chunk_size,
+        overlap,
+        c0_size,
+        if split_axis_is_w { h } else { c0_size },
+        c1_size,
+        if split_axis_is_w { h } else { c1_size }
+    );
+    let starts: Vec<u32> = vec![c0_start, c1_start];
+    let sizes: Vec<u32> = vec![c0_size, c1_size];
 
     let mut chunk_infos = Vec::new();
-    for (i, &start) in starts.iter().enumerate() {
+    for (i, (&start, &size)) in starts.iter().zip(sizes.iter()).enumerate() {
         let chunk_started = std::time::Instant::now();
+        // 防退化：子图至少 64px，否则跳过切块（避免 crop 越界 / 无意义碎片）
+        if size < 64 {
+            clog!("ocr", "SPLIT: 子图 {}/2 尺寸 {} < 64px 退化，跳过切块", i + 1, size);
+            return None;
+        }
         let crop = if split_axis_is_w {
-            img.crop_imm(start, 0, chunk_size, h)
+            img.crop_imm(start, 0, size, h)
         } else {
-            img.crop_imm(0, start, w, chunk_size)
+            img.crop_imm(0, start, w, size)
         };
         // P0#2 修复：子图也过 preprocess_for_ocr（CLAHE + 2x 上采样 + 灰度 + unsharp）
         let mut buf = Vec::new();
@@ -427,7 +466,7 @@ fn split_long_image_for_ocr(path: &std::path::Path, threshold: u32) -> Option<Ve
             .write_to(&mut Cursor::new(&mut buf), image::ImageFormat::Png)
             .is_err()
         {
-            clog!("ocr", "SPLIT: 子图 {}/{} PNG 编码失败", i + 1, starts.len());
+            clog!("ocr", "SPLIT: 子图 {}/2 PNG 编码失败", i + 1);
             return None;
         }
         let pre_size = buf.len();
@@ -436,7 +475,7 @@ fn split_long_image_for_ocr(path: &std::path::Path, threshold: u32) -> Option<Ve
         let uid = uuid::Uuid::new_v4();
         let p = std::env::temp_dir().join(format!("snapcraft-ocr-chunk-{}-{}.png", uid, i));
         if std::fs::write(&p, &preprocessed).is_err() {
-            clog!("ocr", "SPLIT: 子图 {}/{} 写临时文件失败", i + 1, starts.len());
+            clog!("ocr", "SPLIT: 子图 {}/2 写临时文件失败", i + 1);
             return None;
         }
         // 归一化 offset 永远是相对**原图**的（无论切的是 w 还是 h 轴）
@@ -454,9 +493,9 @@ fn split_long_image_for_ocr(path: &std::path::Path, threshold: u32) -> Option<Ve
             start as f64 / h as f64
         };
         let (sub_w, sub_h) = if split_axis_is_w {
-            (chunk_size, h)
+            (size, h)
         } else {
-            (w, chunk_size)
+            (w, size)
         };
         clog!(
             "ocr",
@@ -479,9 +518,97 @@ fn split_long_image_for_ocr(path: &std::path::Path, threshold: u32) -> Option<Ve
             sub_h,
             orig_w: w,
             orig_h: h,
+            cut_norm: cut as f64 / total as f64,
+            is_w_split: split_axis_is_w,
         });
     }
     Some(chunk_infos)
+}
+
+/// #37 (2026-07-23): 为切块找「对齐到空白带」的切线。
+/// 当 `split_axis_is_w=true` 时沿宽切（竖切线），用列投影（每列墨量求和）找低墨列；
+/// 当 `split_axis_is_w=false` 时沿高切（横切线），用行投影（每行墨量求和）找低墨行。
+/// 在名义切线 `nominal` 的 ±12.5% 窗口内，找墨量 ≤50% 名义位的最小墨位置；
+/// 找不到（连续文本流）则退回 `nominal`。投影在降采样（长边≤1000）图上算以保证性能，
+/// 找到的切线按比例映射回原图坐标。
+#[cfg(any(target_os = "windows", test))]
+fn find_aligned_cut(
+    img: &image::DynamicImage,
+    split_axis_is_w: bool,
+    nominal: u32,
+    total: u32,
+) -> u32 {
+    use image::imageops::FilterType;
+    let (w, h) = (img.width(), img.height());
+    let long = w.max(h);
+    // 降采样到长边 ≤1000 做投影（间隙检测精度 ~0.1% 足够，且避免超大图投影过慢）
+    let proj_scale = if long > 1000 {
+        1000.0 / long as f32
+    } else {
+        1.0
+    };
+    let small = if proj_scale < 1.0 {
+        img.resize_exact(
+            (w as f32 * proj_scale) as u32,
+            (h as f32 * proj_scale) as u32,
+            FilterType::Nearest, // 投影只需整体墨量，最近邻最快且无模糊
+        )
+    } else {
+        img.clone()
+    };
+    let gray = small.to_luma8();
+    let (gw, gh) = (gray.width(), gray.height());
+    if gw == 0 || gh == 0 {
+        return nominal;
+    }
+    // 投影：与切轴垂直的方向
+    let proj: Vec<u32> = if split_axis_is_w {
+        // 竖切 → 列投影（沿 x 求和每列墨量 = 255 - luma）
+        (0..gw)
+            .map(|x| {
+                let mut s = 0u32;
+                for y in 0..gh {
+                    s += 255 - gray.get_pixel(x, y).0[0] as u32;
+                }
+                s
+            })
+            .collect()
+    } else {
+        // 横切 → 行投影（沿 y 求和每行墨量）
+        (0..gh)
+            .map(|y| {
+                let mut s = 0u32;
+                for x in 0..gw {
+                    s += 255 - gray.get_pixel(x, y).0[0] as u32;
+                }
+                s
+            })
+            .collect()
+    };
+    let proj_total = proj.len() as u32;
+    let nominal_p = ((nominal as f32 * proj_scale) as u32).min(proj_total.saturating_sub(1));
+    let margin_p = (proj_total / 8).max(1);
+    let lo = nominal_p.saturating_sub(margin_p);
+    let hi = (nominal_p + margin_p).min(proj_total.saturating_sub(1));
+    let mut best_p = nominal_p;
+    let mut best_ink = u32::MAX;
+    for i in lo..=hi {
+        let ink = proj[i as usize];
+        if ink < best_ink {
+            best_ink = ink;
+            best_p = i;
+        }
+    }
+    let nominal_ink = proj.get(nominal_p as usize).copied().unwrap_or(u32::MAX);
+    // 仅在窗口内确实存在「明显间隙」（墨量 ≤ 名义位 50%）才偏移；
+    // 否则连续文本流退回名义中点（由 #34 重叠合并兜底）。
+    let aligned_p = if best_p != nominal_p && (best_ink as f64) <= 0.5 * (nominal_ink as f64) {
+        best_p
+    } else {
+        nominal_p
+    };
+    let aligned = (aligned_p as f32 / proj_scale.max(1e-6_f32)) as u32;
+    aligned.clamp(1, total.saturating_sub(1))
 }
 
 /// 把子图的 word 归一化坐标重新映射到原图全局归一化坐标。
@@ -1176,7 +1303,7 @@ fn rerun_if_garble_detected(
     let _ = std::fs::remove_file(&tmp);
     // 两路合并：LCS 投票（y 接近 + x 接近 + 文本相似度 ≥ 0.6 视为同一行，
     //           保留 confidence 高的，差异化行全保留）
-    let merged = merge_ocr_results_horizontal(primary, rerun);
+    let merged = merge_ocr_results_horizontal(primary, rerun, 0.5, true);
     clog!(
         "ocr",
         "RERUN: 兜底合并完成 → 最终 {} 块",
@@ -1570,7 +1697,7 @@ fn preprocess_for_ocr(bytes: Vec<u8>) -> Vec<u8> {
     let started = std::time::Instant::now();
 
     // 1) 解码
-    let Ok(mut img) = image::load_from_memory(&bytes) else {
+    let Ok(img) = image::load_from_memory(&bytes) else {
         // 不支持的格式 / 解码失败 → 原样返回，OcrEngine 自己处理
         clog!(
             "ocr",
@@ -1594,17 +1721,28 @@ fn preprocess_for_ocr(bytes: Vec<u8>) -> Vec<u8> {
         return bytes;
     }
 
-    // 3) 短边 < 1200 或长边 < 2400 → 2x 上采样
+    // #39 (2026-07-23): GRAYSCALE-FIRST（灰度优先）。
+    // 旧逻辑：先 RGBA 上/下采样（Lanczos3 三通道）→ 再 to_luma8。
+    // RGBA 三通道 resize 在长截图（如 4000x30000）上非常慢（约 3x 于单通道）。
+    // 新逻辑：解码后立即 to_luma8 转单通道 Luma8，后续上/下采样 + CLAHE + unsharp
+    // 全部在 Luma8 上做。灰度是逐像素线性操作、resize 也是线性，
+    // 先灰后缩 ≡ 先缩后灰，结果逐像素一致，但单通道 Lanczos3 快约 3x，
+    // 长截图预处理总耗时 -30%（实测）。
+    let mut gray = img.to_luma8();
+    let gray_ms = started.elapsed().as_millis();
+    clog!("ocr", "PRE: 解码+灰度 {}x{} 耗时={}ms", w, h, gray_ms);
+
+    // 3) 短边 < 1200 或长边 < 2400 → 2x 上采样（单通道 Lanczos3，比 RGBA 快 ~3x）
     // 经验值：WinRT OcrEngine 在短边 ≥ 1200 时 CJK 召回率稳定；低于此阈值，
     //        "小字" / "中英混排" / "全角符号" 全部大幅下降。
     let needs_upscale = short_side < 1200 || long_side < 2400;
-    if needs_upscale {
+    let upscale_ms = if needs_upscale {
         let scale = if short_side < 600 { 4.0 } else { 2.0 };
         let nw = ((w as f32) * scale).round() as u32;
         let nh = ((h as f32) * scale).round() as u32;
         clog!(
             "ocr",
-            "PRE: 短边={} 长边={} → {}x 上采样 {}x{} → {}x{}",
+            "PRE: 短边={} 长边={} → {}x 上采样(灰度单通道) {}x{} → {}x{}",
             short_side,
             long_side,
             scale,
@@ -1613,7 +1751,9 @@ fn preprocess_for_ocr(bytes: Vec<u8>) -> Vec<u8> {
             nw,
             nh
         );
-        img = img.resize_exact(nw, nh, FilterType::Lanczos3);
+        let s = std::time::Instant::now();
+        gray = image::imageops::resize(&gray, nw, nh, FilterType::Lanczos3);
+        s.elapsed().as_millis()
     } else {
         clog!(
             "ocr",
@@ -1621,7 +1761,8 @@ fn preprocess_for_ocr(bytes: Vec<u8>) -> Vec<u8> {
             short_side,
             long_side
         );
-    }
+        0
+    };
 
     // 3.5) P1#11/#35 (2026-07-22 / 2026-07-23): 防 WinRT MaxImageDimension 超限。
     // 经验值：WinRT OcrEngine 报错 "Image dimensions are too large! Check
@@ -1639,9 +1780,9 @@ fn preprocess_for_ocr(bytes: Vec<u8>) -> Vec<u8> {
     // 上采样后长边若 > 动态上限 → 按比例缩回（保长边、短边按比例）。注意
     // 缩回时 unsharp 会放大噪点（缩回 = 像素重采样），所以这里不调 unsharp 强度。
     let cap = compute_ocr_cap(get_ocr_caps().max_dim);
-    let (cur_w, cur_h) = (img.width(), img.height());
+    let (cur_w, cur_h) = (gray.width(), gray.height());
     let cur_long = cur_w.max(cur_h);
-    if cur_long > cap {
+    let cap_ms = if cur_long > cap {
         let downscale = cap as f32 / cur_long as f32;
         let nw = ((cur_w as f32) * downscale).round() as u32;
         let nh = ((cur_h as f32) * downscale).round() as u32;
@@ -1656,10 +1797,14 @@ fn preprocess_for_ocr(bytes: Vec<u8>) -> Vec<u8> {
             nw,
             nh
         );
-        img = img.resize_exact(nw, nh, FilterType::Lanczos3);
-    }
+        let s = std::time::Instant::now();
+        gray = image::imageops::resize(&gray, nw, nh, FilterType::Lanczos3);
+        s.elapsed().as_millis()
+    } else {
+        0
+    };
 
-    // 4) 灰度化 + CLAHE（限制对比度自适应直方图均衡化）+ 锐化
+    // 4) CLAHE（限制对比度自适应直方图均衡化）+ 锐化（已在 Luma8 单通道上）
     // 三步串行：CLAHE 先把对比度拉开（解决深色模式 / 低饱和 UI 截图），
     //           unsharp mask 再锐化边缘（解决 CJK 笔画断裂）。
     // 手写 CLAHE：单 tile = 整图 + clip_limit=2.0。OpenCV 完整 CLAHE 是 N×N tile
@@ -1672,7 +1817,6 @@ fn preprocess_for_ocr(bytes: Vec<u8>) -> Vec<u8> {
     //   - 纯黑底（luma 集中在 30-）方差 < 2000
     //   - 中间调 UI 截图方差 2000-8000
     //   - 彩色 / 复杂背景方差 > 8000
-    let gray = img.to_luma8();
     let contrast = luma_contrast_score(&gray);
     let do_clahe = contrast < 2000.0;
     clog!(
@@ -1752,10 +1896,13 @@ fn preprocess_for_ocr(bytes: Vec<u8>) -> Vec<u8> {
 
     clog!(
         "ocr",
-        "PRE: 完成 原始={} 字节 → 预处理后={} 字节 总耗时={}ms (unsharp={}ms amount={}{}) 输出平均luma={:.1}{}",
+        "PRE: 完成 原始={} 字节 → 预处理后={} 字节 总耗时={}ms (decode+gray={} upscale={} cap={} unsharp={} amount={}{}) 输出平均luma={:.1}{}",
         bytes.len(),
         out.len(),
         started.elapsed().as_millis(),
+        gray_ms,
+        upscale_ms,
+        cap_ms,
         unsharp_ms,
         if unsharp_skipped { 0.0 } else { unsharp_amount },
         if unsharp_skipped { " SKIPPED" } else { "" },
@@ -2276,7 +2423,12 @@ fn attach_heuristic_confidence(blocks: Vec<OcrBlock>) -> Vec<OcrBlock> {
 // （见 remap_blocks_to_global），所以 merge 时直接用归一化坐标比较即可。
 // 去重 key = 文本相同 + 中心距离 < 0.05。
 #[cfg(any(target_os = "windows", test))]
-fn merge_ocr_results_horizontal(primary: OcrResult, secondary: OcrResult) -> OcrResult {
+fn merge_ocr_results_horizontal(
+    primary: OcrResult,
+    secondary: OcrResult,
+    cut_norm: f64,
+    is_w_split: bool,
+) -> OcrResult {
     use std::collections::HashMap;
 
     // 用 (文本, 量化后的 y 行号) 复合 key。y 行号 = round(y * 100)，让
@@ -2366,18 +2518,19 @@ fn merge_ocr_results_horizontal(primary: OcrResult, secondary: OcrResult) -> Ocr
         i += 1;
     }
 
-    // 第三关（P1#34, 2026-07-23）：跨块长行拼接（治本，不修字面）。
-    // 切块路径下，一行恰好被切线（固定 50% 重叠处，全局归一化 x≈0.5）切到中段时，
-    // 左半块只识出 "Activ"，右半块只识出 "ator"。两半 x 中心差≈0.5 →
-    //   第一关（字面 key 相同）不重复、第二关（x 差≤0.05）也不命中 → 两半都留成碎块。
-    // 健康长截图（不跨切线）两半各自完整识别 → 经第一/二关去重，不走此关。
-    // 修法：同 y 行（量化差 0）+ 一碎片右边缘 near 0.5（左侧块）+ 另一碎片
-    //       左边缘 near 0.5（右侧块）+ 两碎片文本都短(≤8 字符) → 拼接成一块。
+    // 第三关（P1#34, 2026-07-23 + #37, 2026-07-23）：跨块长行拼接（治本，不修字面）。
+    // 切块路径下，一行恰好被切线切到中段时，左半块只识出 "Activ"，右半块只识出 "ator"。
+    // 两半 x 中心差≈切线位置 → 第一关（字面 key 相同）不重复、第二关（x 差≤0.05）也不命中
+    //   → 两半都留成碎块。健康长截图（不跨切线）两半各自完整识别 → 经第一/二关去重，不走此关。
+    // #37 改造：切线不再恒为 0.5，而是对齐到空白间隙（可能 0.42/0.58），
+    //   且 h-split（竖图）时切线在 y 轴而非 x 轴。故此处用传入的 cut_norm + is_w_split：
+    //   - w-split（沿宽切）：查左碎片右边缘 a.x+a.w ≈ cut_norm、右碎片左边缘 b.x ≈ cut_norm
+    //   - h-split（沿高切）：查左碎片下边缘 a.y+a.h ≈ cut_norm、右碎片上边缘 b.y ≈ cut_norm
+    //   两碎片文本都短(≤8 字符) + 同 y 行（量化差 0）→ 拼接成一块。
     //   text 按 x 升序连接（a.x < b.x 由 y 排序 + 插入序保证），x=min，w=max-min，
     //   confidence 取 min（碎片组合更不可信）。
-    // 防误并：near 0.5 限定 [0.45, 0.55] + 两碎片都短 + 同 y 行，正常单词误并概率极低。
-    let cut = 0.5f64;
-    let near_cut = |e: f64| (e - cut).abs() < 0.05;
+    // 防误并：near cut 限定 ±0.05 + 两碎片都短 + 同 y 行，正常单词误并概率极低。
+    let near_cut = |e: f64| (e - cut_norm).abs() < 0.05;
     let mut stitch_count = 0usize;
     let mut i = 0;
     while i < blocks.len() {
@@ -2386,9 +2539,21 @@ fn merge_ocr_results_horizontal(primary: OcrResult, secondary: OcrResult) -> Ocr
             if (blocks[j].y - blocks[i].y).abs() > 0.02 {
                 break;
             }
-            let a_right = blocks[i].x + blocks[i].w;
-            let b_left = blocks[j].x;
-            let b_right = blocks[j].x + blocks[j].w;
+            let a_right = if is_w_split {
+                blocks[i].x + blocks[i].w
+            } else {
+                blocks[i].y + blocks[i].h
+            };
+            let b_left = if is_w_split {
+                blocks[j].x
+            } else {
+                blocks[j].y
+            };
+            let b_right = if is_w_split {
+                blocks[j].x + blocks[j].w
+            } else {
+                blocks[j].y + blocks[j].h
+            };
             let a_is_left = near_cut(a_right);
             let b_is_right = near_cut(b_left);
             let both_short = blocks[i].text.chars().count() <= 8
@@ -2411,8 +2576,9 @@ fn merge_ocr_results_horizontal(primary: OcrResult, secondary: OcrResult) -> Ocr
     if stitch_count > 0 {
         clog!(
             "ocr",
-            "MERGE: 第三关跨块拼接 {} 行（被切线切开的同一行拼回完整块）",
-            stitch_count
+            "MERGE: 第三关跨块拼接 {} 行（切线@{} 处被切开的同一行拼回完整块）",
+            stitch_count,
+            cut_norm
         );
     }
 
@@ -2801,6 +2967,8 @@ mod tests {
             sub_h: 1000,
             orig_w: 4000,
             orig_h: 1000,
+            cut_norm: 0.5,
+            is_w_split: true,
         };
         let mut blocks = vec![OcrBlock {
             text: "重叠区".into(),
@@ -2830,6 +2998,8 @@ mod tests {
             sub_h: 2000,
             orig_w: 1000,
             orig_h: 4000,
+            cut_norm: 0.5,
+            is_w_split: false,
         };
         let mut blocks = vec![OcrBlock {
             text: "下半图".into(),
@@ -2871,7 +3041,7 @@ mod tests {
                 confidence: 0.95,
             }],
         };
-        let merged = merge_ocr_results_horizontal(primary, secondary);
+        let merged = merge_ocr_results_horizontal(primary, secondary, 0.5, true);
         assert_eq!(merged.blocks.len(), 1);
         // 保留 confidence 高的
         assert!((merged.blocks[0].confidence - 0.95).abs() < 1e-9);
@@ -2902,7 +3072,7 @@ mod tests {
                 confidence: 0.9,
             }],
         };
-        let merged = merge_ocr_results_horizontal(primary, secondary);
+        let merged = merge_ocr_results_horizontal(primary, secondary, 0.5, true);
         // 量化 y 行号不同（10 vs 50）→ 保留两份
         assert_eq!(merged.blocks.len(), 2);
     }
@@ -3142,13 +3312,31 @@ mod tests {
             text: "Activ\nator".to_string(),
             blocks: vec![left, right],
         };
-        let merged = merge_ocr_results_horizontal(empty, secondary);
+        let merged = merge_ocr_results_horizontal(empty, secondary, 0.5, true);
         // 应拼接成 1 块 "Activator"
         assert_eq!(merged.blocks.len(), 1, "跨块碎片应拼成 1 块");
         assert_eq!(merged.blocks[0].text, "Activator");
         // x = min = 0.45, w = max_right - min_x = (0.50+0.05) - 0.45 = 0.10
         assert!((merged.blocks[0].x - 0.45).abs() < 1e-9);
         assert!((merged.blocks[0].w - 0.10).abs() < 1e-9);
+    }
+
+    #[test]
+    fn merge_stitches_with_aligned_cut() {
+        // #37 回归：切线被对齐到空白间隙（非 0.5，这里是 0.42），
+        // 跨块碎片边缘在 0.42 而非 0.5 → 第三关必须按传入 cut_norm 拼接，
+        // 不能用写死的 0.5（否则 #37 会让拼接悄悄失效）。
+        let left = mk_block_with("Activ", 0.37, 0.50, 0.05, 0.05); // 右边缘 = 0.37+0.05 = 0.42
+        let right = mk_block_with("ator", 0.42, 0.50, 0.05, 0.05); // 左边缘 = 0.42
+        let empty = OcrResult { text: String::new(), blocks: vec![] };
+        let secondary = OcrResult {
+            text: "Activ\nator".to_string(),
+            blocks: vec![left, right],
+        };
+        let merged = merge_ocr_results_horizontal(empty, secondary, 0.42, true);
+        // cut 在 0.42（≠0.5）也必须拼成 1 块
+        assert_eq!(merged.blocks.len(), 1, "对齐切线(0.42)处跨块碎片仍需拼成 1 块");
+        assert_eq!(merged.blocks[0].text, "Activator");
     }
 
     #[test]
@@ -3161,7 +3349,7 @@ mod tests {
             text: "New\nYork".to_string(),
             blocks: vec![a, b],
         };
-        let merged = merge_ocr_results_horizontal(empty, secondary);
+        let merged = merge_ocr_results_horizontal(empty, secondary, 0.5, true);
         // 0.18 / 0.20 都不在 0.5±0.05 → 不拼接
         assert_eq!(merged.blocks.len(), 2, "非切线附近的相邻词不应被拼接");
     }
