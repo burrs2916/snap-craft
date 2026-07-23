@@ -10,8 +10,7 @@
 
 import type { AiToolHost, NormRect, NormPoint } from '../features/ai/aiTools';
 import { emitTool, callTool } from './bridge';
-
-const clamp01 = (v: any): number => Math.max(0, Math.min(1, Number(v) || 0));
+import { clamp01 } from '../features/screenshot/utils/helpers';
 
 export class RemoteToolHost implements AiToolHost {
   private size: { width: number; height: number } | null = null;
