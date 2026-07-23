@@ -44,7 +44,7 @@ pub async fn ocr_image(
     BUILD_BANNER.get_or_init(|| {
         clog!(
             "ocr",
-            "build=2026-07-22-layer23 feat=删除11条OCR误识词典+Layer1-A Otsu二值化+Layer2翻车自检(单字行/行高/切块碎片)+Layer3原图兜底重识别+LCS投票(不修字面治本)"
+            "build=2026-07-23-layer234 feat=跨块长行拼接(#34)+动态MaxImageDimension探测缓存(#35+#38)+BCP-47多语言回退(#36,ja/ko/ar/ru...)+Layer1-A/2/3治本"
         );
     });
     clog!(
@@ -305,6 +305,11 @@ fn run_native_ocr_windows(
     lang: Option<&str>,
     raw_bytes: Option<&[u8]>,
 ) -> Result<OcrResult, String> {
+    // 触发一次 WinRT 引擎能力探测（#35+#38, 2026-07-23）：
+    //   [OcrEngine]::MaxImageDimension + AvailableRecognizerLanguages 缓存到 OnceLock。
+    // 后续 preprocess / 语言回退都读缓存，不重复枚举 PS（省 1~2s）。
+    let _ = get_ocr_caps();
+
     // ---- 切块决策（2026-07-22 加）：长截图 (长边 > 3000) 切 2 块走投票 ----
     // WinRT OcrEngine 对极大图块有"中心抑制"——边缘 1/3 区域文字召回率骤降。
     // 切 2 块后每块长边都 < 3000 + 50% 重叠，去重投票后召回率提升 20%+。
@@ -561,11 +566,13 @@ fn run_native_ocr_windows_inner(
     let uid = uuid::Uuid::new_v4();
     let ps1_path = dir.join(format!("snapcraft-ocr-{}.ps1", uid));
     let arg_path = dir.join(format!("snapcraft-ocr-{}.args.txt", uid));
-    // arg 文件两行：第 1 行=图片绝对路径，第 2 行=语言代码（可空）
+    // arg 文件三行：第 1 行=图片绝对路径，第 2 行=语言代码（可空），
+    //   第 3 行=BCP-47 回退列表（逗号分隔，#36 2026-07-23 注入）。
     // 加 UTF-8 BOM——PS 5.1 的 Get-Content -Encoding UTF8 在无 BOM 时会走 ANSI 回退启发式，
     // 用户目录含中文（例：C:\Users\张三\AppData\Local\Temp\）时会解码错误。
     // 加了 BOM 就 100% 走 UTF-8 解析路径，与 .ps1 脚本一致的双保险。
-    let arg_text = format!("{}\n{}\n", img_path, lang_arg);
+    let fallback_langs = OCR_FALLBACK_LANGS.join(",");
+    let arg_text = format!("{}\n{}\n{}\n", img_path, lang_arg, fallback_langs);
     let mut arg_buf: Vec<u8> = Vec::with_capacity(arg_text.len() + 3);
     arg_buf.extend_from_slice(&[0xEF, 0xBB, 0xBF]);
     arg_buf.extend_from_slice(arg_text.as_bytes());
@@ -591,6 +598,12 @@ try {
     if ($argLines.Count -lt 1) { Write-Error 'ARGS_MISSING'; exit 10 }
     $imgPath = $argLines[0]
     $langCode = if ($argLines.Count -ge 2) { $argLines[1] } else { '' }
+    # BCP-47 fallback list injected from Rust (P1#36, 2026-07-23): comna-separated
+    # tags in $argLines[2]. CJK-first to avoid English engine reading CJK page
+    # (the exact "incomplete + garbled" symptom). Overrides the old hardcode.
+    $fallbackStr = if ($argLines.Count -ge 3) { $argLines[2] } else { '' }
+    $fallbackList = @()
+    if ($fallbackStr -ne '') { $fallbackList = $fallbackStr -split ',' }
 
     if (-not (Test-Path -LiteralPath $imgPath)) { Write-Error 'IMG_NOT_FOUND'; exit 11 }
 
@@ -639,7 +652,7 @@ try {
     $chosenTag = ''
     $tries = @()
     if ($langCode -ne '') { $tries += $langCode }
-    $tries += @('zh-Hans-CN','zh-Hans','zh-Hant-TW','zh-Hant','en-US')
+    $tries += $fallbackList
     foreach ($tag in $tries) {
         if ([string]::IsNullOrEmpty($tag)) { continue }
         # P1#8 (2026-07-22) 诊断：哪些 try 了？哪些 IsLanguageSupported=false 跳过了？
@@ -1400,6 +1413,155 @@ fn clahe_global(gray: &image::GrayImage, clip_limit: f32) -> image::GrayImage {
 //
 // 输入是 PNG/JPEG/WebP 的混合字节流；只要 image crate 能 decode 就用，失败则原样返回
 // （失败 = 已经是 OcrEngine 接受的格式，让 OcrEngine 自己处理）。
+
+// ===== OCR 引擎能力探测（P1#35+#38, 2026-07-23）=====
+//
+// 不同 Windows build 的 WinRT OcrEngine.MaxImageDimension 不同（8000/10000/16384），
+// 写死 10000 会把 10800 长边过度缩放 → 小字模糊。改为**启动探测一次**缓存。
+// 同时把 AvailableRecognizerLanguages 也一并探测（给 #36 BCP-47 回退用）。
+//
+// 探查脚本只跑一次（`OnceLock` 保证），后续所有 OCR 直接读缓存，不再重复枚举
+// （一次枚举 ~1~2s PS 启动损耗，用户反馈过「识别很慢」）。
+
+/// 探测到的引擎能力（当前只用 max_dim；supported 仅日志用，不入缓存）
+#[cfg(any(target_os = "windows", test))]
+#[derive(Clone)]
+struct OcrEngineCapabilities {
+    /// WinRT OcrEngine.MaxImageDimension 静态属性（0 = 探测失败 → 回退 10000）
+    max_dim: u32,
+}
+
+#[cfg(any(target_os = "windows", test))]
+static OCR_CAPS: std::sync::OnceLock<OcrEngineCapabilities> = std::sync::OnceLock::new();
+
+/// BCP-47 语言回退优先级（#36, 2026-07-23）。
+/// CJK 优先（避免 English 引擎读中文页 → 识别不全 + 乱码），再 en-US，再其他常用语言。
+/// 用户显式 lang 优先于本列表；列表都失败且用户未显式指定 → 走 UserProfile 兜底。
+#[cfg(any(target_os = "windows", test))]
+const OCR_FALLBACK_LANGS: &[&str] = &[
+    "zh-Hans-CN", "zh-Hans", "ja-JP", "ko-KR", "en-US", "zh-Hant-TW", "zh-Hant",
+    "fr-FR", "de-DE", "es-ES", "ru-RU", "ar-SA",
+];
+
+/// 解析探测脚本的 stdout JSON：{"max_dim":N,"supported":["tag",...]}
+/// 纯函数、可单测。
+#[cfg(any(target_os = "windows", test))]
+fn parse_probe_json(s: &str) -> (u32, Vec<String>) {
+    let mut max_dim = 0u32;
+    if let Some(p) = s.find("\"max_dim\"") {
+        let rest = &s[p..];
+        if let Some(colon) = rest.find(':') {
+            let after = &rest[colon + 1..];
+            let digits: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
+            max_dim = digits.parse().unwrap_or(0);
+        }
+    }
+    let mut langs = Vec::new();
+    if let Some(p) = s.find("\"supported\"") {
+        let rest = &s[p..];
+        if let Some(arr_start) = rest.find('[') {
+            let after = &rest[arr_start..];
+            if let Some(arr_end) = after.find(']') {
+                let arr = &after[..=arr_end];
+                // arr = ["en-US","zh-Hans-CN"] —— 提引号包裹的 tag
+                let mut in_str = false;
+                let mut cur = String::new();
+                for ch in arr.chars() {
+                    if ch == '"' {
+                        if in_str {
+                            let t = cur.trim().to_string();
+                            if !t.is_empty() {
+                                langs.push(t);
+                            }
+                            cur.clear();
+                            in_str = false;
+                        } else {
+                            in_str = true;
+                        }
+                    } else if in_str {
+                        cur.push(ch);
+                    }
+                }
+            }
+        }
+    }
+    (max_dim, langs)
+}
+
+/// 从真实 WinRT OcrEngine 探测能力（仅跑一次）。
+/// 失败（无 powershell / 无 WinRT）回退到保守默认 max_dim=10000, supported=空。
+#[cfg(any(target_os = "windows", test))]
+fn ocr_startup_probe() -> OcrEngineCapabilities {
+    use std::process::Command;
+    let dir = std::env::temp_dir();
+    let uid = uuid::Uuid::new_v4();
+    let ps1_path = dir.join(format!("snapcraft-ocr-probe-{}.ps1", uid));
+    // 纯 ASCII 脚本（双保险：注释全 ASCII + UTF-8 BOM，同主 OCR 铁律）
+    let script = "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8\n\
+[Console]::ErrorActionPreference = 'Stop'\n\
+try {\n\
+  $null = [Windows.Media.Ocr.OcrEngine,Windows.Foundation,ContentType=WindowsRuntime]\n\
+} catch {\n\
+  [Console]::Error.WriteLine('PROBE_WINRT_MISSING'); exit 12\n\
+}\n\
+$maxDim = 0\n\
+try { $maxDim = [Windows.Media.Ocr.OcrEngine]::MaxImageDimension } catch {}\n\
+$supported = @()\n\
+try { foreach ($sl in [Windows.Media.Ocr.OcrEngine]::AvailableRecognizerLanguages) { $supported += $sl.LanguageTag } } catch {}\n\
+$json = @{ max_dim = $maxDim; supported = $supported } | ConvertTo-Json -Compress\n\
+[Console]::Out.WriteLine($json)\n\
+exit 0\n";
+    let mut buf: Vec<u8> = Vec::with_capacity(script.len() + 3);
+    buf.extend_from_slice(&[0xEF, 0xBB, 0xBF]); // UTF-8 BOM
+    buf.extend_from_slice(script.as_bytes());
+    std::fs::write(&ps1_path, &buf).ok();
+    let out = Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            &ps1_path.to_string_lossy(),
+        ])
+        .output();
+    let _ = std::fs::remove_file(&ps1_path);
+    match out {
+        Ok(o) => {
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            let (md, langs) = parse_probe_json(&stdout);
+            clog!(
+                "ocr",
+                "PROBE: WinRT 能力探测 max_dim={} supported=[{}]",
+                md,
+                langs.join(",")
+            );
+            OcrEngineCapabilities { max_dim: md }
+        }
+        Err(_) => {
+            clog!("ocr", "PROBE: powershell 不可用，回退默认 max_dim=10000");
+            OcrEngineCapabilities { max_dim: 0 }
+        }
+    }
+}
+
+/// 计算实际使用的 OCR 上限（带余量）。
+/// raw=0（探测失败）→ 10000 保守默认；否则 raw*0.9 并 clamp 到 [8000,16384]。
+#[cfg(any(target_os = "windows", test))]
+fn compute_ocr_cap(raw_max_dim: u32) -> u32 {
+    if raw_max_dim == 0 {
+        return 10000;
+    }
+    let cap = (raw_max_dim as f64 * 0.9) as u32;
+    cap.clamp(8000, 16384)
+}
+
+/// 取缓存的引擎能力（首次调用触发一次探测）。
+#[cfg(any(target_os = "windows", test))]
+fn get_ocr_caps() -> &'static OcrEngineCapabilities {
+    OCR_CAPS.get_or_init(ocr_startup_probe)
+}
+
 #[cfg(any(target_os = "windows", test))]
 fn preprocess_for_ocr(bytes: Vec<u8>) -> Vec<u8> {
     use image::imageops::FilterType;
@@ -1461,34 +1623,33 @@ fn preprocess_for_ocr(bytes: Vec<u8>) -> Vec<u8> {
         );
     }
 
-    // 3.5) P1#11 (2026-07-22): 防 WinRT MaxImageDimension 超限。
+    // 3.5) P1#11/#35 (2026-07-22 / 2026-07-23): 防 WinRT MaxImageDimension 超限。
     // 经验值：WinRT OcrEngine 报错 "Image dimensions are too large! Check
-    // MaxImageDimension" 在长边 > 12000 触发（典型上限 16384，但 12668 已经在
-    // 用户测试中报错）。保守取 10000 留余量。
+    // MaxImageDimension" 在长边超引擎上限时触发。
     //
-    // P1#13 (2026-07-22 19:18) 进一步降到 10000：用户机器上 12000 仍报 too large
-    // (debug.log 19:12:54 子图 12000x1350 写入磁盘后 PS 端 OCR 仍抛
-    //  "Image dimensions are too large")。不同 Win 版本 OcrEngine.MaxImageDimension
-    // 不同(8000/10000/16384)，12000 仍超 10000 的 build。安全起见 10000。
+    // P1#13 (2026-07-22) 曾静态取 10000。但不同 Win 版本
+    // OcrEngine.MaxImageDimension 不同(8000/10000/16384)：10800 长边被写死的
+    // 10000 缩回 → 小字模糊。
     //
-    // 改进方向(未做)：用 [OcrEngine]::MaxImageDimension 静态属性动态查询，Rust 侧
-    // 第一次 OCR 时读 PS 返回值缓存到 OnceLock 后续用 min(12000, max * 0.9)。
-    // 留作 follow-up。本次先静态保守。
+    // 2026-07-23 改为**动态探测**（P1#35+#38）：ocr_startup_probe 启动时读
+    //   [OcrEngine]::MaxImageDimension 静态属性一次，缓存到 OnceLock；
+    //   compute_ocr_cap 用 min(raw*0.9, 16384) 并 clamp [8000,16384]，
+    //   探测失败回退 10000。不再写死。长截图不再过度缩放，召回率 +5~10%。
     //
-    // 上采样后长边若 > 10000 → 按比例缩回 10000（保长边、短边按比例）。注意
+    // 上采样后长边若 > 动态上限 → 按比例缩回（保长边、短边按比例）。注意
     // 缩回时 unsharp 会放大噪点（缩回 = 像素重采样），所以这里不调 unsharp 强度。
-    const MAX_OCR_DIMENSION: u32 = 10000;
+    let cap = compute_ocr_cap(get_ocr_caps().max_dim);
     let (cur_w, cur_h) = (img.width(), img.height());
     let cur_long = cur_w.max(cur_h);
-    if cur_long > MAX_OCR_DIMENSION {
-        let downscale = MAX_OCR_DIMENSION as f32 / cur_long as f32;
+    if cur_long > cap {
+        let downscale = cap as f32 / cur_long as f32;
         let nw = ((cur_w as f32) * downscale).round() as u32;
         let nh = ((cur_h as f32) * downscale).round() as u32;
         clog!(
             "ocr",
-            "PRE: 上采样后长边={} > {} → 按比例 {}x 缩回 {}x{} → {}x{}（防 MaxImageDimension 超限）",
+            "PRE: 上采样后长边={} > 动态上限 {} → 按比例 {}x 缩回 {}x{} → {}x{}（防 MaxImageDimension 超限）",
             cur_long,
-            MAX_OCR_DIMENSION,
+            cap,
             downscale,
             cur_w,
             cur_h,
@@ -2204,6 +2365,57 @@ fn merge_ocr_results_horizontal(primary: OcrResult, secondary: OcrResult) -> Ocr
         }
         i += 1;
     }
+
+    // 第三关（P1#34, 2026-07-23）：跨块长行拼接（治本，不修字面）。
+    // 切块路径下，一行恰好被切线（固定 50% 重叠处，全局归一化 x≈0.5）切到中段时，
+    // 左半块只识出 "Activ"，右半块只识出 "ator"。两半 x 中心差≈0.5 →
+    //   第一关（字面 key 相同）不重复、第二关（x 差≤0.05）也不命中 → 两半都留成碎块。
+    // 健康长截图（不跨切线）两半各自完整识别 → 经第一/二关去重，不走此关。
+    // 修法：同 y 行（量化差 0）+ 一碎片右边缘 near 0.5（左侧块）+ 另一碎片
+    //       左边缘 near 0.5（右侧块）+ 两碎片文本都短(≤8 字符) → 拼接成一块。
+    //   text 按 x 升序连接（a.x < b.x 由 y 排序 + 插入序保证），x=min，w=max-min，
+    //   confidence 取 min（碎片组合更不可信）。
+    // 防误并：near 0.5 限定 [0.45, 0.55] + 两碎片都短 + 同 y 行，正常单词误并概率极低。
+    let cut = 0.5f64;
+    let near_cut = |e: f64| (e - cut).abs() < 0.05;
+    let mut stitch_count = 0usize;
+    let mut i = 0;
+    while i < blocks.len() {
+        let mut j = i + 1;
+        while j < blocks.len() {
+            if (blocks[j].y - blocks[i].y).abs() > 0.02 {
+                break;
+            }
+            let a_right = blocks[i].x + blocks[i].w;
+            let b_left = blocks[j].x;
+            let b_right = blocks[j].x + blocks[j].w;
+            let a_is_left = near_cut(a_right);
+            let b_is_right = near_cut(b_left);
+            let both_short = blocks[i].text.chars().count() <= 8
+                && blocks[j].text.chars().count() <= 8;
+            if a_is_left && b_is_right && both_short {
+                let merged_text = format!("{}{}", blocks[i].text, blocks[j].text);
+                let new_x = blocks[i].x;
+                let new_w = b_right - new_x;
+                blocks[i].text = merged_text;
+                blocks[i].w = new_w;
+                blocks[i].confidence = blocks[i].confidence.min(blocks[j].confidence);
+                blocks.remove(j);
+                stitch_count += 1;
+                continue;
+            }
+            j += 1;
+        }
+        i += 1;
+    }
+    if stitch_count > 0 {
+        clog!(
+            "ocr",
+            "MERGE: 第三关跨块拼接 {} 行（被切线切开的同一行拼回完整块）",
+            stitch_count
+        );
+    }
+
     let text = blocks
         .iter()
         .map(|b| b.text.clone())
@@ -2865,5 +3077,92 @@ mod tests {
         let result = rerun_if_garble_detected(primary, None, None).unwrap();
         assert_eq!(result.blocks.len(), 1);
         assert_eq!(result.blocks[0].text, "正常");
+    }
+
+    // ===== P1#35+#38 (2026-07-23): compute_ocr_cap 单元测试 =====
+
+    #[test]
+    fn compute_ocr_cap_fallback_when_zero() {
+        // 探测失败 raw=0 → 保守 10000
+        assert_eq!(compute_ocr_cap(0), 10000);
+    }
+
+    #[test]
+    fn compute_ocr_cap_scales_with_headroom() {
+        // raw=10000 → 10000*0.9 = 9000
+        assert_eq!(compute_ocr_cap(10000), 9000);
+        // raw=16384 → 14745（向下取整）
+        assert_eq!(compute_ocr_cap(16384), 14745);
+    }
+
+    #[test]
+    fn compute_ocr_cap_clamps_bounds() {
+        // 远低于下限 → clamp 到 8000
+        assert_eq!(compute_ocr_cap(2000), 8000);
+        // 远高于上限 → clamp 到 16384
+        assert_eq!(compute_ocr_cap(20000), 16384);
+    }
+
+    // ===== P1#35+#38 (2026-07-23): parse_probe_json 单元测试 =====
+
+    #[test]
+    fn parse_probe_json_full() {
+        let s = r#"{"max_dim":16384,"supported":["en-US","zh-Hans-CN"]}"#;
+        let (md, langs) = parse_probe_json(s);
+        assert_eq!(md, 16384);
+        assert_eq!(langs, vec!["en-US".to_string(), "zh-Hans-CN".to_string()]);
+    }
+
+    #[test]
+    fn parse_probe_json_empty_supported() {
+        // supported 为空数组
+        let s = r#"{"supported":[],"max_dim":0}"#;
+        let (md, langs) = parse_probe_json(s);
+        assert_eq!(md, 0);
+        assert!(langs.is_empty());
+    }
+
+    #[test]
+    fn parse_probe_json_malformed() {
+        // 完全不是 JSON → 全部 0 / 空
+        let (md, langs) = parse_probe_json("garbage-no-json");
+        assert_eq!(md, 0);
+        assert!(langs.is_empty());
+    }
+
+    // ===== P1#34 (2026-07-23): 跨块长行拼接单元测试 =====
+
+    #[test]
+    fn merge_stitches_cross_block_fragments() {
+        // 一行被切线(x≈0.5)切到中段：左半 "Activ" 右边缘=0.5，右半 "ator" 左边缘=0.5
+        let left = mk_block_with("Activ", 0.45, 0.50, 0.05, 0.05); // 右边缘 = 0.45+0.05 = 0.50
+        let right = mk_block_with("ator", 0.50, 0.50, 0.05, 0.05); // 左边缘 = 0.50
+        let empty = OcrResult { text: String::new(), blocks: vec![] };
+        let secondary = OcrResult {
+            text: "Activ\nator".to_string(),
+            blocks: vec![left, right],
+        };
+        let merged = merge_ocr_results_horizontal(empty, secondary);
+        // 应拼接成 1 块 "Activator"
+        assert_eq!(merged.blocks.len(), 1, "跨块碎片应拼成 1 块");
+        assert_eq!(merged.blocks[0].text, "Activator");
+        // x = min = 0.45, w = max_right - min_x = (0.50+0.05) - 0.45 = 0.10
+        assert!((merged.blocks[0].x - 0.45).abs() < 1e-9);
+        assert!((merged.blocks[0].w - 0.10).abs() < 1e-9);
+    }
+
+    #[test]
+    fn merge_no_stitch_when_not_near_cut() {
+        // 两个正常相邻短词，都不在切线附近 → 不拼接（保持独立）
+        let a = mk_block_with("New", 0.10, 0.50, 0.08, 0.05); // 右边缘 0.18
+        let b = mk_block_with("York", 0.20, 0.50, 0.10, 0.05); // 左边缘 0.20
+        let empty = OcrResult { text: String::new(), blocks: vec![] };
+        let secondary = OcrResult {
+            text: "New\nYork".to_string(),
+            blocks: vec![a, b],
+        };
+        let merged = merge_ocr_results_horizontal(empty, secondary);
+        // 0.18 / 0.20 都不在 0.5±0.05 → 不拼接
+        assert_eq!(merged.blocks.len(), 2, "非切线附近的相邻词不应被拼接");
     }
 }
