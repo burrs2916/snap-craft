@@ -1,8 +1,6 @@
 import { useCallback, useEffect, useRef, useState, useMemo, type MouseEvent } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
-// Phase 18：OCR 文本清洗（去零宽字符/控制字符/重复字，避免污染 AI 视觉上下文）
-import { cleanOcrText } from '../ai/ocrClean';
 import { getCurrentWindow, LogicalSize, LogicalPosition } from '@tauri-apps/api/window';
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { save } from '@tauri-apps/plugin-dialog';
@@ -12,15 +10,13 @@ import { openEditorWindow, openClipboardOcrWindow } from './components/EditorWin
 import { LanguageToggle } from '../../components/LanguageToggle';
 import { useScreenshotStore } from './store/screenshotStore';
 import type { OcrResult, OcrBlock, AnnotationObject } from './types';
-import {
-} from '../../ai-window/bridge';
-import { useAiStore } from '../ai/aiStore';
 import { useI18n, t } from '../../i18n';
 import { stitchFrames, loadImage, type StitchFrame } from './utils/stitch';
 import { useOcrPanel } from './hooks/useOcrPanel';
 import { useBatchOperations } from './hooks/useBatchOperations';
 import { useAiIntegration } from './hooks/useAiIntegration';
 import { useScreenPermission } from './hooks/useScreenPermission';
+import { useScrollCapture, type DisplayInfo } from './hooks/useScrollCapture';
 import { BatchBar, BatchOcrPanel, AiBatchPanel } from './components/BatchOperations';
 import { OcrPanel } from './components/OcrPanel';
 import { clamp01, genAnnoId, normToPx, cropDataUrl, flog } from './utils/helpers';
@@ -116,17 +112,6 @@ interface HistoryEntry {
   source?: 'capture' | 'clipboard' | 'ai_edit';
   // OCR 识别结果（已落库），用于历史网格按 OCR 文字搜索。
   ocr_text?: string;
-}
-
-// macOS 显示器信息（list_displays 返回，全局逻辑点坐标）
-interface DisplayInfo {
-  id: number;
-  is_main: boolean;
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-  scale: number;
 }
 
 // 按真实物理位置排序显示器：先按全局 x（左→右），x 相近时按 y（上→下）。
@@ -273,23 +258,6 @@ export const EnhancedScreenshotApp = () => {
   const [captureDelay, setCaptureDelay] = useState(0);
   // 延时倒计时显示（秒），null 表示无倒计时进行中
   const [countdown, setCountdown] = useState<number | null>(null);
-  // ===== 滚动长截图 =====
-  // scrolling: 是否处于滚动捕获态（主窗口缩为角落控制条）
-  // scrollFrames: 已捕获的帧 dataUrl 列表
-  // scrollRect: 本次捕获的固定区域（该屏顶部条带，物理像素全局坐标）
-  // scrollBusy: 单帧捕获中，防重入
-  const [scrolling, setScrolling] = useState(false);
-  const [scrollFrames, setScrollFrames] = useState<string[]>([]);
-  const [scrollBusy, setScrollBusy] = useState(false);
-  const scrollRectRef = useRef<{ x: number; y: number; width: number; height: number } | null>(null);
-  // 进入滚动态前主窗口的尺寸/位置，退出时恢复
-  const preScrollWinRef = useRef<{ w: number; h: number; x: number; y: number } | null>(null);
-  const scrollBusyRef = useRef(false);
-  // scrolling 的 ref 镜像：供全局快捷键监听器判断当前是否在滚动态（避免作为依赖重注册）
-  const scrollingRef = useRef(false);
-  useEffect(() => {
-    scrollingRef.current = scrolling;
-  }, [scrolling]);
   // 权限检查中：platform 未确定或正在 check/request 期间，避免 UI 闪烁
   // 前端构建模式：vite dev 提供前端时 import.meta.env.DEV 为 true。
   // 注意：此前 tauri dev 跑裸二进制、进不了 TCC；现已改为 start.sh dev
@@ -404,7 +372,6 @@ export const EnhancedScreenshotApp = () => {
   const perm = useScreenPermission({ platform, flash, t });
   const { permissionNeeded, permissionChecking, openScreenRecordingSettings, recheckPermission, ensureCapturePermission, setPermissionNeeded } = perm;
 
-
   // 延时倒计时：在主窗口仍可见时以覆盖层显示 N…1 的读秒，倒计时结束再真正截图。
   // 放在窗口隐藏之前跑，用户能看到读秒；结束后返回，调用方再 hide + 截图。
   const runCountdown = useCallback(async (secs: number) => {
@@ -484,6 +451,17 @@ export const EnhancedScreenshotApp = () => {
     },
     [flash]
   );
+
+  // ===== 滚动长截图（提取到 useScrollCapture hook）=====
+  const scroll = useScrollCapture({
+    platform, flash, t, ensureCapturePermission, setPermissionNeeded,
+    onCaptured, setDisplays, setShowDisplayPicker, pickerPurposeRef,
+  });
+  const {
+    scrolling, scrollFrames, scrollBusy, scrollingRef,
+    enterScrollMode, captureScrollFrame, restoreMainWindow,
+    finishScrollCapture, cancelScrollCapture, startScrollCapture,
+  } = scroll;
 
   // 结果条 / 历史项 → 进入编辑器标注
   const openEditor = useCallback(
@@ -588,159 +566,6 @@ export const EnhancedScreenshotApp = () => {
   // 捕获区域 = 所选显示器的「整宽 × 顶部约 78% 高」固定条带。用户在其它位置滚动，
   // 按全局快捷键（⌘/Ctrl+Shift+4）或点控制条按钮捕一帧，完成后自动去重叠拼成长图。
 
-  // 进入滚动捕获态：把主窗口缩为角落小控制条（不遮挡内容），记录捕获区域。
-  const enterScrollMode = useCallback(
-    async (disp: DisplayInfo) => {
-      // 捕获条带：整屏宽，顶部起，高取屏高的 78%（留出底部让用户操作滚动）
-      const stripH = Math.round(disp.height * 0.78);
-      scrollRectRef.current = { x: disp.x, y: disp.y, width: disp.width, height: stripH };
-      setScrollFrames([]);
-      setScrolling(true);
-      // 记录并缩小主窗口到该屏右下角作为控制条
-      const win = getCurrentWindow();
-      try {
-        const sz = await win.innerSize();
-        const ps = await win.outerPosition();
-        const sf = await win.scaleFactor();
-        preScrollWinRef.current = {
-          w: sz.width / sf,
-          h: sz.height / sf,
-          x: ps.x / sf,
-          y: ps.y / sf,
-        };
-        const barW = 340;
-        const barH = 132;
-        await win.setSize(new LogicalSize(barW, barH));
-        // 停靠到该屏右下角（用逻辑坐标；控制条不遮挡将要滚动的主要区域）
-        const px = disp.x + disp.width - barW - 24;
-        const py = disp.y + disp.height - barH - 40;
-        await win.setPosition(new LogicalPosition(px, py));
-        await win.setAlwaysOnTop(true);
-        await win.show();
-        await win.setFocus();
-      } catch {
-        /* 窗口操作失败不阻断，仍可用 */
-      }
-    },
-    []
-  );
-
-  // 捕获一帧：截固定区域，追加到帧列表
-  const captureScrollFrame = useCallback(async () => {
-    if (scrollBusyRef.current) return;
-    const rect = scrollRectRef.current;
-    if (!rect) return;
-    scrollBusyRef.current = true;
-    setScrollBusy(true);
-    // 权限预检（macOS）
-    if (!(await ensureCapturePermission())) {
-      scrollBusyRef.current = false;
-      setScrollBusy(false);
-      return;
-    }
-    try {
-      const dataUrl = await invoke<string>('capture_region_fixed', { rect });
-      setScrollFrames((f) => [...f, dataUrl]);
-      flash(t('toast.frameCaptured'), 'success');
-    } catch (e) {
-      const msg = String(e);
-      if (msg.includes('屏幕录制') || msg.includes('permission') || msg.includes('denied') || msg.includes('not authorized')) {
-        if (platform === 'macos') {
-          invoke<boolean>('check_screen_capture_access').then((ok) => {
-            if (!ok) setPermissionNeeded(true);
-          });
-        }
-      } else {
-        flash(t('toast.captureFailed', { msg }), 'error');
-      }
-    } finally {
-      scrollBusyRef.current = false;
-      setScrollBusy(false);
-    }
-  }, [ensureCapturePermission, flash, platform, setPermissionNeeded]);
-
-  // 恢复主窗口尺寸/位置并退出滚动态
-  const restoreMainWindow = useCallback(async () => {
-    const win = getCurrentWindow();
-    try {
-      await win.setAlwaysOnTop(false);
-      const p = preScrollWinRef.current;
-      if (p) {
-        await win.setSize(new LogicalSize(p.w, p.h));
-        await win.setPosition(new LogicalPosition(p.x, p.y));
-      }
-      await win.show();
-      await win.setFocus();
-    } catch {
-      /* ignore */
-    }
-    preScrollWinRef.current = null;
-    setScrolling(false);
-  }, []);
-
-  // 完成：拼接所有帧 → 长图 → 走 onCaptured（进历史 + 结果条）
-  const finishScrollCapture = useCallback(async () => {
-    const frames = scrollFrames;
-    await restoreMainWindow();
-    if (frames.length === 0) {
-      flash(t('toast.noFrames'), 'error');
-      return;
-    }
-    if (frames.length === 1) {
-      // 只有一帧，直接当普通截图
-      await onCaptured(frames[0]);
-      return;
-    }
-    try {
-      const imgs = await Promise.all(frames.map((d) => loadImage(d)));
-      const sframes: StitchFrame[] = imgs.map((img) => ({
-        img,
-        width: img.naturalWidth,
-        height: img.naturalHeight,
-      }));
-      const { canvas, hadLowConfidence } = stitchFrames(sframes);
-      const merged = canvas.toDataURL('image/png');
-      await onCaptured(merged);
-      if (hadLowConfidence) {
-        flash(t('toast.stitchGap'), 'error');
-      } else {
-        flash(t('toast.stitched', { n: frames.length }), 'success');
-      }
-    } catch (e) {
-      flash(t('toast.stitchFailed', { msg: String(e) }), 'error');
-    }
-  }, [scrollFrames, restoreMainWindow, onCaptured, flash]);
-
-  // 取消滚动捕获：丢弃已捕获帧并恢复窗口
-  const cancelScrollCapture = useCallback(async () => {
-    setScrollFrames([]);
-    await restoreMainWindow();
-    flash(t('toast.scrollCancelled'), 'success');
-  }, [restoreMainWindow, flash]);
-
-  // 发起滚动长截图：多屏先选屏，单屏直接进入
-  const startScrollCapture = useCallback(async () => {
-    if (scrolling) return;
-    let disp: DisplayInfo[] = [];
-    try {
-      disp = await invoke<DisplayInfo[]>('list_displays');
-      if (disp.length > 0) setDisplays(disp);
-    } catch {
-      /* ignore */
-    }
-    if (disp.length > 1) {
-      pickerPurposeRef.current = 'scroll';
-      const win = getCurrentWindow();
-      await win.show();
-      await win.setFocus();
-      setShowDisplayPicker(true);
-      return;
-    }
-    // 单屏（或枚举失败退回主屏）：构造一个默认屏信息
-    const only =
-      disp[0] || { id: 0, is_main: true, x: 0, y: 0, width: 1440, height: 900, scale: 1 };
-    await enterScrollMode(only);
-  }, [scrolling, enterScrollMode]);
 
   // 用户在选择器中点选某块屏后：关闭选择器 → 按用途走全屏截图或滚动长截图
   const pickDisplay = useCallback(

@@ -24,6 +24,12 @@ import type { OcrResult, OcrBlock, AnnotationObject } from '../types';
 import type { AiToolHost, NormRect } from '../../ai/aiTools';
 import { createToolExecutor } from '../../ai/aiTools';
 import { openAiWindow, pushAiContext, setupMainBridge, type AiContext } from '../../../ai-window/bridge';
+import { clamp01, genAnnoId, normToPx, cropDataUrl } from '../utils/helpers';
+import { ocrReadingOrder, ocrHighlightParts, ocrExtractEntities, type OcrLayout, type OcrExportFmt, type OcrEntity } from '../utils/ocrUtils';
+
+const elog = (msg: string) => {
+  invoke('diag_log', { msg: `[editor-window] ${msg}` }).catch(() => {});
+};
 
 // N3：多区域连续框选 OCR 的单个区域结果
 interface RegionOcrResult {
@@ -31,156 +37,6 @@ interface RegionOcrResult {
   dataUrl: string; // 裁剪区域图（用于缩略图回显）
   text: string; // 该区域 OCR 文字
   blocks: OcrBlock[];
-}
-
-// ── Phase 14：AI 智能编辑 — 工具宿主辅助函数 ──
-const clamp01 = (v: any): number => Math.max(0, Math.min(1, Number(v) || 0));
-const genAnnoId = () => `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
-
-/** 归一化矩形(0~1) → 原图像素坐标 */
-function normToPx(r: NormRect, W: number, H: number) {
-  const x = Math.round(clamp01(r.x) * W);
-  const y = Math.round(clamp01(r.y) * H);
-  const w = Math.round(clamp01(r.w) * W);
-  const h = Math.round(clamp01(r.h) * H);
-  return { x, y, w, h };
-}
-
-/** 从源图 dataURL 裁剪指定像素区域，返回新的 dataURL（供区域 OCR 使用） */
-function cropDataUrl(src: string, x: number, y: number, w: number, h: number): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    img.onload = () => {
-      const cx = document.createElement('canvas');
-      cx.width = Math.max(1, Math.round(w));
-      cx.height = Math.max(1, Math.round(h));
-      const ctx = cx.getContext('2d');
-      if (!ctx) return reject(new Error('no 2d context'));
-      ctx.drawImage(img, x, y, w, h, 0, 0, cx.width, cx.height);
-      resolve(cx.toDataURL('image/png'));
-    };
-    img.onerror = () => reject(new Error('image load failed'));
-    img.src = src;
-  });
-}
-
-const elog = (msg: string) => {
-  invoke('diag_log', { msg: `[editor-window] ${msg}` }).catch(() => {});
-};
-
-// OCR 阅读顺序模式：'none' 保留原生读序；'reading' 按块坐标智能重排（多列/竖排）。
-type OcrLayout = 'none' | 'reading';
-// OCR 导出格式：'txt' 纯文本 / 'md' Markdown / 'json' 带坐标 / 'tsv' 带坐标。
-type OcrExportFmt = 'txt' | 'md' | 'json' | 'tsv';
-
-// 智能阅读顺序：按块坐标把乱序结果重排为正常阅读顺序（与主窗同源逻辑，隔离复用）。
-// 仅改变遍历顺序，返回原始块下标数组，编辑映射不被破坏。
-function ocrReadingOrder(blocks: OcrBlock[]): number[] {
-  const idx = blocks.map((_, i) => i);
-  if (blocks.length < 2) return idx;
-  const vertCount = blocks.filter((b) => b.h > b.w * 1.2).length;
-  const isVertical = vertCount > blocks.length / 2;
-  if (isVertical) {
-    return [...idx].sort((a, b) => {
-      const A = blocks[a];
-      const B = blocks[b];
-      const ax = A.x + A.w / 2;
-      const bx = B.x + B.w / 2;
-      const ay = A.y + A.h / 2;
-      const by = B.y + B.h / 2;
-      if (Math.abs(ax - bx) < (A.w + B.w) / 2) return ay - by;
-      return bx - ax;
-    });
-  }
-  const byX = [...idx].sort((a, b) => blocks[a].x + blocks[a].w / 2 - (blocks[b].x + blocks[b].w / 2));
-  const columns: number[][] = [];
-  let cur: number[] = [byX[0]];
-  for (let k = 1; k < byX.length; k++) {
-    const prev = blocks[byX[k - 1]];
-    const curB = blocks[byX[k]];
-    const gap = curB.x + curB.w / 2 - (prev.x + prev.w / 2);
-    const avgW = (prev.w + curB.w) / 2;
-    if (gap > avgW * 0.6) {
-      columns.push(cur);
-      cur = [byX[k]];
-    } else {
-      cur.push(byX[k]);
-    }
-  }
-  columns.push(cur);
-  columns.forEach((col) => col.sort((a, b) => blocks[a].y - blocks[b].y));
-  columns.sort((a, b) => blocks[a[0]].x - blocks[b[0]].x);
-  return columns.flat();
-}
-
-// 把文字按搜索词切成高亮片段（大小写不敏感，不用正则避免注入）。
-function ocrHighlightParts(text: string, query: string): { text: string; hit: boolean }[] {
-  const q = query.trim();
-  if (!q) return [{ text, hit: false }];
-  const lt = text.toLowerCase();
-  const ql = q.toLowerCase();
-  const out: { text: string; hit: boolean }[] = [];
-  let idx = 0;
-  let at = lt.indexOf(ql, idx);
-  while (at >= 0) {
-    if (at > idx) out.push({ text: text.slice(idx, at), hit: false });
-    out.push({ text: text.slice(at, at + q.length), hit: true });
-    idx = at + q.length;
-    at = lt.indexOf(ql, idx);
-  }
-  if (idx < text.length) out.push({ text: text.slice(idx), hit: false });
-  return out;
-}
-
-// 智能实体提取：从识别结果文本中按需提取 URL / 邮箱 / 电话号码，便于一键复制。
-// 与主窗同源逻辑（隔离复制，避免 EditorWindow <-> EnhancedScreenshotApp 循环依赖）；
-// 纯前端、安全正则 + 去重，不进入复制/导出/贴回数据链，仅作侧栏辅助视图。
-interface OcrEntity {
-  urls: string[];
-  emails: string[];
-  phones: string[];
-}
-function ocrExtractEntities(text: string): OcrEntity {
-  const urls = new Set<string>();
-  const emails = new Set<string>();
-  const phones = new Set<string>();
-  if (!text) return { urls: [], emails: [], phones: [] };
-
-  // URL：http(s):// 或 www. 开头，截到空白/引号/中文标点为止；去掉结尾可能的标点。
-  const urlRe = /(?:https?:\/\/|www\.)[^\s<>"'」』）)】〗，。、；：！？]+/gi;
-  let m: RegExpExecArray | null;
-  while ((m = urlRe.exec(text)) !== null) {
-    const u = m[0].replace(/[)\]】』」』）.,;:!?]+$/, '');
-    if (u.length > 4) urls.add(u);
-  }
-
-  // 邮箱：标准 user@domain.tld 形态。
-  const emailRe = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
-  while ((m = emailRe.exec(text)) !== null) emails.add(m[0]);
-
-  // 电话：7–14 位数字，可含空格/括号/连字符/点；过滤纯日期（YYYY-MM-DD 等）与过短/过长。
-  const phoneRe = /(\+?\d[\d\s\-().]{5,}\d)/g;
-  const isDate = (s: string) => /^\d{4}[-.\s]\d{1,2}[-.\s]\d{1,2}$/.test(s.trim());
-  while ((m = phoneRe.exec(text)) !== null) {
-    const p = m[0].trim();
-    const digits = p.replace(/\D/g, '');
-    if (digits.length < 7 || digits.length > 14) continue;
-    if (isDate(p)) continue; // 避免把日期误判为电话
-    // 必含分隔特征：国际号(+)、空格、括号，或含连字符/点（且非日期）；
-    // 纯数字串仅接受 11 位（中国大陆手机号启发式），规避价格/编号等长数字误判。
-    const ok =
-      p.startsWith('+') ||
-      /[\s()]/.test(p) ||
-      /[-.]/.test(p) ||
-      digits.length === 11;
-    if (ok) phones.add(p);
-  }
-
-  return {
-    urls: [...urls],
-    emails: [...emails],
-    phones: [...phones],
-  };
 }
 
 // N4：长图/超大图自动分块 OCR —— 纯前端、零后端。

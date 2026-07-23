@@ -203,8 +203,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, AnnotationCanvasProp
     currentColor,
     currentStrokeWidth,
     setActiveTool,
-    setCurrentColor,
-    setCurrentStrokeWidth,
+    updateStyle,
     currentFontSize,
     currentBold,
     currentItalic,
@@ -373,14 +372,14 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, AnnotationCanvasProp
       if (e.key === '[') {
         e.preventDefault();
         const nw = Math.max(2, currentStrokeWidth - 2);
-        setCurrentStrokeWidth(nw);
+        updateStyle({ currentStrokeWidth: nw });
         if (selectedId) updateAnnotation(selectedId, { lineWidth: nw });
         return;
       }
       if (e.key === ']') {
         e.preventDefault();
         const nw = Math.min(8, currentStrokeWidth + 2);
-        setCurrentStrokeWidth(nw);
+        updateStyle({ currentStrokeWidth: nw });
         if (selectedId) updateAnnotation(selectedId, { lineWidth: nw });
         return;
       }
@@ -395,7 +394,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, AnnotationCanvasProp
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [selectedId, deleteAnnotation, setSelectedId, undo, redo, setActiveTool, setCurrentStrokeWidth, currentStrokeWidth, updateAnnotation]);
+  }, [selectedId, deleteAnnotation, setSelectedId, undo, redo, setActiveTool, updateStyle, currentStrokeWidth, updateAnnotation]);
 
   // 离开裁剪工具（且非 OCR 选区模式）时清空未确认的裁剪框
   useEffect(() => {

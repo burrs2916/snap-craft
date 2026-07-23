@@ -1,11 +1,9 @@
 import { create } from 'zustand';
-import { ScreenshotData, AnnotationObject, Layer } from '../types';
+import { ScreenshotData, AnnotationObject } from '../types';
 
 interface ScreenshotState {
   currentScreenshot: ScreenshotData | null;
   annotations: AnnotationObject[];
-  layers: Layer[];
-  activeLayerId: string | null;
   selectedAnnotationIds: string[];
   selectedId: string | null;
   activeTool: string | null;
@@ -41,51 +39,24 @@ interface ScreenshotState {
   deleteAnnotation: (id: string) => void;
   undo: () => void;
   redo: () => void;
-  setActiveLayer: (layerId: string) => void;
-  addLayer: (layer: Layer) => void;
-  updateLayer: (id: string, updates: Partial<Layer>) => void;
-  deleteLayer: (id: string) => void;
   setSelectedAnnotations: (ids: string[]) => void;
   setSelectedId: (id: string | null) => void;
   setActiveTool: (tool: string | null) => void;
-  setCurrentColor: (c: string) => void;
-  setCurrentStrokeWidth: (w: number) => void;
-  setCurrentFontSize: (s: number) => void;
-  setCurrentBold: (b: boolean) => void;
-  setCurrentItalic: (b: boolean) => void;
-  setCurrentAlign: (a: 'left' | 'center' | 'right') => void;
-  setCurrentFontFamily: (f: string) => void;
-  setCurrentTextBg: (b: boolean) => void;
-  setCurrentBgColor: (c: string) => void;
-  setCurrentBgOpacity: (n: number) => void;
-  setCurrentTextStroke: (b: boolean) => void;
-  setMaskBlur: (b: boolean) => void;
-  setMaskStrength: (s: number) => void;
-  setMaskSolid: (b: boolean) => void;
-  setMaskBrushSize: (s: number) => void;
+  /** 批量更新样式默认值（替代 15 个独立 setter） */
+  updateStyle: (updates: Partial<Pick<ScreenshotState,
+    'currentColor' | 'currentStrokeWidth' | 'currentFontSize' |
+    'currentBold' | 'currentItalic' | 'currentAlign' | 'currentFontFamily' |
+    'currentTextBg' | 'currentBgColor' | 'currentBgOpacity' | 'currentTextStroke' |
+    'maskBlur' | 'maskStrength' | 'maskSolid' | 'maskBrushSize'
+  >>) => void;
   clearAnnotations: () => void;
 }
 
 const HISTORY_LIMIT = 50;
 
-// 从 annotations 重新推导图层的 objects，保证撤销/重做后 layers 与 annotations 一致
-const rebuildLayers = (anns: AnnotationObject[]): Layer[] => [
-  {
-    id: 'default',
-    name: '默认图层',
-    visible: true,
-    locked: false,
-    objects: anns.filter((a) => a.layerId === 'default').map((a) => a.id),
-  },
-];
-
 export const useScreenshotStore = create<ScreenshotState>((set, get) => ({
   currentScreenshot: null,
   annotations: [],
-  layers: [
-    { id: 'default', name: '默认图层', visible: true, locked: false, objects: [] }
-  ],
-  activeLayerId: 'default',
   selectedAnnotationIds: [],
   selectedId: null,
   activeTool: null,
@@ -113,83 +84,49 @@ export const useScreenshotStore = create<ScreenshotState>((set, get) => ({
   future: [],
 
   setCurrentScreenshot: (screenshot) => set({ currentScreenshot: screenshot }),
-  
+
   addAnnotation: (annotation) => set((state) => {
     const anns = [...state.annotations, annotation];
     return {
       past: [...state.past, state.annotations].slice(-HISTORY_LIMIT),
       annotations: anns,
-      layers: rebuildLayers(anns),
       future: [],
     };
   }),
-  
+
   updateAnnotation: (id, updates) => set((state) => {
-    const anns = state.annotations.map(ann => 
+    const anns = state.annotations.map(ann =>
       ann.id === id ? { ...ann, ...updates } : ann
     );
     return {
       past: [...state.past, state.annotations].slice(-HISTORY_LIMIT),
       annotations: anns,
-      layers: rebuildLayers(anns),
       future: [],
     };
   }),
-  
+
   deleteAnnotation: (id) => set((state) => {
     const anns = state.annotations.filter(ann => ann.id !== id);
     return {
       past: [...state.past, state.annotations].slice(-HISTORY_LIMIT),
       annotations: anns,
-      layers: rebuildLayers(anns),
       future: [],
       selectedId: state.selectedId === id ? null : state.selectedId,
     };
   }),
-  
-  setActiveLayer: (layerId) => set({ activeLayerId: layerId }),
-  
-  addLayer: (layer) => set((state) => ({
-    layers: [...state.layers, layer]
-  })),
-  
-  updateLayer: (id, updates) => set((state) => ({
-    layers: state.layers.map(layer =>
-      layer.id === id ? { ...layer, ...updates } : layer
-    )
-  })),
-  
-  deleteLayer: (id) => set((state) => ({
-    layers: state.layers.filter(layer => layer.id !== id)
-  })),
-  
+
   setSelectedAnnotations: (ids) => set({ selectedAnnotationIds: ids }),
-  
+
   setSelectedId: (id) => set({ selectedId: id, selectedAnnotationIds: id ? [id] : [] }),
-  
+
   setActiveTool: (tool) => set({ activeTool: tool }),
 
-  setCurrentColor: (c) => set({ currentColor: c }),
-  setCurrentStrokeWidth: (w) => set({ currentStrokeWidth: w }),
-  setCurrentFontSize: (s) => set({ currentFontSize: s }),
-  setCurrentBold: (b) => set({ currentBold: b }),
-  setCurrentItalic: (b) => set({ currentItalic: b }),
-  setCurrentAlign: (a) => set({ currentAlign: a }),
-  setCurrentFontFamily: (f) => set({ currentFontFamily: f }),
-  setCurrentTextBg: (b) => set({ currentTextBg: b }),
-  setCurrentBgColor: (c) => set({ currentBgColor: c }),
-  setCurrentBgOpacity: (n) => set({ currentBgOpacity: n }),
-  setCurrentTextStroke: (b) => set({ currentTextStroke: b }),
-  setMaskBlur: (b) => set({ maskBlur: b }),
-  setMaskStrength: (s) => set({ maskStrength: s }),
-  setMaskSolid: (b) => set({ maskSolid: b }),
-  setMaskBrushSize: (s) => set({ maskBrushSize: s }),
+  updateStyle: (updates) => set(updates),
 
   clearAnnotations: () => set((s) => ({
     annotations: [],
     selectedAnnotationIds: [],
     selectedId: null,
-    // 保留撤销能力：把当前 annotations 压入 past，清空 future
     past: s.annotations.length > 0 ? [...s.past, s.annotations].slice(-HISTORY_LIMIT) : s.past,
     future: [],
   })),
@@ -200,7 +137,6 @@ export const useScreenshotStore = create<ScreenshotState>((set, get) => ({
     return {
       past: s.past.slice(0, -1),
       annotations: prev,
-      layers: rebuildLayers(prev),
       future: [s.annotations, ...s.future].slice(0, HISTORY_LIMIT),
       selectedId: null,
       selectedAnnotationIds: [],
@@ -213,7 +149,6 @@ export const useScreenshotStore = create<ScreenshotState>((set, get) => ({
     return {
       past: [...s.past, s.annotations].slice(-HISTORY_LIMIT),
       annotations: next,
-      layers: rebuildLayers(next),
       future: s.future.slice(1),
       selectedId: null,
       selectedAnnotationIds: [],

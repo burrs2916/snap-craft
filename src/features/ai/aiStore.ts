@@ -20,6 +20,7 @@ import {
   type UserPreset,
 } from './aiPresets';
 import { t, getLang } from '../../i18n';
+import { loadMemories, saveMemories, selectMemories, withMemId, MAX_LIVE_ENTRIES, COMPACT_ENTRIES, isCompacting, setCompacting } from './aiMemory';
 
 // 把底层 HTTP / 流式错误归并到面向用户的 i18n key
 // （401/403→密钥无效；429→限流；5xx→服务端异常；400/413/422→上下文溢出；其余→通用）。
@@ -288,161 +289,6 @@ function previewOf(conv: AiChatTurn[]): string {
   return '';
 }
 
-// ── Phase 6：长期记忆（对齐 privdoc-ai 的 Agent Memory）──
-// 对话线程过长时，把最早几轮压缩为要点摘要长期保留，避免上下文窗口溢出。
-const MEM_PREFIX = 'snapcraft-ai-mem:';
-// 实时对话超过该条目数（每条 = 1 轮的一方）即自动压缩最早几轮
-const MAX_LIVE_ENTRIES = 16;
-// 每次压缩的最早条目数（=2 轮）
-const COMPACT_ENTRIES = 4;
-// 压缩调用守卫，避免与新一轮 chat 并发
-let compacting = false;
-
-function loadMemories(key: string): AiMemory[] {
-  try {
-    const raw = localStorage.getItem(MEM_PREFIX + key);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    return (parsed as AiMemory[]).map(withMemId);
-  } catch {
-    return [];
-  }
-}
-
-function saveMemories(key: string, mem: AiMemory[]) {
-  try {
-    localStorage.setItem(MEM_PREFIX + key, JSON.stringify(mem));
-  } catch {
-    /* 忽略写入失败 */
-  }
-}
-
-// ── Phase 9：记忆相关性检索（对齐 privdoc-ai 的 searchMemories）──
-// 记忆条数增多后，若每轮把全部记忆灌入上下文，会稀释当前追问、挤占窗口。
-// 改为：按「当前用户输入」与「记忆摘要」的语义重叠打分，只注入最相关的一部分；
-// 但重要性≥阈值的关键记忆恒注入，避免关键事实因措辞不同而丢失。纯启发式、零额外 API 调用、零 Rust。
-const MAX_RELEVANT = 5; // 单轮最多注入的记忆条数
-const ALWAYS_IMPORTANCE = 4; // 重要性≥此值的记忆恒注入（关键事实不丢）
-
-/** 把文本切成检索 token：拉丁/数字词（小写）+ CJK 单字 + CJK 二元组 */
-function tokenize(text: string): string[] {
-  const t = (text || '').toLowerCase();
-  const tokens: string[] = [];
-  const latin = t.match(/[a-z0-9]+/g);
-  if (latin) tokens.push(...latin);
-  const cjk = t.match(/[一-鿿]/g);
-  if (cjk) {
-    tokens.push(...cjk);
-    for (let i = 0; i < cjk.length - 1; i++) tokens.push(cjk[i] + cjk[i + 1]);
-  }
-  return tokens;
-}
-
-/** 相关性得分：用户输入 token 在记忆摘要中的命中率（0~1）（多因子评分的基础信号） */
-function relevanceScore(input: string, summary: string): number {
-  const a = new Set(tokenize(input));
-  const b = new Set(tokenize(summary));
-  if (!a.size || !b.size) return 0;
-  let hit = 0;
-  for (const tk of a) if (b.has(tk)) hit++;
-  return hit / a.size;
-}
-
-// ── Phase 9+（参照 openclaw memory-core 多因子加权 + mmr.ts 多样性重排）──
-// 在原有词法相关性基础上叠加：
-//  - recency：半衰期时间衰减 exp(-λ·ageDays)（λ=ln2/halfLife），久远记忆自然降权但保留；
-//  - importance：重要性归一（1→0，5→1），与相关性线性组合；
-//  - diversity：MMR 贪心重排，避免注入的 N 条记忆彼此雷同（对齐 openclaw mmr.ts）。
-// 仍纯启发式、零依赖、零额外 API 调用、零 Rust；记忆≤MAX_RELEVANT 时行为不变（无回归）。
-const MEM_HALF_LIFE_DAYS = 14; // 记忆重要性半衰期（天）
-const W_RELEVANCE = 0.6;
-const W_RECENCY = 0.2;
-const W_IMPORTANCE = 0.2;
-const MMR_LAMBDA = 0.7; // 多样性 vs 相关性权衡（越大越偏多样）
-
-/** 时间衰减分量：0~1，越新越高（对齐 openclaw temporal-decay 的 exp(-λ·age)） */
-function recencyComponent(createdAt?: number): number {
-  if (!createdAt) return 0.5;
-  const ageDays = Math.max(0, (Date.now() - createdAt) / 86_400_000);
-  const lambda = Math.LN2 / MEM_HALF_LIFE_DAYS;
-  return Math.exp(-lambda * ageDays);
-}
-
-/** 重要性归一：1→0，5→1 */
-function importanceNorm(m: AiMemory): number {
-  return Math.max(0, Math.min(1, ((m.importance ?? 3) - 1) / 4));
-}
-
-/** 多因子复合分：相关性 + 时间衰减 + 重要性（权重见上） */
-function compositeScore(input: string, m: AiMemory): number {
-  return (
-    W_RELEVANCE * relevanceScore(input, m.summary) +
-    W_RECENCY * recencyComponent(m.createdAt) +
-    W_IMPORTANCE * importanceNorm(m)
-  );
-}
-
-/** 两条记忆摘要的 Jaccard 相似度（MMR 多样性度量） */
-function jaccardSim(a: string, b: string): number {
-  const ta = new Set(tokenize(a));
-  const tb = new Set(tokenize(b));
-  if (!ta.size && !tb.size) return 0;
-  let inter = 0;
-  for (const t of ta) if (tb.has(t)) inter++;
-  const union = ta.size + tb.size - inter;
-  return union ? inter / union : 0;
-}
-
-/**
- * 从全部记忆中选出「本次应注入」的子集（对齐 openclaw hybrid + mmr）：
- *  - 记忆不多（≤MAX_RELEVANT）时全部注入，行为与旧版一致（无回归）；
- *  - 否则：重要性≥ALWAYS_IMPORTANCE 的记忆恒注入，其余走「复合分排序 →
- *    MMR 多样性贪心重排」补满配额，避免注入一堆雷同记忆挤占窗口；
- *  - 返回结果按 createdAt 升序，保持时间线可读。
- */
-function selectMemories(input: string, memories: AiMemory[]): AiMemory[] {
-  if (!memories.length) return [];
-  if (memories.length <= MAX_RELEVANT) return memories;
-  const must = memories.filter((m) => (m.importance ?? 3) >= ALWAYS_IMPORTANCE);
-  const rest = memories.filter((m) => (m.importance ?? 3) < ALWAYS_IMPORTANCE);
-
-  // 1) 复合分排序，取前 2×配额作为候选池（给 MMR 留选择空间）
-  const scored = rest
-    .map((m) => ({ m, s: compositeScore(input, m) }))
-    .sort((x, y) => y.s - x.s);
-  const quota = Math.max(0, MAX_RELEVANT - must.length);
-  const poolSize = Math.min(scored.length, MAX_RELEVANT * 2);
-  const pool = scored.slice(0, poolSize).map((x) => x.m);
-
-  // 2) MMR 贪心：首条取复合分最高；之后每条取
-  //    composite − λ·maxSimToPicked 最大者，兼顾相关性与多样性
-  const picked: AiMemory[] = [];
-  const poolCopy = [...pool];
-  while (picked.length < quota && poolCopy.length) {
-    let bestIdx = 0;
-    let bestVal = -Infinity;
-    for (let i = 0; i < poolCopy.length; i++) {
-      const cand = poolCopy[i];
-      const maxSim = picked.length
-        ? Math.max(...picked.map((p) => jaccardSim(cand.summary, p.summary)))
-        : 0;
-      const val = compositeScore(input, cand) - MMR_LAMBDA * maxSim;
-      if (val > bestVal) {
-        bestVal = val;
-        bestIdx = i;
-      }
-    }
-    picked.push(poolCopy.splice(bestIdx, 1)[0]);
-  }
-
-  return [...must, ...picked].sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0));
-}
-
-/** 给记忆补一个稳定 id（加载旧数据时若缺失则合成，便于 UI 高亮） */
-function withMemId(m: AiMemory, i: number): AiMemory {
-  return m.id ? m : { ...m, id: `legacy-${i}-${m.createdAt ?? i}` };
-}
 
 // 把长期记忆拼成注入 system 消息的提示文本（多截图即多文档上下文的「记忆锚点」）
 function buildMemoryNote(memories: AiMemory[]): string {
@@ -881,8 +727,8 @@ export const useAiStore = create<AiState>((set, get) => ({
   // 用「一条滚动摘要」替代全部旧记忆（长度有界、永不稀释早期事实），而非新增孤立记忆。
   // 非流式摘要（chatOnce），失败不影响主对话流程；压缩后从实时对话中裁掉对应轮次。
   compactMemory: async () => {
-    if (compacting) return;
-    compacting = true;
+    if (isCompacting()) return;
+    setCompacting(true);
     try {
       const { config, conversation, memories, convKey, status } = get();
       if (status === 'streaming') return;
@@ -931,7 +777,7 @@ export const useAiStore = create<AiState>((set, get) => ({
       saveMemories(convKey, [rolled]);
       saveConversation(convKey, nextConv);
     } finally {
-      compacting = false;
+      setCompacting(false);
     }
   },
 

@@ -205,38 +205,24 @@ export const AnnotationToolbar = () => {
     past,
     future,
     currentColor,
-    setCurrentColor,
     currentStrokeWidth,
-    setCurrentStrokeWidth,
     updateAnnotation,
     platform,
     annotations,
     currentFontSize,
-    setCurrentFontSize,
     currentBold,
-    setCurrentBold,
     currentItalic,
-    setCurrentItalic,
     currentAlign,
-    setCurrentAlign,
     currentFontFamily,
-    setCurrentFontFamily,
     currentTextBg,
-    setCurrentTextBg,
     currentBgColor,
-    setCurrentBgColor,
     currentBgOpacity,
-    setCurrentBgOpacity,
     currentTextStroke,
-    setCurrentTextStroke,
     maskBlur,
-    setMaskBlur,
     maskStrength,
-    setMaskStrength,
     maskSolid,
-    setMaskSolid,
     maskBrushSize,
-    setMaskBrushSize,
+    updateStyle,
   } = useScreenshotStore();
 
   // 当前选中标注（用于上下文控件回显/联动）
@@ -265,81 +251,81 @@ export const AnnotationToolbar = () => {
 
   // 更新文字样式：同步全局默认 + 选中标注 geometry
   const applyFontSize = (s: number) => {
-    setCurrentFontSize(s);
+    updateStyle({ currentFontSize: s });
     if (selType === 'text' && selected) {
       updateAnnotation(selected.id, { geometry: { ...selected.geometry, fontSize: s } });
     }
   };
   const applyBold = (b: boolean) => {
-    setCurrentBold(b);
+    updateStyle({ currentBold: b });
     if (selType === 'text' && selected) {
       updateAnnotation(selected.id, { geometry: { ...selected.geometry, bold: b } });
     }
   };
   const applyItalic = (b: boolean) => {
-    setCurrentItalic(b);
+    updateStyle({ currentItalic: b });
     if (selType === 'text' && selected) {
       updateAnnotation(selected.id, { geometry: { ...selected.geometry, italic: b } });
     }
   };
   const applyAlign = (a: 'left' | 'center' | 'right') => {
-    setCurrentAlign(a);
+    updateStyle({ currentAlign: a });
     if (selType === 'text' && selected) {
       updateAnnotation(selected.id, { geometry: { ...selected.geometry, align: a } });
     }
   };
   const applyFont = (f: string) => {
-    setCurrentFontFamily(f);
+    updateStyle({ currentFontFamily: f });
     if (selType === 'text' && selected) {
       updateAnnotation(selected.id, { geometry: { ...selected.geometry, fontFamily: f } });
     }
   };
   const applyTextBg = (b: boolean) => {
-    setCurrentTextBg(b);
+    updateStyle({ currentTextBg: b });
     if (selType === 'text' && selected) {
       updateAnnotation(selected.id, { geometry: { ...selected.geometry, bg: b } });
     }
   };
   const applyBgColor = (c: string) => {
-    setCurrentBgColor(c);
+    updateStyle({ currentBgColor: c });
     if (selType === 'text' && selected) {
       updateAnnotation(selected.id, { geometry: { ...selected.geometry, bgColor: c } });
     }
   };
   const applyBgOpacity = (n: number) => {
-    setCurrentBgOpacity(n);
+    updateStyle({ currentBgOpacity: n });
     if (selType === 'text' && selected) {
       updateAnnotation(selected.id, { geometry: { ...selected.geometry, bgOpacity: n } });
     }
   };
   const applyTextStroke = (b: boolean) => {
-    setCurrentTextStroke(b);
+    updateStyle({ currentTextStroke: b });
     if (selType === 'text' && selected) {
       updateAnnotation(selected.id, { geometry: { ...selected.geometry, stroke: b } });
     }
   };
   // 更新打码设置：同步全局默认 + 选中标注 geometry
   const applyBlur = (b: boolean) => {
-    setMaskBlur(b);
+    updateStyle({ maskBlur: b });
     if (selType === 'mosaic' && selected) {
       updateAnnotation(selected.id, { geometry: { ...selected.geometry, blur: b } });
     }
   };
   const applyStrength = (s: number) => {
-    setMaskStrength(s);
+    updateStyle({ maskStrength: s });
     if (selType === 'mosaic' && selected) {
       updateAnnotation(selected.id, { geometry: { ...selected.geometry, strength: s } });
     }
   };
   // v14 修复：涂黑 / 笔刷大小此前有状态与 canvas 逻辑但工具栏无控件（死功能），现暴露
   const applySolid = (b: boolean) => {
-    setMaskSolid(b);
+    updateStyle({ maskSolid: b });
     if (selType === 'mosaic' && selected) {
       updateAnnotation(selected.id, { geometry: { ...selected.geometry, solid: b } });
     }
   };
   const applyBrushSize = (s: number) => {
-    setMaskBrushSize(s);
+    updateStyle({ maskBrushSize: s });
     if (selType === 'mosaic' && selected) {
       updateAnnotation(selected.id, { geometry: { ...selected.geometry, brushSize: s } });
     }
@@ -369,7 +355,7 @@ export const AnnotationToolbar = () => {
 
   // 选中标注时改颜色：同步更新选中标注的颜色，而非仅影响新建标注
   const handleColorChange = (c: string) => {
-    setCurrentColor(c);
+    updateStyle({ currentColor: c });
     if (selectedId) {
       updateAnnotation(selectedId, { color: c });
     }
@@ -377,7 +363,7 @@ export const AnnotationToolbar = () => {
 
   // 选中标注时改线宽：同步更新选中标注的线宽
   const handleWidthChange = (w: number) => {
-    setCurrentStrokeWidth(w);
+    updateStyle({ currentStrokeWidth: w });
     if (selectedId) {
       updateAnnotation(selectedId, { lineWidth: w });
     }
