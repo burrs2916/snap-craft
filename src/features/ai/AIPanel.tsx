@@ -29,6 +29,7 @@ import { save as saveDialog } from '@tauri-apps/plugin-dialog';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { printHtmlViaIframe, mdToPlainText, docStats, frontImageBlockHtml, firstHeading, fmtTime } from './aiUtils';
 import { AiTemplateManager } from './AiTemplateManager';
+import { AiHistoryOverlay } from './AiHistoryOverlay';
 
 
 // 多截图章节顺序持久化（按截图哈希分桶）：关闭面板后仍可恢复，避免图文报告顺序丢失
@@ -187,11 +188,6 @@ export default function AIPanel({
   });
   // 历史库导出的落盘路径（与实时导出区区分，让「在 Finder 显示 / 打开文件」双按钮出现在历史阅读器内，
   // 而非挤在实时导出区，避免用户从历史区导出后找不到对应操作按钮）。
-  // P1-2：同样持久化，重开应用后历史阅读器仍可定位上次导出。
-  const HIST_EXPORT_KEY = 'snapcraft-ai-last-history-exported-path';
-  const [historyExportedPath, setHistoryExportedPath] = useState<string | null>(() => {
-    try { return localStorage.getItem(HIST_EXPORT_KEY); } catch { return null; }
-  });
   const [exporting, setExporting] = useState(false);
   // 流式输出独立弹出框（解决右侧抽屉太局促的体验问题）：
   //   popupOpen：本组件实例内的显示状态；由 isStreaming 自动驱动首次出现
@@ -287,219 +283,9 @@ export default function AIPanel({
   const [showTemplates, setShowTemplates] = useState(false);
   const [editing, setEditing] = useState<UserPreset | null>(null);
 
-  // ── Phase 11：跨截图 AI 文档历史库 ──
+  // ── Phase 11：跨截图 AI 文档历史库（覆盖层已提取为 AiHistoryOverlay 组件） ──
   const [showHistory, setShowHistory] = useState(false);
-  const [historyList, setHistoryList] = useState<AiConvMeta[]>([]);
-  const [activeConv, setActiveConv] = useState<{ meta: AiConvMeta; conv: AiChatTurn[] } | null>(null);
-  const [historySearch, setHistorySearch] = useState('');
-  const [historyMsg, setHistoryMsg] = useState<string | null>(null);
-
-  // 打开历史库：即时读取索引并倒序
-  const openHistory = () => {
-    setHistoryList(listConvMeta());
-    setActiveConv(null);
-    setHistorySearch('');
-    setHistoryMsg(null);
-    setShowHistory(true);
-  };
-  // 进入阅读器：取回完整对话线程
-  const openConvReader = (meta: AiConvMeta) => {
-    setActiveConv({ meta, conv: getConvByHash(meta.hash) });
-  };
-  // 历史阅读器里的「载入对话」：把该线程载入当前面板继续追问
-  const loadConvIntoPanel = (hash: string) => {
-    setConvKey(hash);
-    setShowHistory(false);
-    setHistoryMsg(t('ai.historyLoaded'));
-  };
-  // 删除某条历史（带二次确认，防止单条误删）
-  const removeConv = (hash: string) => {
-    if (!window.confirm(t('ai.historyConfirmDelete'))) return;
-    deleteConv(hash);
-    setHistoryList(listConvMeta());
-    if (activeConv?.meta.hash === hash) setActiveConv(null);
-    setHistoryMsg(t('ai.historyDeleted'));
-  };
-  // 历史阅读器里当前展示的「末轮 AI 成稿」
-  const activeDoc =
-    activeConv && activeConv.conv.length
-      ? (() => {
-          for (let i = activeConv.conv.length - 1; i >= 0; i--) {
-            if (activeConv.conv[i].role === 'assistant') return activeConv.conv[i].content;
-          }
-          return '';
-        })()
-      : '';
-
-  // 历史阅读器里的文本导出（Phase 19-B5：docx/pdf/html 附带来源截图缩略图作为封面证据）
-  const handleHistoryExport = async (
-    fmt: 'md' | 'txt' | 'html' | 'xlsx' | 'docx' | 'pptx' | 'pdf',
-  ) => {
-    if (!activeConv) return;
-    const md = stripSnapMarkers(activeDoc);
-    const baseName = `snapcraft-ai-${Date.now()}`;
-    // Phase 19-B5：把会话对应的截图缩略图作为封面/首章插图。仅 docx/pdf/html 使用。
-    const thumb = activeConv.meta.thumb;
-    const coverImages =
-      thumb && (fmt === 'docx' || fmt === 'pdf' || fmt === 'html' || fmt === 'pptx')
-        ? [{ dataUrl: thumb, caption: activeConv.meta.firstGoal || undefined }]
-        : undefined;
-    try {
-      if (fmt === 'xlsx') {
-        const bytes = await markdownToXlsx(md, activeConv.meta.presetName);
-        const path = await pickExportPath({
-          ext: 'xlsx',
-          hint: deriveFileHint(activeConv.meta.firstGoal),
-          filters: [{ name: 'Excel', extensions: ['xlsx'] }],
-        });
-        if (!path) return;
-        await invoke('save_binary_file', { bytes: Array.from(bytes), filePath: path });
-        setHistoryMsg(t('ai.exportOk', { path: baseNameOf(path) }));
-        setLastExportedPath(path);
-        setHistoryExportedPath(path);
-        pushExportHistory({ path, format: 'xlsx', title: firstHeading(md) || activeConv.meta.firstGoal, time: Date.now() });
-      } else if (fmt === 'docx') {
-        // 历史成稿已无 <!--SNAP:k--> 标记，缩略图须作为「前置整块」内嵌（images），
-        // 而非 sectionImages（无标记时 sectionImages 永不触发 → 缩略图静默丢失）。
-        const bytes = await markdownToDocx(md, {
-          title: firstHeading(md) || activeConv.meta.presetName,
-          images: coverImages,
-        });
-        const path = await pickExportPath({
-          ext: 'docx',
-          hint: deriveFileHint(activeConv.meta.firstGoal),
-          filters: [{ name: 'Word', extensions: ['docx'] }],
-        });
-        if (!path) return;
-        await invoke('save_binary_file', { bytes: Array.from(bytes), filePath: path });
-        setHistoryMsg(t('ai.exportOk', { path: baseNameOf(path) }));
-        setLastExportedPath(path);
-        setHistoryExportedPath(path);
-        pushExportHistory({ path, format: 'docx', title: firstHeading(md) || activeConv.meta.firstGoal, time: Date.now() });
-      } else if (fmt === 'pdf') {
-        let html = mdToHtml(md, {
-          title: firstHeading(md) || activeConv.meta.presetName,
-          subtitle: activeConv.meta.firstGoal,
-          tocTitle: t('ai.toc'),
-          theme: config.theme,
-        });
-        // 历史成稿无 SNAP 标记，缩略图作为「前置整块」内嵌（与实时导出一致）。
-        // 与实时导出一致：截图整块前置到正文顶部（<main class="doc-main"> 前），
-        // 而非丢在 </body> 之前的 footer 之后——历史库导出的 html/pdf 此前位置与实时导出错乱。
-        if (coverImages && coverImages.length) {
-          const block = frontImageBlockHtml(coverImages);
-          if (block) html = html.replace('<main class="doc-main">', block + '<main class="doc-main">');
-        }
-        const err = await printHtmlViaIframe(html);
-        if (err) {
-          setHistoryMsg(t('ai.exportFail', { msg: err }));
-          return;
-        }
-        // PDF 为打印式导出，不落盘具体文件，故给诚实提示而非假文件名（避免误导 + 无法「在 Finder 中显示」）
-        setHistoryMsg(t('ai.exportPdfHint'));
-      } else if (fmt === 'pptx') {
-        // 历史成稿无 <!--SNAP:k--> 标记：缩略图作为「前置整块」内嵌（images），与实时导出一致。
-        const bytes = markdownToPptx(md, {
-          title: firstHeading(md) || activeConv.meta.presetName,
-          subtitle: activeConv.meta.firstGoal,
-          theme: config.theme,
-          sectionImages: [],
-          images: coverImages || [],
-        });
-        const path = await pickExportPath({
-          ext: 'pptx',
-          hint: deriveFileHint(activeConv.meta.firstGoal),
-          filters: [{ name: 'PowerPoint', extensions: ['pptx'] }],
-        });
-        if (!path) return;
-        await invoke('save_binary_file', { bytes: Array.from(bytes), filePath: path });
-        setHistoryMsg(t('ai.exportOk', { path: baseNameOf(path) }));
-        setHistoryExportedPath(path);
-        pushExportHistory({ path, format: 'pptx', title: firstHeading(md) || activeConv.meta.firstGoal, time: Date.now() });
-      } else {
-        let content: string;
-        if (fmt === 'html') {
-          let html = mdToHtml(md, {
-            title: firstHeading(md) || activeConv.meta.presetName,
-            subtitle: activeConv.meta.firstGoal,
-            tocTitle: t('ai.toc'),
-            theme: config.theme,
-          });
-          // 历史成稿无 SNAP 标记，缩略图作为「前置整块」内嵌（与实时导出一致），
-          // 与实时导出一致：截图整块前置到正文顶部（<main class="doc-main"> 前），
-          // 否则历史导出的 html 把截图丢在 footer 之后，与实时导出位置错乱。
-          if (coverImages && coverImages.length) {
-            const block = frontImageBlockHtml(coverImages);
-            if (block) html = html.replace('<main class="doc-main">', block + '<main class="doc-main">');
-          }
-          content = html;
-        } else if (fmt === 'md') {
-          content = md;
-        } else {
-          content = mdToPlainText(md);
-        }
-        const path = await pickExportPath({
-          ext: fmt,
-          hint: deriveFileHint(activeConv.meta.firstGoal),
-          filters: [{ name: fmt.toUpperCase(), extensions: [fmt] }],
-        });
-        if (!path) return;
-        await invoke('save_text_file', { content, filePath: path });
-        setHistoryMsg(t('ai.exportOk', { path: baseNameOf(path) }));
-        setLastExportedPath(path);
-        setHistoryExportedPath(path);
-        pushExportHistory({ path, format: fmt, title: firstHeading(md) || activeConv.meta.firstGoal, time: Date.now() });
-      }
-    } catch (e: any) {
-      const msg = e?.message ? String(e.message) : String(e);
-      setHistoryMsg(t('ai.exportFail', { msg }));
-    }
-  };
-
-  // 历史阅读器：把会话打包成便携 zip（成稿 md + 原始对话 json + 来源截图 + README）
-  const handleHistoryZip = async () => {
-    if (!activeConv) return;
-    try {
-      const enc = new TextEncoder();
-      const files: { name: string; data: Uint8Array }[] = [];
-      const md = stripSnapMarkers(activeDoc);
-      files.push({ name: 'conversation.md', data: enc.encode(md) });
-      files.push({
-        name: 'conversation.json',
-        data: enc.encode(JSON.stringify(activeConv.conv, null, 2)),
-      });
-      const thumb = activeConv.meta.thumb;
-      if (thumb) {
-        const bytes = dataUrlToBytes(thumb);
-        if (bytes) files.push({ name: 'source.png', data: bytes });
-      }
-      const readme = [
-        'SnapCraft AI 会话归档',
-        `预设: ${activeConv.meta.presetName}`,
-        `首轮目标: ${activeConv.meta.firstGoal || '(空)'}`,
-        `消息数: ${activeConv.meta.msgCount}`,
-        `更新时间: ${new Date(activeConv.meta.updatedAt).toLocaleString()}`,
-        activeConv.meta.parent ? `分支自: ${activeConv.meta.parent}` : '',
-      ]
-        .filter(Boolean)
-        .join('\n');
-      files.push({ name: 'README.txt', data: enc.encode(readme) });
-      const zip = buildZip(files);
-      const path = await pickExportPath({
-        ext: 'zip',
-        hint: activeConv ? deriveFileHint(activeConv.meta.firstGoal) : '',
-        filters: [{ name: 'ZIP', extensions: ['zip'] }],
-      });
-      if (!path) return;
-      await invoke('save_binary_file', { bytes: Array.from(zip), filePath: path });
-      setHistoryMsg(t('ai.exportOk', { path: baseNameOf(path) }));
-      setLastExportedPath(path);
-      pushExportHistory({ path, format: 'zip', title: activeConv.meta.firstGoal || 'Archive', time: Date.now() });
-    } catch (e: any) {
-      const msg = e?.message ? String(e.message) : String(e);
-      setHistoryMsg(t('ai.exportFail', { msg }));
-    }
-  };
+  const openHistory = () => setShowHistory(true);
 
   const isStreaming = status === 'streaming';
   const hasOutput = !!output && !isStreaming && status !== 'error';
@@ -554,12 +340,6 @@ export default function AIPanel({
       else localStorage.removeItem(LAST_EXPORT_KEY);
     } catch { /* 忽略 */ }
   }, [lastExportedPath]);
-  useEffect(() => {
-    try {
-      if (historyExportedPath) localStorage.setItem(HIST_EXPORT_KEY, historyExportedPath);
-      else localStorage.removeItem(HIST_EXPORT_KEY);
-    } catch { /* 忽略 */ }
-  }, [historyExportedPath]);
 
   // P1-3：导出成功反馈自动消失（4s）——成功消息停留过久会让用户误以为还在导出。
   // 错误消息（exportErr=true）保留，需用户手动关闭或下次操作清空。
@@ -569,14 +349,6 @@ export default function AIPanel({
     return () => clearTimeout(timer);
   }, [exportMsg, exportErr]);
 
-  // 历史库：按关键词过滤（标题 / 预设名 / 预览内容），不区分大小写
-  const filteredList = (() => {
-    const q = historySearch.trim().toLowerCase();
-    if (!q) return historyList;
-    return historyList.filter((m) =>
-      `${m.firstGoal} ${m.presetName} ${m.preview}`.toLowerCase().includes(q),
-    );
-  })();
 
   if (!open) return null;
 
@@ -2362,187 +2134,14 @@ export default function AIPanel({
           列出所有截图各自的 AI 成稿线程（按截图分桶、按更新时间倒序），可搜索 / 阅读 / 载入追问 / 删除 / 导出。
           对齐 privdoc-ai 的 conversations 列表，但天然把「截图」作为文档锚点。 */}
       {showHistory && (
-        <div className="ai-hist">
-          <div className="ai-hist-head">
-            <span className="ai-hist-title">📚 {t('ai.historyTitle')}</span>
-            <div className="ai-hist-head-actions">
-              <button className="ai-panel-close" onClick={() => setShowHistory(false)} title={t('ai.historyClose')}>
-                ✕
-              </button>
-              {windowChrome && (
-                <button className="ai-panel-close" onClick={onClose} title={t('ai.close')}>
-                  {'⏻'}
-                </button>
-              )}
-            </div>
-          </div>
-
-          {activeConv ? (
-            /* 阅读器：只读展示该线程全部轮次，可导出或载入当前面板继续追问 */
-            <div className="ai-hist-reader">
-              <div className="ai-hist-bar">
-                <button className="ai-link" onClick={() => setActiveConv(null)}>
-                  ‹ {t('ai.historyBack')}
-                </button>
-                <span className="ai-hist-badge">{activeConv.meta.presetName}</span>
-                <button className="ai-link" onClick={() => loadConvIntoPanel(activeConv.meta.hash)}>
-                  {t('ai.historyLoad')}
-                </button>
-                <button
-                  className="ai-link"
-                  title={t('ai.historyForkTitle')}
-                  onClick={() => {
-                    const nh = forkConversation(activeConv.meta.hash);
-                    if (nh) {
-                      loadConvIntoPanel(nh);
-                      setHistoryMsg(t('ai.historyForked'));
-                    }
-                  }}
-                >
-                  🍴 {t('ai.historyFork')}
-                </button>
-              </div>
-              <div className="ai-hist-doc-title">{activeConv.meta.firstGoal || t('ai.historyNoGoal')}</div>
-              <div className="ai-post-row ai-hist-export">
-                <span className="ai-post-label">{t('ai.export')}</span>
-                <button className="ai-btn ai-btn-sm" onClick={() => handleHistoryExport('md')}>
-                  .md
-                </button>
-                <button className="ai-btn ai-btn-sm" onClick={() => handleHistoryExport('txt')}>
-                  .txt
-                </button>
-                <button className="ai-btn ai-btn-sm" onClick={() => handleHistoryExport('html')}>
-                  .html
-                </button>
-                <button className="ai-btn ai-btn-sm" onClick={() => handleHistoryExport('docx')}>
-                  .docx
-                </button>
-                <button className="ai-btn ai-btn-sm" onClick={() => handleHistoryExport('pdf')}>
-                  .pdf
-                </button>
-                <button
-                  className="ai-btn ai-btn-sm"
-                  onClick={() => handleHistoryExport('pptx')}
-                  title={t('ai.exportPptxTitle')}
-                >
-                  .pptx
-                </button>
-                <button
-                  className="ai-btn ai-btn-sm ai-btn-primary"
-                  onClick={() => handleHistoryExport('xlsx')}
-                  title={t('ai.exportXlsxTitle')}
-                >
-                  .xlsx
-                </button>
-                <button
-                  className="ai-btn ai-btn-sm"
-                  onClick={handleHistoryZip}
-                  title={t('ai.exportZipTitle')}
-                >
-                  📦 .zip
-                </button>
-              </div>
-              <div className="ai-chat ai-hist-chat">
-                {activeConv.conv.map((m, i) => (
-                  <div key={i} className={`ai-msg ${m.role === 'user' ? 'ai-msg-user' : 'ai-msg-ai'}`}>
-                    <div className="ai-msg-role">{m.role === 'user' ? t('ai.you') : 'AI'}</div>
-                    <div className="ai-msg-body">
-                      {m.role === 'user' ? (
-                        <div className="ai-msg-text">{m.content}</div>
-                      ) : (
-                        <AiMarkdown source={m.content} />
-                      )}
-                      {m.role === 'assistant' && (
-                        <button
-                          className="ai-msg-fork"
-                          title={t('ai.historyForkFromTitle')}
-                          onClick={() => {
-                            const nh = forkConversation(activeConv.meta.hash, i);
-                            if (nh) {
-                              loadConvIntoPanel(nh);
-                              setHistoryMsg(t('ai.historyForked'));
-                            }
-                          }}
-                        >
-                          🍴 {t('ai.historyForkFrom')}
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                ))}
-              </div>
-              {historyMsg && <div className="ai-export-msg">{historyMsg}</div>}
-              {historyExportedPath && (
-                <div className="ai-export-msg ai-hist-export-actions">
-                  <button
-                    className="ai-btn ai-btn-sm ai-btn-reveal"
-                    title={t('ai.exportRevealTitle')}
-                    onClick={async () => {
-                      const err = await revealInFolder(historyExportedPath);
-                      if (err) setHistoryMsg(t('ai.exportFail', { msg: err }));
-                    }}
-                  >
-                    {t('ai.exportReveal')}
-                  </button>
-                  <button
-                    className="ai-btn ai-btn-sm ai-btn-open"
-                    title={t('ai.openAppTitle')}
-                    onClick={() => openExported(historyExportedPath)}
-                  >
-                    {t('ai.openApp')}
-                  </button>
-                </div>
-              )}
-            </div>
-          ) : (
-            /* 列表：搜索 + 卡片 */
-            <>
-              <div className="ai-hist-search">
-                <input
-                  className="ai-hist-search-input"
-                  value={historySearch}
-                  onChange={(e) => setHistorySearch(e.target.value)}
-                  placeholder={t('ai.historySearchPh')}
-                />
-              </div>
-              <div className="ai-hist-body">
-                {historyList.length === 0 ? (
-                  <div className="ai-hist-empty">{t('ai.historyEmpty')}</div>
-                ) : filteredList.length === 0 ? (
-                  <div className="ai-hist-empty">{t('ai.historyNoResult')}</div>
-                ) : (
-                  filteredList.map((meta) => (
-                    <div key={meta.hash} className="ai-hist-item">
-                      {meta.thumb && <img className="ai-hist-thumb" src={meta.thumb} alt="" />}
-                      <div className="ai-hist-info">
-                        <div className="ai-hist-item-title">{meta.firstGoal || t('ai.historyNoGoal')}</div>
-                        <div className="ai-hist-item-meta">
-                          {meta.parent && <span className="ai-hist-fork-badge">🍴 {t('ai.historyForkBadge')}</span>}
-                          <span className="ai-hist-badge">{meta.presetName}</span>
-                          <span className="ai-hist-dot">·</span>
-                          <span>{fmtTime(meta.updatedAt)}</span>
-                          <span className="ai-hist-dot">·</span>
-                          <span>{t('ai.historyMsgs', { n: meta.msgCount })}</span>
-                        </div>
-                      </div>
-                      <div className="ai-hist-actions">
-                        <button className="ai-link" onClick={() => openConvReader(meta)}>
-                          {t('ai.historyRead')}
-                        </button>
-                        <button className="ai-link" onClick={() => loadConvIntoPanel(meta.hash)}>
-                          {t('ai.historyLoad')}
-                        </button>
-                        <button className="ai-link ai-link-danger" onClick={() => removeConv(meta.hash)}>
-                          {t('ai.historyDelete')}
-                        </button>
-                      </div>
-                    </div>
-                  ))
-                )}
-              </div>
-            </>
-          )}
-        </div>
+        <AiHistoryOverlay
+          onClose={onClose}
+          onHide={() => setShowHistory(false)}
+          onLoadConv={(hash) => { setConvKey(hash); setShowHistory(false); }}
+          windowChrome={windowChrome}
+          openExported={openExported}
+          setLastExportedPath={setLastExportedPath}
+        />
       )}
 
       {/* 应用内预览层：Tauri 环境替代被 webview 拦截的 window.open 弹窗；

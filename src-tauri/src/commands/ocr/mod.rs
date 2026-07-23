@@ -9,9 +9,9 @@ use macos::run_native_ocr;
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 mod fallback;
 #[cfg(any(target_os = "windows", test))]
-mod windows;
+pub(crate) mod windows;
 #[cfg(any(target_os = "windows", test))]
-use windows::*;
+pub(crate) use windows::*;
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 use fallback::run_native_ocr;
 #[cfg(test)]

@@ -1,6 +1,6 @@
 #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
 mod tests {
-    use super::*;
+    use super::super::*;
 
     fn mk_block(text: &str) -> OcrBlock {
         OcrBlock {
@@ -28,7 +28,7 @@ mod tests {
 
         // 找 r#"...PS 模板..."# 区域：以 `let script_tpl = r#"` 开头到下一行 `r#";` 结束。
         // 简化版：直接扫整文件,把 # 开头的整行注释、// 开头的整行 Rust 注释先剥掉。
-        let src = include_str!("ocr.rs");
+        let src = include_str!("windows/mod.rs");
         let mut stripped = String::with_capacity(src.len());
         for line in src.lines() {
             let t = line.trim_start();
