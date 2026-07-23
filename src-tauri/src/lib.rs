@@ -10,6 +10,10 @@ use tauri::tray::TrayIconBuilder;
 use tauri::{Emitter, Manager, WindowEvent};
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
+/// 全局构建标签：boot banner（本文件）与 OCR banner（commands/ocr.rs）共用，
+/// 避免"只改一处"导致的版本自证失效（用户铁律：看 banner 验版本）。
+pub const BUILD_TAG: &str = "2026-07-23-ocr-consensus";
+
 /// 将快捷键映射为对应的截图事件名（无匹配则返回 None）
 fn shortcut_to_event(key: Code, mods: Modifiers) -> Option<&'static str> {
     let super_shift = mods.contains(Modifiers::SUPER | Modifiers::SHIFT);
@@ -91,7 +95,8 @@ pub fn run() {
     // 任何时候看不到这一行、或 commit hash 不对，立刻知道装的是旧版。
     clog!(
         "boot",
-        "build=2026-07-22-layer23 ocr=删除11条OCR误识词典+Layer1-A Otsu二值化+Layer2翻车自检+Layer3原图兜底重识别(不修字面治本) commit=pending"
+        "build={} ocr=删除11条OCR误识词典+Layer1-A Otsu二值化+Layer2翻车自检+Layer3原图兜底重识别+通用多pass共识引擎(consensus,几何对齐+多数投票,不修字面治本) commit=pending",
+        crate::BUILD_TAG
     );
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())

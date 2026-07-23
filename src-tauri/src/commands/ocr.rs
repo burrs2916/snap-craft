@@ -44,7 +44,8 @@ pub async fn ocr_image(
     BUILD_BANNER.get_or_init(|| {
         clog!(
             "ocr",
-            "build=2026-07-23-ocr37-39 feat=切块切线对齐空白带(#37,投影找间隙避免切字中段)+预处理灰度优先(#39,单通道Lanczos3快~3x)+跨块长行拼接(#34)+动态MaxImageDimension探测缓存(#35+#38)+BCP-47多语言回退(#36)+Layer1-A/2/3治本+诊断日志补全(CUTLINE/PRE阶段耗时)"
+            "build={} feat=切块切线对齐空白带(#37)+预处理灰度优先(#39,单通道Lanczos3快~3x)+跨块长行拼接(#34)+动态MaxImageDimension探测缓存(#35+#38)+BCP-47多语言回退(#36)+Layer1-A/2/3治本+通用多pass共识引擎(consensus,几何对齐+多数投票,不修字面)+诊断日志补全(CUTLINE/PRE阶段耗时)",
+            crate::BUILD_TAG
         );
     });
     clog!(
@@ -1226,6 +1227,51 @@ fn detect_ocr_garble_score(blocks: &[OcrBlock]) -> f64 {
     } else {
         0.0
     };
+    // 信号 4（2026-07-23 共识引擎唤醒）：结构性 gibberish —— 抓"形近替换 / 细微错字"
+    //   这类错误不改变 single_char/aspect/fragmented 三个老信号（整屏仍 0.20），
+    //   所以老评分恒不触发 Layer 3。新增两个与语种无关、纯结构的指纹：
+    //   - has_ext_rare：含 CJK 扩展 A/B/F 等罕见平面字符（U+3400..U+4DBF / U+20000..），
+    //     现代正常中文文本几乎不出现，多为 WinRT 把字认成罕见形近字（杲/囗/欤 之类）
+    //   - stray_latin：含 CJK 且夹带 ≤2 字母的孤立 ASCII 串（如 "(D:)" 被识成垃圾），
+    //     正常 UI 是纯 CJK 标签或纯英文单词（CPU/Windows 等 ≥3 字母），不会命中
+    //   这样唤醒 Layer 3 是"点到为止"——仅当真出现疑似错字时，不靠降全局阈值误伤健康图。
+    let mut gibberish_blocks = 0usize;
+    for b in blocks {
+        let t = b.text.trim();
+        if t.is_empty() {
+            continue;
+        }
+        let mut has_cjk = false;
+        let mut has_ext_rare = false;
+        let mut has_latin = false;
+        let mut latin_run = 0usize;
+        let mut max_latin_run = 0usize;
+        for ch in t.chars() {
+            if ('\u{4E00}'..='\u{9FFF}').contains(&ch) {
+                has_cjk = true;
+            } else if ('\u{3400}'..='\u{4DBF}').contains(&ch)
+                || ('\u{20000}'..='\u{2FFFF}').contains(&ch)
+            {
+                has_cjk = true;
+                has_ext_rare = true;
+            } else if ch.is_ascii_alphabetic() {
+                has_latin = true;
+                latin_run += 1;
+                max_latin_run = max_latin_run.max(latin_run);
+            } else {
+                latin_run = 0;
+            }
+        }
+        let stray = has_cjk && has_latin && max_latin_run <= 2;
+        if has_ext_rare || stray {
+            gibberish_blocks += 1;
+        }
+    }
+    let gibberish_ratio = if !blocks.is_empty() {
+        gibberish_blocks as f64 / blocks.len() as f64
+    } else {
+        0.0
+    };
     // 综合评分：加权求和，0~1。任一信号 > 阈值都触发重跑
     //   single_char_ratio > 0.4 → +0.4
     //   aspect_outlier_ratio > 0.2 → +0.3
@@ -1250,14 +1296,21 @@ fn detect_ocr_garble_score(blocks: &[OcrBlock]) -> f64 {
     if short_block_ratio > 0.15 {
         score += 0.2;
     }
+    // 信号 4：结构性 gibberish（形近替换 / 细微错字）——唤醒 Layer 3 共识引擎
+    if gibberish_ratio > 0.04 {
+        score += 0.35;
+    } else if gibberish_ratio > 0.015 {
+        score += 0.18;
+    }
     score = score.min(1.0);
     clog!(
         "ocr",
-        "GARBLE: 翻车自检 single_char={:.0}% aspect_outlier={:.0}% fragmented_rows={:.0}% very_short={:.0}% → score={:.2}",
+        "GARBLE: 翻车自检 single_char={:.0}% aspect_outlier={:.0}% fragmented_rows={:.0}% very_short={:.0}% gibberish={:.0}% → score={:.2}",
         single_char_ratio * 100.0,
         aspect_outlier_ratio * 100.0,
         fragmented_ratio * 100.0,
         short_block_ratio * 100.0,
+        gibberish_ratio * 100.0,
         score
     );
     score
@@ -1276,40 +1329,152 @@ fn rerun_if_garble_detected(
         // 健康路径：不付额外成本
         return Ok(primary);
     }
-    // 翻车命中：有 raw_bytes 才走兜底
+    // 翻车命中（或共识引擎唤醒）：有 raw_bytes 才走兜底
     let Some(bytes) = raw_bytes else {
-        clog!("ocr", "RERUN: 翻车分 {:.2} ≥ 0.3 但无 raw_bytes，跳过兜底（仅记 log）", score);
+        clog!("ocr", "CONSENSUS: 翻车分 {:.2} 但无 raw_bytes，跳过共识（仅记 log）", score);
         return Ok(primary);
     };
     clog!(
         "ocr",
-        "RERUN: 翻车分 {:.2} ≥ 0.3 触发原图裸跑（不过 preprocess）兜底",
+        "CONSENSUS: 翻车分 {:.2} 触发通用多pass共识引擎（主路 + Otsu二值化 + Otsu二值化放大）",
         score
     );
-    // 把 raw_bytes 落新临时文件，PS 端 OcrEngine 直接从文件读
+    // 把 raw_bytes 落临时文件，供各异构 pass 反复读取（Otsu 二值化从文件读）
     let tmp = store::temp_png_path();
     if let Err(e) = store::write_bytes(&tmp, bytes) {
-        clog!("ocr", "RERUN: 落原图失败 {:?} err={} → 沿用主路", tmp, e);
+        clog!("ocr", "CONSENSUS: 落原图失败 {:?} err={} → 沿用主路", tmp, e);
         return Ok(primary);
     }
-    let rerun = match run_native_ocr_windows_inner(&tmp, lang, Some(bytes)) {
-        Ok(r) => r,
-        Err(e) => {
-            clog!("ocr", "RERUN: 原图兜底失败: {} → 沿用主路", e);
-            let _ = std::fs::remove_file(&tmp);
-            return Ok(primary);
-        }
-    };
+    // P2：Otsu 二值化（与主路 upscale+CLAHE 完全不同输入 → 不同错误模式）
+    let p2 = otsu_binarize_to_temp_png(bytes)
+        .ok()
+        .and_then(|p| run_native_ocr_windows_inner(&p, lang, None).ok());
+    // P3：Otsu 二值化 + 放大（再换一种错误模式，用于平票打破）
+    let p3 = otsu_binarize_upscaled_to_temp_png(bytes, 2)
+        .ok()
+        .and_then(|p| run_native_ocr_windows_inner(&p, lang, None).ok());
     let _ = std::fs::remove_file(&tmp);
-    // 两路合并：LCS 投票（y 接近 + x 接近 + 文本相似度 ≥ 0.6 视为同一行，
-    //           保留 confidence 高的，差异化行全保留）
-    let merged = merge_ocr_results_horizontal(primary, rerun, 0.5, true);
+    // 收齐所有 pass（主路 + 各异构 pass）→ 几何对齐 + 多数投票共识
+    let has_p3 = p3.is_some();
+    let mut passes: Vec<OcrResult> = vec![primary];
+    if let Some(p) = p2 {
+        passes.push(p);
+    }
+    if let Some(p) = p3 {
+        passes.push(p);
+    }
+    let merged = consensus_merge(&passes);
     clog!(
         "ocr",
-        "RERUN: 兜底合并完成 → 最终 {} 块",
-        merged.blocks.len()
+        "CONSENSUS: 共识合并完成 → 最终 {} 块（来自 {} 个 pass，主路+二值化{}）",
+        merged.blocks.len(),
+        passes.len(),
+        if has_p3 { "+放大" } else { "" }
     );
     Ok(merged)
+}
+
+/// 通用多 pass 共识引擎（2026-07-23 · 治本不修字面）。
+///
+/// 同一张图经多个**异构预处理**（主路 upscale+CLAHE / Otsu 二值化 / Otsu+放大）
+/// 交给同一个 WinRT 引擎识别，各 pass 因输入不同而产生**不同的形近错字**。
+/// 本函数按**归一化坐标**（对 upscale/二值化 scale-invariant）把各 pass 的块对齐到同一位置，
+/// 每个位置做**多数投票**选文本（平票按置信度和），从而实现自洽集成——无需任何
+/// 具体字符替换规则，也无需外挂词典，对任意语种/任意文本通用。
+///
+/// 为什么通用：传统"加一条错字映射"是死胡同；这里靠"多证据投票"在方法层面纠错，
+/// 形近替换只要有一个 pass 认对就被多数票选出。
+#[cfg(any(target_os = "windows", test))]
+fn consensus_merge(passes: &[OcrResult]) -> OcrResult {
+    struct Tagged<'a> {
+        b: &'a OcrBlock,
+    }
+    let mut tagged: Vec<Tagged> = Vec::new();
+    for p in passes {
+        for b in &p.blocks {
+            if b.text.trim().is_empty() {
+                continue;
+            }
+            tagged.push(Tagged { b });
+        }
+    }
+    // 按 (y, x) 中心排序后贪心聚类：中心距离 < 0.025（归一化）归为同一位置簇
+    let mut idx: Vec<usize> = (0..tagged.len()).collect();
+    idx.sort_by(|&a, &b| {
+        let (ca, cb) = (&tagged[a].b, &tagged[b].b);
+        ca.y
+            .partial_cmp(&cb.y)
+            .unwrap()
+            .then(ca.x.partial_cmp(&cb.x).unwrap())
+    });
+    let mut clusters: Vec<Vec<&OcrBlock>> = Vec::new();
+    for i in idx {
+        let b = tagged[i].b;
+        let cx = b.x + b.w / 2.0;
+        let cy = b.y + b.h / 2.0;
+        let mut placed = false;
+        for cl in clusters.iter_mut() {
+            let r = cl.first().unwrap();
+            let rcx = r.x + r.w / 2.0;
+            let rcy = r.y + r.h / 2.0;
+            if (cx - rcx).abs() < 0.025 && (cy - rcy).abs() < 0.025 {
+                cl.push(b);
+                placed = true;
+                break;
+            }
+        }
+        if !placed {
+            clusters.push(vec![b]);
+        }
+    }
+    // 每簇投票：text 多数（票数），平票按置信度和最高
+    let mut out_blocks: Vec<OcrBlock> = Vec::new();
+    for cl in &clusters {
+        let mut votes: std::collections::BTreeMap<String, (usize, f64)> =
+            std::collections::BTreeMap::new();
+        for b in cl {
+            let e = votes
+                .entry(b.text.trim().to_string())
+                .or_insert((0usize, 0.0f64));
+            e.0 += 1;
+            e.1 += b.confidence;
+        }
+        let mut best_text: String = String::new();
+        let mut best_key: (usize, f64) = (0, -1.0);
+        let mut rep: Option<&OcrBlock> = None;
+        for (t, (cnt, conf)) in &votes {
+            if (*cnt, *conf) > best_key {
+                best_key = (*cnt, *conf);
+                best_text = t.clone();
+                rep = cl.iter().find(|b| b.text.trim() == t.as_str()).copied();
+            }
+        }
+        if let Some(r) = rep {
+            out_blocks.push(OcrBlock {
+                text: best_text,
+                x: r.x,
+                y: r.y,
+                w: r.w,
+                h: r.h,
+                confidence: r.confidence,
+            });
+        }
+    }
+    // 阅读顺序重排：先 y 后 x
+    out_blocks.sort_by(|a, b| {
+        a.y.partial_cmp(&b.y)
+            .unwrap()
+            .then(a.x.partial_cmp(&b.x).unwrap())
+    });
+    let text = out_blocks
+        .iter()
+        .map(|b| b.text.clone())
+        .collect::<Vec<_>>()
+        .join("\n");
+    OcrResult {
+        text,
+        blocks: out_blocks,
+    }
 }
 
 // ===== 其它平台（Linux 等）：暂无系统原生 OCR =====
@@ -1331,6 +1496,21 @@ fn run_native_ocr(_path: &std::path::Path, _lang: Option<&str>) -> Result<OcrRes
 // 输出：black/white 二值图 → PNG → OcrEngine 直接读。失败回退到 caller path。
 #[cfg(any(target_os = "windows", test))]
 fn otsu_binarize_to_temp_png(bytes: &[u8]) -> Result<std::path::PathBuf, String> {
+    otsu_binarize_inner(bytes, 1)
+}
+
+/// 异构第 3 pass 用：二值化前先放大 `factor` 倍（Lanczos3 单通道），
+/// 换一种错误模式用于共识引擎平票打破。factor=1 等同 `otsu_binarize_to_temp_png`。
+#[cfg(any(target_os = "windows", test))]
+fn otsu_binarize_upscaled_to_temp_png(
+    bytes: &[u8],
+    factor: u32,
+) -> Result<std::path::PathBuf, String> {
+    otsu_binarize_inner(bytes, factor)
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn otsu_binarize_inner(bytes: &[u8], upscale: u32) -> Result<std::path::PathBuf, String> {
     use image::ImageReader;
     use std::io::Cursor;
     let started = std::time::Instant::now();
@@ -1339,7 +1519,11 @@ fn otsu_binarize_to_temp_png(bytes: &[u8]) -> Result<std::path::PathBuf, String>
         .map_err(|e| format!("Otsu: 探测格式失败: {}", e))?
         .decode()
         .map_err(|e| format!("Otsu: 解码失败: {}", e))?;
-    let gray = img.to_luma8();
+    let mut gray = img.to_luma8();
+    if upscale > 1 {
+        let (uw, uh) = (gray.width() * upscale, gray.height() * upscale);
+        gray = image::imageops::resize(&gray, uw, uh, image::imageops::FilterType::Lanczos3);
+    }
     let (w, h) = (gray.width(), gray.height());
     if w == 0 || h == 0 {
         return Err("Otsu: 空图".into());
@@ -1428,8 +1612,9 @@ fn otsu_binarize_to_temp_png(bytes: &[u8]) -> Result<std::path::PathBuf, String>
     std::fs::write(&path, &out).map_err(|e| format!("Otsu: 写临时文件失败: {}", e))?;
     clog!(
         "ocr",
-        "OTSU: 阈值={} 耗时={}ms 原图={}B → 二值图={}B → {:?}",
+        "OTSU: 阈值={} upscale={}x 耗时={}ms 原图={}B → 二值图={}B → {:?}",
         best_t,
+        upscale,
         started.elapsed().as_millis(),
         bytes.len(),
         out.len(),
@@ -3247,6 +3432,45 @@ mod tests {
         let result = rerun_if_garble_detected(primary, None, None).unwrap();
         assert_eq!(result.blocks.len(), 1);
         assert_eq!(result.blocks[0].text, "正常");
+    }
+
+    #[test]
+    fn consensus_merge_picks_majority_across_passes() {
+        // 模拟形近替换：主路把"千问"识成"干问"，二值化 pass 与放大 pass 都识成"千问"
+        // → 2/3 多数投票应纠正为"千问"（通用集成，不靠任何字符映射）
+        let p1 = OcrResult {
+            text: "干问".to_string(),
+            blocks: vec![mk_block_with("干问", 0.10, 0.50, 0.30, 0.05)],
+        };
+        let p2 = OcrResult {
+            text: "千问".to_string(),
+            blocks: vec![mk_block_with("千问", 0.10, 0.50, 0.30, 0.05)],
+        };
+        let p3 = OcrResult {
+            text: "千问".to_string(),
+            blocks: vec![mk_block_with("千问", 0.10, 0.50, 0.30, 0.05)],
+        };
+        let m = consensus_merge(&[p1, p2, p3]);
+        assert_eq!(m.blocks.len(), 1, "同一位置应合并为 1 块");
+        assert_eq!(m.blocks[0].text, "千问", "共识应纠正形近替换");
+    }
+
+    #[test]
+    fn consensus_merge_keeps_unique_blocks_per_pass() {
+        // p1/p2 都识出"标题"（同一位置 → 合并）；p2 多识出"副标"（不同 y → 保留）
+        let p1 = OcrResult {
+            text: "标题".to_string(),
+            blocks: vec![mk_block_with("标题", 0.10, 0.50, 0.30, 0.05)],
+        };
+        let p2 = OcrResult {
+            text: "标题\n副标".to_string(),
+            blocks: vec![
+                mk_block_with("标题", 0.10, 0.50, 0.30, 0.05),
+                mk_block_with("副标", 0.10, 0.58, 0.30, 0.05),
+            ],
+        };
+        let m = consensus_merge(&[p1, p2]);
+        assert_eq!(m.blocks.len(), 2, "对齐的合并、未对齐的保留");
     }
 
     // ===== P1#35+#38 (2026-07-23): compute_ocr_cap 单元测试 =====

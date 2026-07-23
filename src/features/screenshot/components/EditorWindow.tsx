@@ -302,6 +302,8 @@ export const EditorWindow = () => {
   // 避免打码/模糊区域的原文经 OCR 上下文泄漏给模型（候选④）。
   const [aiOcrText, setAiOcrText] = useState<string>('');
   const [ocrBusy, setOcrBusy] = useState(false);
+  // 单飞锁：同步 ref（不依赖 React state 异步更新），运行期重入（日志里 185ms 内 4× 同图 OCR）直接拒。
+  const ocrInFlight = useRef(false);
   const [ocrLang, setOcrLang] = useState('auto');
   const [ocrElapsed, setOcrElapsed] = useState<number | null>(null);
   // 增强 OCR 侧栏状态（对齐主窗富面板能力，R1/R2/R3）
@@ -1196,8 +1198,10 @@ export const EditorWindow = () => {
   // OCR 执行（可被自动/手动复用）。N4：长图自动分块 OCR（仅整图识别触发；区域 OCR 不分块）。
   const doOcr = useCallback(async (img?: string) => {
     const target = img ?? imageData;
-    if (ocrBusy || !target || sourceKind === 'text') return;
+    // 单飞：ref 同步判定，4× 并发重入在此被拦下（state 异步来不及拦）
+    if (ocrInFlight.current || ocrBusy || !target || sourceKind === 'text') return;
     if (!img) setOcrRegionPreview(null); // 整图识别：清掉上一次框选区域预览，避免混淆
+    ocrInFlight.current = true;
     setOcrBusy(true);
     setOcrElapsed(null);
     const t0 = performance.now();
@@ -1239,6 +1243,7 @@ export const EditorWindow = () => {
     } catch (e) {
       flash(t('toast.ocrFailed', { msg: String(e) }), 'error');
     } finally {
+      ocrInFlight.current = false;
       setOcrBusy(false);
     }
   }, [ocrBusy, imageData, ocrLang, sourceKind, flash, t, ocrAutoCopy, ocrMerge, imgWidth, imgHeight, screenshotId]);
