@@ -33,8 +33,30 @@ pub(crate) fn detect_ocr_garble_score(blocks: &[OcrBlock]) -> f64 {
     //  - 字间距破坏合并：单行极宽（h/w < 0.3 罕见）
     let mut aspect_outliers = 0usize;
     let mut aspect_count = 0usize;
-    let mut short_block_ratio = 0.0; // 块 w < 0.05（极窄条）的占比
+    let mut short_block_ratio = 0.0; // 块宽显著小于同屏中位块宽的占比
     let mut very_short = 0usize;
+    // 先收集有效块宽，求中位数 → 相对阈值。
+    // 2026-07-24 修复：旧版用绝对阈值 w<0.05，桌面/密集 UI 截图里所有文字块天然就小
+    // （实测 84% 块 <0.05），把正常 UI 误判成切块碎片 → 误触发共识引擎多花 2-3 秒。
+    // 改为相对中位块宽：密集 UI 中位宽本身就小，阈值随之降低不再误报；
+    // 真切块碎片（远小于同屏正常块）仍会被抓住。
+    let mut valid_widths: Vec<f64> = blocks
+        .iter()
+        .filter(|b| b.h >= 0.001 && b.w >= 0.001)
+        .map(|b| b.w)
+        .collect();
+    valid_widths.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let median_w = if valid_widths.is_empty() {
+        0.0
+    } else {
+        valid_widths[valid_widths.len() / 2]
+    };
+    // 相对阈值 = 中位宽 * 0.4，再用 0.05 绝对上限兜底（防止极大图把阈值抬太高）。
+    let very_short_thresh = if median_w > 0.0 {
+        (median_w * 0.4).min(0.05)
+    } else {
+        0.05
+    };
     for b in blocks {
         if b.h < 0.001 || b.w < 0.001 {
             continue;
@@ -44,7 +66,7 @@ pub(crate) fn detect_ocr_garble_score(blocks: &[OcrBlock]) -> f64 {
         if !(0.05..=5.0).contains(&aspect) {
             aspect_outliers += 1;
         }
-        if b.w < 0.05 {
+        if b.w < very_short_thresh {
             very_short += 1;
         }
     }
@@ -113,7 +135,12 @@ pub(crate) fn detect_ocr_garble_score(blocks: &[OcrBlock]) -> f64 {
                 latin_run = 0;
             }
         }
-        let stray = has_cjk && has_latin && max_latin_run <= 2;
+        // stray：含 CJK 且夹带恰好 2 字母的孤立 ASCII 串（如 "(D:)" 被识成垃圾）。
+        // 2026-07-24 修复：旧版 max_latin_run<=2 把单字母也计入，导致「C盘」「D盘」
+        // 「E盘」这类正常盘符/单字母+中文 UI 标签被误判为形近错字（桌面截图里极常见），
+        // gibberish 虚高 → 误触发共识引擎。单 ASCII 字母/数字紧邻中文是正常 UI 模式，
+        // 真正的 OCR 乱码通常是 2+ 字母串，故下界提到 2（恰好 2 字母才报）。
+        let stray = has_cjk && has_latin && max_latin_run == 2;
         if has_ext_rare || stray {
             gibberish_blocks += 1;
         }

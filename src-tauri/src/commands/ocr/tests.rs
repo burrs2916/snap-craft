@@ -550,6 +550,50 @@ fn garble_score_aspect_outliers() {
     assert!(score >= 0.3, "极窄条应 score >= 0.3，实际={}", score);
 }
 
+#[test]
+fn garble_score_dense_desktop_ui_no_false_trigger() {
+    // 2026-07-24 回归：桌面/密集 UI 截图里文字块天然就小（旧版绝对阈值 w<0.05
+    // 会把 84% 的块误判成切块碎片），且夹带「C盘」「D盘」等盘符标签。
+    // 修复后这类健康样本不应误触发共识引擎（score < 0.3）。
+    let blocks = vec![
+        mk_block_with("计算机", 0.05, 0.05, 0.04, 0.02),
+        mk_block_with("回收站", 0.15, 0.05, 0.04, 0.02),
+        mk_block_with("C盘", 0.25, 0.05, 0.03, 0.02),
+        mk_block_with("D盘", 0.35, 0.05, 0.03, 0.02),
+        mk_block_with("宽带连接", 0.45, 0.05, 0.05, 0.02),
+        mk_block_with("新疆杲飞益智", 0.05, 0.15, 0.06, 0.02),
+        mk_block_with("Administr..", 0.20, 0.15, 0.05, 0.02),
+        mk_block_with("低", 0.05, 0.25, 0.02, 0.03),
+        mk_block_with("文档", 0.15, 0.25, 0.03, 0.02),
+        mk_block_with("图片", 0.25, 0.25, 0.03, 0.02),
+    ];
+    let score = detect_ocr_garble_score(&blocks);
+    assert!(
+        score < 0.3,
+        "桌面密集 UI 健康样本 score 应 < 0.3（不误触发共识），实际={}",
+        score
+    );
+}
+
+#[test]
+fn garble_score_drive_letter_labels_not_gibberish() {
+    // 2026-07-24 回归：「C盘」「D盘」「E盘」是正常盘符标签（单 ASCII 字母 + 中文），
+    // 旧版 stray_latin（max_latin_run<=2）把它们误判为 OCR 形近错字。
+    // 纯盘符标签样本 gibberish 不应贡献分数。
+    let blocks = vec![
+        mk_block_with("C盘", 0.05, 0.05, 0.10, 0.05),
+        mk_block_with("D盘", 0.05, 0.15, 0.10, 0.05),
+        mk_block_with("E盘", 0.05, 0.25, 0.10, 0.05),
+        mk_block_with("本地磁盘", 0.05, 0.35, 0.20, 0.05),
+    ];
+    let score = detect_ocr_garble_score(&blocks);
+    assert!(
+        score < 0.3,
+        "盘符标签不应被误判为 gibberish 触发共识，实际 score={}",
+        score
+    );
+}
+
 // ===== Otsu 二值化单测 =====
 
 #[test]
