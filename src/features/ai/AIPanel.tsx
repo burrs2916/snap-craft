@@ -1204,7 +1204,7 @@ export default function AIPanel({
           {/* Phase 13+：本次消耗 token / 成本透明（对齐 claw-code usage.rs） */}
           {usage.input + usage.output > 0 && (
             <div className="ai-usage">
-              🔤 {usage.input.toLocaleString()}↑ · {usage.output.toLocaleString()}↓ tokens
+              🔤 {t('ai.usageTokens', { in: usage.input.toLocaleString(), out: usage.output.toLocaleString() })}
               {usage.cacheRead ? ` · ⚡${usage.cacheRead.toLocaleString()} ${t('ai.usageCache')}` : ''}
               {(() => {
                 const c = estimateCost(config.model, usage.input, usage.output);
@@ -1635,7 +1635,7 @@ export default function AIPanel({
               {thinking && (
                 <details className="ai-stream-think" open={thinkOpen}>
                   <summary onClick={(e) => { e.preventDefault(); setThinkOpen((v) => !v); }}>
-                    💭 {t('ai.thinkingTitle')} · {thinking.length} chars
+                    💭 {t('ai.thinkingTitle')} · {t('ai.thinkingChars', { n: thinking.length })}
                   </summary>
                   <div className="ai-stream-think-body"><AiMarkdown source={thinking} /></div>
                 </details>

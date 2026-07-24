@@ -3,6 +3,7 @@
 // 不引入第三方库，避免影响现有依赖与构建。
 
 import type { ReactNode, CSSProperties } from 'react';
+import { t } from '../../i18n';
 
 function renderItalic(text: string, keyPrefix: string): ReactNode[] {
   const italRe = /\*([^*]+)\*/g;
@@ -123,7 +124,7 @@ export function AiMarkdown({
         // 调用方传了 sectionImages 但第 k 张不存在（k 越界）：降级为占位，避免裸标记泄露
         blocks.push(
           <div key={key++} className="md-snap-missing">
-            [图片 {snapMatch[1]} 缺失]
+            {t('ai.imgMissing', { n: snapMatch[1] })}
           </div>,
         );
       }

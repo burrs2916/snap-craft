@@ -56,6 +56,32 @@ pub async fn update_screenshot_annotations(
     }
 }
 
+/// 按 id 更新某条截图的底图（裁剪后回写 data_url + 宽高）。
+/// 裁剪使旧标注坐标系与 OCR 结果全部失效，故一并清空（与前端 clearAnnotations 对齐），
+/// 避免重开历史时旧标注错位叠加在新图上、或 OCR 框指向错误位置。
+/// 设计动机：此前裁剪只更新编辑窗本地 state，从不落库，关窗重开回到裁剪前原图（数据丢失）。
+#[tauri::command]
+pub async fn update_screenshot_image(
+    app: AppHandle,
+    id: String,
+    data_url: String,
+    width: u32,
+    height: u32,
+) -> Result<(), String> {
+    let mut items = store::load_history(&app);
+    if let Some(item) = items.iter_mut().find(|it| it.id == id) {
+        item.data_url = data_url;
+        item.width = width;
+        item.height = height;
+        item.annotations = String::new();
+        item.ocr_text = String::new();
+        item.ocr_blocks_json = String::new();
+        store::save_history(&app, &items)
+    } else {
+        Err(format!("screenshot not found: {}", id))
+    }
+}
+
 /// 按 id 写入某条截图的 OCR 识别文字（纯文本）。
 /// 与 update_screenshot_annotations 平级：前者存标注、本命令存识别结果，
 /// 关窗后从历史重开（独立编辑窗）即可直接回显文字，无需二次识别。

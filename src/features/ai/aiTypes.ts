@@ -113,6 +113,10 @@ export interface StreamOpts {
    *  OpenAI 兼容 reasoning / reasoning_content，如 DeepSeek-R1 / Qwen 推理模型）。
    *  UI 上可作为可折叠的「思考过程」展示，让用户看到 AI 如何拆解截图任务。 */
   onThinking?: (t: string) => void;
+  /** 可选：每次重试前回调。流式重试会从头重新输出，调用方应借此把已展示内容回退到
+   *  baseline（不传则清空）：普通流式清空即可；Agent 工具循环传「已完成轮次的累计文本」，
+   *  使重试只覆盖当前轮片段，不丢失此前轮次的输出。 */
+  onRetry?: (baseline?: string) => void;
 }
 
 // 多轮对话中的一条记录（参考 privdoc-ai 的 conversations/messages 模型，

@@ -250,6 +250,7 @@ pub fn run() {
             commands::history::clear_history,
             commands::history::get_screenshot,
             commands::history::update_screenshot_annotations,
+            commands::history::update_screenshot_image,
             commands::history::set_screenshot_ocr,
             commands::history::set_screenshot_ocr_full,
             get_platform,

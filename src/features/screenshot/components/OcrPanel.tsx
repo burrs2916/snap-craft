@@ -432,9 +432,9 @@ export function OcrPanel({ ocr, current, flash, t, history, setCurrentScreenshot
         {/* 底部操作栏 */}
         <div className="ocr-panel-actions">
           <button className="tbar-btn tbar-primary" onClick={applyOcrAsAnnotations} disabled={ocrResult.blocks.length === 0 || ocrSourceKind === 'text'} title={ocrSourceKind === 'text' ? t('ocr.applyTitleText') : t('ocr.applyTitle')}>{t('ocr.apply')}</button>
-          <button className="tbar-btn tbar-ghost" onClick={redactOcrSel} disabled={ocrResult.blocks.length === 0} title={t('ocr.redactSelTitle')}>{t('ocr.redactSel')}</button>
-          <button className="tbar-btn tbar-ghost" onClick={highlightOcrSel} disabled={ocrResult.blocks.length === 0} title={t('ocr.highlightSelTitle')}>{t('ocr.highlightSel')}</button>
-          <button className="tbar-btn tbar-ghost" onClick={arrowOcrSel} disabled={ocrResult.blocks.length === 0} title={t('ocr.arrowSelTitle')}>{t('ocr.arrowSel')}</button>
+          <button className="tbar-btn tbar-ghost" onClick={redactOcrSel} disabled={ocrResult.blocks.length === 0 || ocrSourceKind === 'text'} title={ocrSourceKind === 'text' ? t('ocr.redactSelTitleText') : t('ocr.redactSelTitle')}>{t('ocr.redactSel')}</button>
+          <button className="tbar-btn tbar-ghost" onClick={highlightOcrSel} disabled={ocrResult.blocks.length === 0 || ocrSourceKind === 'text'} title={ocrSourceKind === 'text' ? t('ocr.highlightSelTitleText') : t('ocr.highlightSelTitle')}>{t('ocr.highlightSel')}</button>
+          <button className="tbar-btn tbar-ghost" onClick={arrowOcrSel} disabled={ocrResult.blocks.length === 0 || ocrSourceKind === 'text'} title={ocrSourceKind === 'text' ? t('ocr.arrowSelTitleText') : t('ocr.arrowSelTitle')}>{t('ocr.arrowSel')}</button>
           <button className="tbar-btn tbar-ghost" onClick={() => runOcr(ocrLastImage ?? current?.dataUrl ?? '')} disabled={ocrBusy || !ocrLastImage || ocrSourceKind === 'text'} title={ocrSourceKind === 'text' ? t('ocr.rerunTitleText') : t('ocr.rerunTitle')}>{ocrBusy ? t('editor.ocrBusy') : t('ocr.rerun')}</button>
           <button className="tbar-btn tbar-ghost" onClick={async () => { try { await navigator.clipboard.writeText(ocrDisplayText); flash(t('ocr.copied'), 'success'); } catch { flash(t('ocr.copyFailed'), 'error'); } }}>{t('ocr.copyAll')}</button>
           <button className="tbar-btn tbar-ghost" onClick={() => copyOcrAs('json')} disabled={ocrResult.blocks.length === 0} title={t('ocr.copyJsonTitle')}>{t('ocr.copyJson')}</button>

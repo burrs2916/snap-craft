@@ -11,7 +11,7 @@ import { useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { useAiStore } from '../features/ai/aiStore';
 import AIPanel from '../features/ai/AIPanel';
-import { t } from '../i18n';
+import { t, useI18n } from '../i18n';
 import { RemoteToolHost } from './RemoteToolHost';
 import {
   setupAiBridge,
@@ -27,6 +27,9 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
 import './ai-window.css';
 
 export default function AiWindow() {
+  // 订阅语言切换：独立 AI 窗口是单独的 React 根，不订阅 useI18n 时主窗口切换
+  // 语言不会触发本窗口（含 AIPanel 子树）重渲染，残留旧语言文案。
+  useI18n();
   const [ctx, setCtx] = useState<AiContext | null>(null);
   const [ready, setReady] = useState(false);
   const remoteHostRef = useRef(new RemoteToolHost(null));

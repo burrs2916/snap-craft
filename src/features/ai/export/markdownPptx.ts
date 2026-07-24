@@ -14,6 +14,7 @@ import { buildZip, dataUrlToBytes, type ZipEntry } from './zipStore';
 
 // 主题色统一使用 themeConstants（消除各格式独立维护的颜色映射，确保 HTML/DOCX/PPTX 严格一致）
 import { THEME_ACCENT } from './themeConstants';
+import { t } from '../../../i18n';
 
 /** 从 dataUrl 头解析实际图片格式 → PPTX media 文件扩展名。
  *  修复前：无论 PNG/JPEG 都命名为 imageN.png，PowerPoint 严格模式会"文件已损坏"或图片不显示。
@@ -541,7 +542,7 @@ const PRES_PROPS = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 // 导致每份导出文件在 PowerPoint「文件信息」里都显示错的时间与标题（典型假实现）。
 // 现改为按真实文档标题 + 导出时刻写入。
 function coreXml(title: string, nowIso: string): string {
-  const safeTitle = title && title.trim() ? title.trim() : 'SnapCraft AI 演示文稿';
+  const safeTitle = title && title.trim() ? title.trim() : t('export.pptxTitleDefault');
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:dcmitype="http://purl.org/dc/dcmitype/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
   <dc:title>${esc(safeTitle)}</dc:title>

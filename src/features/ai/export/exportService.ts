@@ -21,6 +21,7 @@ import { pickExportPath, deriveFileHint } from './exportPath';
 import { pushExportHistory } from './exportHistory';
 import { firstHeading, mdToPlainText, printHtmlViaIframe, frontImageBlockHtml } from '../aiUtils';
 import { stripSnapMarkers, hasSnapMarkers } from '../aiPresets';
+import { t } from '../../../i18n';
 
 // ── 导出上下文：调用方组装，描述「要导出什么」 ──
 
@@ -243,7 +244,7 @@ export async function exportPdf(ctx: ExportContext): Promise<string | null> {
 
   const err = await printHtmlViaIframe(html);
   if (err) {
-    throw new Error(`PDF 打印失败 (${err})`);
+    throw new Error(t('export.pdfPrintFailed', { msg: err }));
   }
   return null;
 }

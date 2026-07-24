@@ -4,6 +4,7 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
 
 export interface HistoryEntry {
   id: string;
@@ -30,6 +31,32 @@ export interface UseHistoryReturn {
   deleteEntry: (id: string) => Promise<void>;
   /** 清空全部历史（含二次确认） */
   clearAll: (confirmMsg: string) => Promise<boolean>;
+}
+
+/**
+ * 关闭某条历史对应的编辑窗（label = `editor-${id}`）。
+ * 删除历史后若编辑窗仍开着，会成为孤儿窗口：关窗时回写已删除的 id 失败被吞掉，
+ * 用户的编辑静默丢失且无任何提示。故删除时主动关闭对应编辑窗。
+ */
+async function closeEditorWindowById(id: string): Promise<void> {
+  try {
+    const win = await WebviewWindow.getByLabel(`editor-${id}`);
+    if (win) await win.close();
+  } catch {
+    /* 窗口可能已关闭，忽略 */
+  }
+}
+
+/** 关闭所有编辑窗（清空历史时用）。 */
+async function closeAllEditorWindows(): Promise<void> {
+  try {
+    const wins = await WebviewWindow.getAll();
+    await Promise.all(
+      wins.filter((w) => w.label.startsWith('editor-')).map((w) => w.close().catch(() => {})),
+    );
+  } catch {
+    /* ignore */
+  }
 }
 
 /**
@@ -104,6 +131,8 @@ export function useHistory(
     async (id: string) => {
       if (!id) return;
       try {
+        // 先关闭对应编辑窗，避免删除后遗留孤儿窗口（其关窗回写会静默失败）
+        await closeEditorWindowById(id);
         await invoke('delete_history', { id });
         setHistory((h) => h.filter((x) => x.id !== id));
         onDeleted?.(id);
@@ -119,6 +148,8 @@ export function useHistory(
     async (confirmMsg: string): Promise<boolean> => {
       if (!window.confirm(confirmMsg)) return false;
       try {
+        // 关闭所有编辑窗，避免清空后遗留孤儿窗口
+        await closeAllEditorWindows();
         await invoke('clear_history');
         setHistory([]);
         flash(t('toast.historyCleared'), 'success');

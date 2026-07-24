@@ -57,6 +57,7 @@ export interface MarkdownToDocxOptions {
 
 /** 主题 → 强调色：统一使用 themeConstants（消除各格式独立维护的颜色映射） */
 import { THEME_ACCENT } from './themeConstants';
+import { t } from '../../../i18n';
 
 /** 扫描 Markdown 生成目录（TOC）：标题 ≥4 个时自动生成，长文档更易导航（对齐 HTML 自动 TOC） */
 function buildToc(md: string, tocTitle?: string): Paragraph[] {
@@ -593,11 +594,11 @@ export async function markdownToDocx(
         alignment: AlignmentType.CENTER,
         border: { top: { style: BorderStyle.SINGLE, size: 4, color: 'E5E7EB', space: 2 } },
         children: [
-          new TextRun({ text: '第 ', size: 16, color: '9CA3AF' }),
+          new TextRun({ text: t('export.pagePrefix'), size: 16, color: '9CA3AF' }),
           new TextRun({ children: [PageNumber.CURRENT] }),
           new TextRun({ text: ' / ', size: 16, color: '9CA3AF' }),
           new TextRun({ children: [PageNumber.TOTAL_PAGES] }),
-          new TextRun({ text: ' 页', size: 16, color: '9CA3AF' }),
+          new TextRun({ text: t('export.pageSuffix'), size: 16, color: '9CA3AF' }),
         ],
       }),
     ],
@@ -606,7 +607,7 @@ export async function markdownToDocx(
   const doc = new Document({
     // 文件属性（Word「文件信息」面板）：docx 库默认 creator/lastModifiedBy 为 "Un-named"、
     // title 空白，导致文档属性失真。这里写入真实标题与应用名，created/modified 由库默认填导出时刻。
-    title: title && title.trim() ? title.trim() : 'SnapCraft AI 文档',
+    title: title && title.trim() ? title.trim() : t('export.docTitleDefault'),
     creator: 'SnapCraft',
     lastModifiedBy: 'SnapCraft',
     description: opts.subtitle && opts.subtitle.trim() ? opts.subtitle.trim() : undefined,

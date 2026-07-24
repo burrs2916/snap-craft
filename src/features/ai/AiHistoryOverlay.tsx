@@ -106,12 +106,12 @@ export function AiHistoryOverlay({ onClose, onHide, onLoadConv, windowChrome, op
         if (bytes) files.push({ name: 'source.png', data: bytes });
       }
       const readme = [
-        'SnapCraft AI 会话归档',
-        `预设: ${activeConv.meta.presetName}`,
-        `首轮目标: ${activeConv.meta.firstGoal || '(空)'}`,
-        `消息数: ${activeConv.meta.msgCount}`,
-        `更新时间: ${new Date(activeConv.meta.updatedAt).toLocaleString()}`,
-        activeConv.meta.parent ? `分支自: ${activeConv.meta.parent}` : '',
+        t('export.archiveTitle'),
+        t('export.archivePreset', { v: activeConv.meta.presetName }),
+        t('export.archiveGoal', { v: activeConv.meta.firstGoal || t('export.archiveGoalEmpty') }),
+        t('export.archiveMsgs', { n: activeConv.meta.msgCount }),
+        t('export.archiveUpdated', { v: new Date(activeConv.meta.updatedAt).toLocaleString() }),
+        activeConv.meta.parent ? t('export.archiveParent', { v: activeConv.meta.parent }) : '',
       ]
         .filter(Boolean)
         .join('\n');

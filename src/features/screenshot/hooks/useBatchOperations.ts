@@ -167,7 +167,7 @@ export function useBatchOperations(deps: UseBatchOperationsDeps) {
     const path = await save({ defaultPath: `ai-batch-${Date.now()}.md`, filters: [{ name: 'Markdown', extensions: ['md'] }] });
     if (!path) return;
     try {
-      const md = aiBatchItems.map((it, idx) => `## 截图 ${idx + 1}：${it.time}\n\n${it.error ? '> ' + it.error : it.text}`).join('\n\n');
+      const md = aiBatchItems.map((it, idx) => `## ${t('ocr.batchShotHead', { n: idx + 1, time: it.time })}\n\n${it.error ? '> ' + it.error : it.text}`).join('\n\n');
       await invoke('save_text_file', { content: md, filePath: path });
       flash(t('ocr.exported', { path }), 'success');
     } catch (e) {
@@ -179,7 +179,7 @@ export function useBatchOperations(deps: UseBatchOperationsDeps) {
     const path = await save({ defaultPath: `ai-batch-${Date.now()}.docx`, filters: [{ name: 'Word', extensions: ['docx'] }] });
     if (!path) return;
     try {
-      const md = aiBatchItems.map((it, idx) => `## 截图 ${idx + 1}：${it.time}\n\n${it.error ? '> ' + it.error : it.text}`).join('\n\n');
+      const md = aiBatchItems.map((it, idx) => `## ${t('ocr.batchShotHead', { n: idx + 1, time: it.time })}\n\n${it.error ? '> ' + it.error : it.text}`).join('\n\n');
       const bytes = await markdownToDocx(md, { title: t('ocr.batchAiTitle'), theme: useAiStore.getState().config?.theme });
       await invoke('save_binary_file', { bytes: Array.from(bytes), filePath: path });
       flash(t('ocr.exported', { path }), 'success');

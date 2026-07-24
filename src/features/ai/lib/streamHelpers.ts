@@ -16,6 +16,10 @@ export interface StreamSink {
   onChunk: (d: string) => void;
   onThinking: (t: string) => void;
   stop: () => void;
+  /** 丢弃未 flush 的缓冲并把 store 的 output/thinking 清零。
+   * 流式重试前调用：上一次尝试已流式输出的片段会被重试从头覆盖，
+   * 不清零则两者叠加重复显示。 */
+  reset: () => void;
 }
 
 export function makeStreamSink(set: (partial: any) => void): StreamSink {
@@ -47,6 +51,11 @@ export function makeStreamSink(set: (partial: any) => void): StreamSink {
         clearInterval(timer);
         timer = null;
       }
+    },
+    reset: () => {
+      buf = '';
+      bufThink = '';
+      set({ output: '', thinking: '' });
     },
   };
 }

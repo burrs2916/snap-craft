@@ -193,9 +193,9 @@ export const EditorWindow = () => {
   const {
     annotations,
     addAnnotation,
+    loadAnnotations,
     activeTool,
     setPlatform,
-    clearAnnotations,
     setActiveTool,
     // 贴回画布：复用当前文字样式默认值（来自 store 默认值）
     currentColor,
@@ -264,11 +264,12 @@ export const EditorWindow = () => {
       setImgWidth(item.width);
       setImgHeight(item.height);
 
-      // 灌入已有标注
+      // 灌入已有标注：用 loadAnnotations 整体设置（不压撤销栈），
+      // 否则逐条 addAnnotation 会把各中间态压进 past，⌘Z 会删掉已保存的标注。
       if (item.annotations) {
         try {
           const anns = JSON.parse(item.annotations) as AnnotationObject[];
-          if (Array.isArray(anns)) anns.forEach((a) => addAnnotation(a));
+          if (Array.isArray(anns)) loadAnnotations(anns);
         } catch {
           /* 旧数据可能无标注或格式不兼容，忽略 */
         }
@@ -1088,10 +1089,16 @@ export const EditorWindow = () => {
       if (!img && isLongImage(imgWidth, imgHeight)) {
         res = await runTiledOcr(target, imgWidth, imgHeight, ocrLang);
       } else {
-        res = await invoke<OcrResult>('ocr_image', {
+        const raw = await invoke<OcrResult>('ocr_image', {
           imageData: target,
           lang: ocrLang === 'auto' ? null : ocrLang,
         });
+        // 非分块路径同样要清洗（与分块路径 / 主窗 useOcrPanel 对齐），
+        // 否则同图在主窗与编辑窗结果不一致，复制/导出可能带隐藏字符。
+        res = {
+          text: cleanOcrText(raw?.text),
+          blocks: (raw?.blocks ?? []).map((b) => ({ ...b, text: cleanOcrText(b.text) })),
+        };
       }
       setOcrResult(res);
       setOcrElapsed(Math.round(performance.now() - t0));
@@ -1118,7 +1125,14 @@ export const EditorWindow = () => {
         }
       }
     } catch (e) {
-      flash(t('toast.ocrFailed', { msg: String(e) }), 'error');
+      const msg = String(e);
+      // 后端空结果返回 Err("未识别到文字")，走此分支而非 blocks.length===0；
+      // 给用户友好提示而非技术性 "OCR 失败: 未识别到文字"。
+      if (msg.includes('未识别到文字')) {
+        flash(t('toast.ocrNone'), 'error');
+      } else {
+        flash(t('toast.ocrFailed', { msg }), 'error');
+      }
     } finally {
       ocrInFlight.current = false;
       setOcrBusy(false);
@@ -1133,13 +1147,23 @@ export const EditorWindow = () => {
       setImageData(dataUrl);
       setImgWidth(width);
       setImgHeight(height);
-      clearAnnotations();
+      // 硬重置：清空标注且同时清空撤销栈（loadAnnotations([])）。
+      // 不能用 clearAnnotations——它会把旧标注压进 past，裁剪后 ⌘Z 会把
+      // 旧坐标标注贴回新图。裁剪后旧坐标系已失效，撤销栈必须整体作废。
+      loadAnnotations([]);
       setActiveTool('select');
       // 裁剪后同步刷新 AI 视觉上下文（若面板已打开，底图已变）
       setAiVisionUrl(dataUrl);
+      // 裁剪结果落库：回写历史条目底图 + 宽高（后端同时清空失效的标注/OCR），
+      // 否则关窗重开回到裁剪前原图（数据丢失）。fire-and-forget，失败仅记日志。
+      if (screenshotId) {
+        invoke('update_screenshot_image', { id: screenshotId, dataUrl, width, height }).catch((e) => {
+          elog(`裁剪持久化失败: id=${screenshotId} ${e}`);
+        });
+      }
       flash(t('crop.done'), 'success');
     },
-    [clearAnnotations, setActiveTool, flash, t],
+    [loadAnnotations, setActiveTool, flash, t, screenshotId],
   );
 
   // 框选区域 OCR 回调：AnnotationCanvas 在 ocrRegionMode 下拖框松手，
@@ -1150,13 +1174,15 @@ export const EditorWindow = () => {
     setOcrRegionPreview(cropDataUrl); // 侧边栏预览回显裁剪区域
     if (ocrMultiRegion) {
       try {
-        const res = await invoke<OcrResult>('ocr_image', {
+        const raw = await invoke<OcrResult>('ocr_image', {
           imageData: cropDataUrl,
           lang: ocrLang === 'auto' ? null : ocrLang,
         });
-        const text = res.text || res.blocks.map((b) => b.text).join('\n');
+        // 与整图识别一致：清洗隐藏字符，避免污染累加的区域结果
+        const blocks = (raw?.blocks ?? []).map((b) => ({ ...b, text: cleanOcrText(b.text) }));
+        const text = cleanOcrText(raw?.text) || blocks.map((b) => b.text).join('\n');
         const rid = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
-        setOcrRegions((arr) => [...arr, { id: rid, dataUrl: cropDataUrl, text, blocks: res.blocks }]);
+        setOcrRegions((arr) => [...arr, { id: rid, dataUrl: cropDataUrl, text, blocks }]);
         flash(t('ocr.regionsTitle', { n: ocrRegions.length + 1 }), 'success');
       } catch (e) {
         flash(t('ocr.regionFailed', { msg: String(e) }), 'error');
@@ -1914,7 +1940,7 @@ export async function openEditorWindow(opts: {
   try {
     const webview = new WebviewWindow(label, {
       url: `/#editor?id=${encodeURIComponent(opts.id)}${opts.autoOcr ? '&ocr=1' : ''}`,
-      title: 'SnapCraft Editor',
+      title: t('editor.winTitle'),
       width: w,
       height: h,
       x,
@@ -1962,7 +1988,7 @@ export async function openClipboardOcrWindow(): Promise<void> {
   try {
     const webview = new WebviewWindow(label, {
       url: '/#clipboard-ocr',
-      title: 'SnapCraft · 剪贴板取字',
+      title: t('editor.clipboardWinTitle'),
       width: w,
       height: h,
       x,

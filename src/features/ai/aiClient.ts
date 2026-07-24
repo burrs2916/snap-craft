@@ -664,6 +664,8 @@ export async function streamChat(opts: StreamOpts): Promise<string> {
       if (status === 429 && typeof e?.retryAfter === 'number') {
         delay = Math.min(delay, Math.max(500, e.retryAfter * 1000 + 200));
       }
+      // 重试会从头重新流式输出：先通知调用方清空已展示内容，避免叠加重复。
+      opts.onRetry?.();
       await sleep(delay, opts.signal);
       if (opts.signal?.aborted) throw makeAbortError();
     }
@@ -713,23 +715,59 @@ export async function streamChatWithTools(
   // 复制消息列表，避免篡改调用方数组（工具循环会在其后追加 assistant/tool 消息）
   const messages: AiMessage[] = opts.messages.map((m) => ({ ...m }));
   let fullText = '';
+  // exhausted 标记「上一批工具结果已入 messages、但模型尚未产出收尾回复」。
+  // 仅当循环因 maxToolTurns 用尽而退出时为 true，循环外需补一次调用，
+  // 让模型「看到」最后一批工具结果并给出总结，避免用户只见到工具输出而无结论。
+  let exhausted = false;
   let totalToolCalls: AiToolCall[] = [];
   // 失控循环检测状态：记录上一轮工具指纹与连续重复计数
   let lastTurnKey = '';
   let repeatCount = 0;
 
+  // 单轮流式调用（带退避重试，与 streamChat 同语义）：
+  // 中途失败会从头重新流式输出，故重试前先经 onRetry(fullText) 让 UI 回退到
+  // 「已完成轮次」的全文基线，丢弃本轮已展示的部分输出，避免重复叠加。
+  // withTools=false 用于 maxToolTurns 用尽后的收尾调用：不下发工具定义，
+  // 迫使模型基于工具结果产出纯文本总结（而非再次发起工具调用）。
+  const streamTurn = async (
+    withTools: boolean,
+  ): Promise<{ text: string; toolCalls: RawToolCall[] }> => {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        const r = await streamOnce({
+          config,
+          messages,
+          onChunk,
+          onUsage: opts.onUsage,
+          onThinking: opts.onThinking,
+          signal,
+          tools: withTools ? tools : undefined,
+        });
+        exhausted = false;
+        return r;
+      } catch (e: any) {
+        // 用户取消（或超时）绝不重试
+        if (e?.name === 'AbortError') throw e;
+        const status = e?.status;
+        const isLast = attempt >= MAX_RETRIES - 1;
+        const canRetry = status ? RETRYABLE_STATUS(status) : !e?.streamError;
+        if (isLast || !canRetry) throw e;
+        let delay = computeBackoff(attempt);
+        if (status === 429 && typeof e?.retryAfter === 'number') {
+          delay = Math.min(delay, Math.max(500, e.retryAfter * 1000 + 200));
+        }
+        // 回退到已完成轮次的全文基线（本轮部分输出作废）
+        opts.onRetry?.(fullText);
+        await sleep(delay, signal);
+        if (signal?.aborted) throw makeAbortError();
+      }
+    }
+  };
+
   for (let turn = 0; turn <= maxToolTurns; turn++) {
     if (signal?.aborted) throw makeAbortError();
 
-    const { text, toolCalls: nativeToolCalls } = await streamOnce({
-      config,
-      messages,
-      onChunk,
-      onUsage: opts.onUsage,
-      onThinking: opts.onThinking,
-      signal,
-      tools,
-    });
+    const { text, toolCalls: nativeToolCalls } = await streamTurn(true);
     fullText += text;
 
     // Phase 16：多形态工具调用兜底（对齐 openclaw tool-call-shaped-text）
@@ -816,38 +854,71 @@ export async function streamChatWithTools(
     for (const r of results) {
       messages.push({ role: 'tool', content: r.content, toolResult: r });
     }
+    // 此刻工具结果已入 messages 但模型尚未回复；若循环恰好在此退出（maxToolTurns 用尽），
+    // exhausted 保持 true，由循环外的收尾调用补上总结。
+    exhausted = true;
+  }
+
+  // maxToolTurns 用尽：最后一批工具结果已回传但模型没机会收尾。
+  // 补一次「无工具」调用，迫使模型基于工具结果产出文本总结，而非戛然而止。
+  if (exhausted) {
+    if (signal?.aborted) throw makeAbortError();
+    const { text } = await streamTurn(false);
+    fullText += text;
   }
 
   return { text: fullText, toolCalls: totalToolCalls };
 }
 
-/** 非流式单次调用（用于「测试连接」/「记忆压缩」） */
+/** 非流式单次调用（用于「测试连接」/「记忆压缩」/「批量整理」）。
+ *  支持外部 signal（用户取消）与默认 60s 超时：此前裸 fetch 无任何中断手段，
+ *  网络异常时会永久挂起，UI 上的「测试连接」/压缩流程只能卡死。
+ *  超时抛出 name='TimeoutError' 的 DOMException（区别于用户取消的 AbortError）。 */
 export async function chatOnce(opts: {
   config: AiConfig;
   messages: AiMessage[];
+  signal?: AbortSignal;
+  timeoutMs?: number;
 }): Promise<string> {
   const { config, messages } = opts;
-  const url = buildUrl(config);
-  const resp = await fetch(url, {
-    method: 'POST',
-    headers: buildHeaders(config),
-    body: JSON.stringify(buildBody(config, messages, false)),
-  });
-  if (!resp.ok) {
-    const text = await resp.text().catch(() => '');
-    let detail = text.slice(0, 300);
-    try {
-      const j = JSON.parse(text);
-      if (j?.error?.message) detail = j.error.message;
-    } catch {
-      /* ignore */
+  const timeoutMs = opts.timeoutMs ?? 60_000;
+  const ctl = new AbortController();
+  const onOuterAbort = () => ctl.abort(opts.signal?.reason);
+  if (opts.signal) {
+    if (opts.signal.aborted) throw makeAbortError();
+    opts.signal.addEventListener('abort', onOuterAbort, { once: true });
+  }
+  const timer = setTimeout(
+    () => ctl.abort(new DOMException('Request timed out', 'TimeoutError')),
+    timeoutMs,
+  );
+  try {
+    const url = buildUrl(config);
+    const resp = await fetch(url, {
+      method: 'POST',
+      headers: buildHeaders(config),
+      body: JSON.stringify(buildBody(config, messages, false)),
+      signal: ctl.signal,
+    });
+    if (!resp.ok) {
+      const text = await resp.text().catch(() => '');
+      let detail = text.slice(0, 300);
+      try {
+        const j = JSON.parse(text);
+        if (j?.error?.message) detail = j.error.message;
+      } catch {
+        /* ignore */
+      }
+      throw new Error(`HTTP ${resp.status}: ${detail}`);
     }
-    throw new Error(`HTTP ${resp.status}: ${detail}`);
+    const json = await resp.json();
+    if (config.apiType === 'anthropic') {
+      const parts = Array.isArray(json?.content) ? json.content : [];
+      return parts.map((p: any) => (p?.type === 'text' ? p.text : '')).join('');
+    }
+    return json?.choices?.[0]?.message?.content ?? '';
+  } finally {
+    clearTimeout(timer);
+    opts.signal?.removeEventListener('abort', onOuterAbort);
   }
-  const json = await resp.json();
-  if (config.apiType === 'anthropic') {
-    const parts = Array.isArray(json?.content) ? json.content : [];
-    return parts.map((p: any) => (p?.type === 'text' ? p.text : '')).join('');
-  }
-  return json?.choices?.[0]?.message?.content ?? '';
 }

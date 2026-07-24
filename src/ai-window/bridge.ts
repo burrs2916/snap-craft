@@ -11,7 +11,7 @@
 //  - 窗口关闭：取消本窗口未完成任务 + 通知主窗口复位 UI 态（已完成对话因 localStorage 自动持久化不丢）。
 
 import { invoke } from '@tauri-apps/api/core';
-import { listen, emitTo, type UnlistenFn, type Event } from '@tauri-apps/api/event';
+import { listen, emitTo, TauriEvent, type UnlistenFn, type Event } from '@tauri-apps/api/event';
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { getCurrentWindow, currentMonitor } from '@tauri-apps/api/window';
 
@@ -162,6 +162,16 @@ export async function openAiWindow(
       // 消除「原生 SnapCraft AI + AIPanel 头部」双层 header 的局促感；关闭由面板 ✕ 触发。
       decorations: false,
     });
+    // 崩溃兜底：AI 窗口被销毁（webview 崩溃 / 进程异常退出）时页面侧 beforeunload
+    // 不会执行 → EVT_CLOSED 永不发出 → 宿主窗 aiOpen 卡 true（工具栏常亮、
+    // 上下文推送 effect 误判窗仍开着）。监听窗口级 tauri://destroyed 事件，
+    // 销毁时补发关闭通知给宿主。正常关闭会先后触发 notifyClosed 与本回调，
+    // setAiOpen(false) 幂等，无副作用。
+    win
+      .once(TauriEvent.WINDOW_DESTROYED, () => {
+        void emitTo(host, EVT_CLOSED).catch(() => {});
+      })
+      .catch(() => {});
     // 初始上下文：窗口挂载后会主动 request，这里也推一次，双保险
     if (ctx) {
       setTimeout(() => {

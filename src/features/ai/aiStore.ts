@@ -16,7 +16,7 @@
 
 import { create } from 'zustand';
 import type { AiConfig, AiMessage, AiChatTurn, AiMemory, AiUsage, AiAgentStep } from './aiTypes';
-import { streamChat, chatOnce, trimHistoryToBudget, streamChatWithTools } from './aiClient';
+import { streamChat, chatOnce, trimHistoryToBudget, streamChatWithTools, estimateTokens } from './aiClient';
 import { AI_TOOL_DEFS, createToolExecutor, agentSystem, agentSystemSentinel, type AiToolHost } from './aiTools';
 import {
   AI_PRESETS,
@@ -253,11 +253,6 @@ export const useAiStore = create<AiState>((set, get) => ({
       images = undefined;
     }
 
-    const historyMsgs: AiMessage[] = trimHistoryToBudget(
-      conv.map((m) => ({ role: m.role, content: m.content })),
-      120_000,
-      3,
-    );
     const userMsg: AiMessage = {
       role: 'user',
       content: userContent,
@@ -265,6 +260,17 @@ export const useAiStore = create<AiState>((set, get) => ({
     };
     const selectedMem = selectMemories(text, get().memories);
     const memoryNote = buildMemoryNote(selectedMem);
+    // 预算护栏：此前仅裁剪历史，userMsg（首轮可能携带超长 OCR + 多张截图）在裁剪后
+    // 才追加，总长仍可能超模型上下文触发 API 400/413。现把当前 userMsg 一并纳入
+    // 裁剪输入（它位于末尾必然保留，再以 slice(0,-1) 从历史中剔除避免重复），
+    // 并预先扣除 system 提示词与长期记忆的 token，保证最终装配总量落在预算内。
+    const sysReserve =
+      estimateTokens(ctx.preset.system) + (memoryNote ? estimateTokens(memoryNote) : 0);
+    const historyMsgs: AiMessage[] = trimHistoryToBudget(
+      [...conv.map((m) => ({ role: m.role, content: m.content })), userMsg],
+      Math.max(4_000, 120_000 - sysReserve),
+      3,
+    ).slice(0, -1);
     const messages: AiMessage[] = [
       ...(memoryNote ? [{ role: 'system' as const, content: memoryNote }] : []),
       { role: 'system', content: ctx.preset.system },
@@ -293,6 +299,7 @@ export const useAiStore = create<AiState>((set, get) => ({
         onChunk: sink.onChunk,
         onUsage: (u) => set({ usage: u }),
         onThinking: sink.onThinking,
+        onRetry: () => sink?.reset(),
         signal: ctl.signal,
       });
       const finalConv: AiChatTurn[] = [...newConv, { role: 'assistant', content: full }];
@@ -438,6 +445,7 @@ export const useAiStore = create<AiState>((set, get) => ({
         onChunk: sink.onChunk,
         onUsage: (u) => set({ usage: u }),
         onThinking: sink.onThinking,
+        onRetry: () => sink?.reset(),
         signal: ctl.signal,
       });
       const conv = conversation.slice();
@@ -494,14 +502,18 @@ export const useAiStore = create<AiState>((set, get) => ({
 
     const selectedMem = selectMemories(text, get().memories);
     const memoryNote = buildMemoryNote(selectedMem);
+    const sysPrompt = input.agentKind === 'sentinel' ? agentSystemSentinel() : agentSystem();
+    // 与 chat() 同款预算护栏：当前 userMsg（含 OCR 正文与截图）参与裁剪，
+    // 并预扣 system 提示词与长期记忆 token，避免装配后总量超模型上下文。
+    const sysReserve = estimateTokens(sysPrompt) + (memoryNote ? estimateTokens(memoryNote) : 0);
     const historyMsgs: AiMessage[] = trimHistoryToBudget(
-      conv.map((m) => ({ role: m.role, content: m.content })),
-      120_000,
+      [...conv.map((m) => ({ role: m.role, content: m.content })), userMsg],
+      Math.max(4_000, 120_000 - sysReserve),
       3,
-    );
+    ).slice(0, -1);
     const messages: AiMessage[] = [
       ...(memoryNote ? [{ role: 'system' as const, content: memoryNote }] : []),
-      { role: 'system', content: input.agentKind === 'sentinel' ? agentSystemSentinel() : agentSystem() },
+      { role: 'system', content: sysPrompt },
       ...historyMsgs,
       userMsg,
     ];
@@ -530,6 +542,12 @@ export const useAiStore = create<AiState>((set, get) => ({
         onChunk: sink.onChunk,
         onUsage: (u) => set({ usage: u }),
         onThinking: sink.onThinking,
+        // 重试会把本轮部分输出作废：先清空 sink 缓冲与展示，再回退到
+        // 已完成轮次的全文基线（baseline），避免重试后内容重复叠加。
+        onRetry: (baseline) => {
+          sink?.reset();
+          set({ output: baseline ?? '', thinking: '' });
+        },
         onToolCall: (step) => set((s) => ({ agentSteps: [...s.agentSteps, step] })),
         onToolResult: (callId, result, isError) =>
           set((s) => ({

@@ -157,7 +157,7 @@ export function useAiIntegration(deps: AiIntegrationDeps) {
         redactTimerRef.current = window.setTimeout(() => {
           const n = redactCountRef.current;
           redactCountRef.current = 0;
-          flashRef.current?.(`已打码 ${n} 处，可保存 / 复制`, 'success');
+          flashRef.current?.(t('ai.redactedBatch', { n }), 'success');
         }, 700);
         return `(${x},${y})-(${x + w},${y + h})`;
       },
@@ -243,7 +243,7 @@ export function useAiIntegration(deps: AiIntegrationDeps) {
     if (!merged) return;
     setCurrentScreenshot({ ...currentScreenshot, dataUrl: merged, updatedAt: new Date().toISOString() });
     clearAnnotations();
-    flash('已固化编辑产物，可继续编辑或保存', 'success');
+    flash(t('ai.editCommitted'), 'success');
     try {
       const aid = `ai-edit-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       const aAt = new Date().toISOString();

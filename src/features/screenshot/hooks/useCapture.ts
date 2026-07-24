@@ -14,7 +14,7 @@ import { flog } from '../utils/helpers';
 // macOS 原生全屏（绿灯/最大化）会把窗口放进独立的 Space（专属全屏空间）。
 // 若此时直接 hide()，那块屏正在跑 Space 退出/过渡动画（短暂黑场），紧接着 screencapture
 // 就会截到「过渡中的黑屏」。修复：hide 前若处于全屏/最大化，先退出该状态并等待过渡动画结束。
-async function safeHideForCapture(win: ReturnType<typeof getCurrentWindow>): Promise<void> {
+async function safeHideForCapture(win: ReturnType<typeof getCurrentWindow>): Promise<{ wasFullscreen: boolean }> {
   let wasFullscreen = false;
   let wasMaximized = false;
   try { wasFullscreen = await win.isFullscreen(); } catch { /* ignore */ }
@@ -35,6 +35,24 @@ async function safeHideForCapture(win: ReturnType<typeof getCurrentWindow>): Pro
   }
   if (wasFullscreen) {
     await new Promise((r) => setTimeout(r, 150));
+  }
+  return { wasFullscreen };
+}
+
+// 截图结束后恢复窗口可见性，与 safeHideForCapture 配对。
+// 全屏场景此前用 minimize() 隐藏，若只 show()+setFocus() 不会解除最小化，
+// 窗口会卡最小化、全屏态丢失；故先 unminimize 再显示，并重进全屏恢复原状。
+async function restoreAfterCapture(
+  win: ReturnType<typeof getCurrentWindow>,
+  wasFullscreen: boolean,
+): Promise<void> {
+  if (wasFullscreen) {
+    try { await win.unminimize(); } catch { /* ignore */ }
+  }
+  try { await win.show(); } catch { /* ignore */ }
+  try { await win.setFocus(); } catch { /* ignore */ }
+  if (wasFullscreen) {
+    try { await win.setFullscreen(true); } catch { /* ignore */ }
   }
 }
 
@@ -181,6 +199,9 @@ export function useCapture(deps: UseCaptureDeps): UseCaptureReturn {
     async (displayId: number | null) => {
       setShowDisplayPicker(false);
       if (displayId === null) {
+        // 取消也要复位用途：否则上一次滚动选屏的 'scroll' 残留，
+        // 下一次普通全屏截图会被误路由成滚动长截图。
+        pickerPurposeRef.current = 'shot';
         flog(`pickDisplay: 用户取消选屏`);
         flash(t('toast.cancelled'), 'success');
         return;
@@ -210,7 +231,7 @@ export function useCapture(deps: UseCaptureDeps): UseCaptureReturn {
       const delay = captureDelayRef.current;
       if (delay > 0) await runCountdown(delay);
       const win = getCurrentWindow();
-      await safeHideForCapture(win);
+      const { wasFullscreen } = await safeHideForCapture(win);
       try {
         const dataUrl = await invoke<string>('capture_screen', { displayId });
         await onCaptured(dataUrl);
@@ -230,8 +251,7 @@ export function useCapture(deps: UseCaptureDeps): UseCaptureReturn {
           flash(t('toast.captureFailed', { msg }), 'error');
         }
       } finally {
-        await win.show();
-        await win.setFocus();
+        await restoreAfterCapture(win, wasFullscreen);
         busyRef.current = false;
         setBusy(false);
       }
@@ -292,7 +312,7 @@ export function useCapture(deps: UseCaptureDeps): UseCaptureReturn {
       }
 
       const win = getCurrentWindow();
-      await safeHideForCapture(win);
+      const { wasFullscreen } = await safeHideForCapture(win);
       try {
         const cmd = kind === 'screen' ? 'capture_screen' : kind === 'region' ? 'capture_region' : 'capture_window';
         const args = kind === 'screen' ? { displayId: null } : {};
@@ -314,8 +334,7 @@ export function useCapture(deps: UseCaptureDeps): UseCaptureReturn {
           flash(t('toast.captureFailed', { msg }), 'error');
         }
       } finally {
-        await win.show();
-        await win.setFocus();
+        await restoreAfterCapture(win, wasFullscreen);
         busyRef.current = false;
         setBusy(false);
       }

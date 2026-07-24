@@ -10,6 +10,7 @@
 //    得到可编辑的电子表格证据，而非只能看图片。
 
 import * as XLSX from 'xlsx';
+import { t } from '../../../i18n';
 
 /** 行内 Markdown 强调/链接/代码剥离，得到干净单元格文本 */
 function cleanCell(s: string): string {
@@ -74,7 +75,7 @@ function extractTables(md: string): ParsedSheet[] {
         if (cells.length >= 1) rows.push(cells);
         i++;
       }
-      const name = (lastHeading || `表${++idx}`).slice(0, 31);
+      const name = (lastHeading || t('export.sheetTable', { n: ++idx })).slice(0, 31);
       sheets.push({ name, rows });
       continue;
     }
@@ -99,7 +100,7 @@ function extractProse(md: string): ParsedSheet {
     const li = line.replace(/^[-*+]\s+/, '• ').replace(/^\d+\.\s+/, '');
     rows.push([cleanCell(li)]);
   }
-  return { name: '内容', rows };
+  return { name: t('export.sheetContent'), rows };
 }
 
 /** 把二维数组写成一个 worksheet（首行作为表头并加粗） */
@@ -139,7 +140,7 @@ export function markdownToXlsx(md: string, title?: string): Uint8Array {
   const wb = XLSX.utils.book_new();
   if (sheets.length > 0) {
     for (const sh of sheets) {
-      const name = sh.name.slice(0, 31) || `表${wb.SheetNames.length + 1}`;
+      const name = sh.name.slice(0, 31) || t('export.sheetTable', { n: wb.SheetNames.length + 1 });
       XLSX.utils.book_append_sheet(wb, sheetFromRows(sh.rows), name);
     }
   } else {

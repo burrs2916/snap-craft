@@ -342,7 +342,13 @@ export function useOcrPanel(deps: OcrPanelDeps): OcrPanelState {
   // 语言切换
   const handleLangChange = (v: string) => {
     setOcrLang(v);
-    if (platform !== '' && platform !== 'macos' && current && !ocrBusy) {
+    if (platform === 'macos') {
+      // macOS 系统 OCR（Vision）自动识别语言，手动指定不生效；
+      // 此前直接静默忽略，用户以为切换生效了。给出提示避免误解。
+      flash(t('ocr.langMacIgnored'), 'info');
+      return;
+    }
+    if (platform !== '' && current && !ocrBusy) {
       runOcr(current.dataUrl, v === 'auto' ? null : v);
     }
   };
@@ -435,7 +441,7 @@ export function useOcrPanel(deps: OcrPanelDeps): OcrPanelState {
       }
       const MAX_LINES = 240;
       const over = lines.length > MAX_LINES;
-      const shown = over ? [...lines.slice(0, MAX_LINES), `…（共 ${lines.length} 行）`] : lines;
+      const shown = over ? [...lines.slice(0, MAX_LINES), t('ocr.lineCount', { n: lines.length })] : lines;
       const H = Math.max(360, shown.length * lineH + pad * 2);
       canvas.width = W; canvas.height = H;
       ctx.font = font;

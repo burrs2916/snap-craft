@@ -139,25 +139,27 @@ const WIDTHS = [2, 4, 6, 8];
 // 可选字体：跨平台通用字体族（macOS / Windows / 通用 Web 安全字体 + 中文 + 手书体）
 // value 为直接写入 CSS font-family / Konva fontFamily 的字体栈；每个栈都带安全兜底，
 // 某字体本机未安装时自动回退到下一款，绝不出现「无字体可渲染」的空白。
-const FONTS: { id: string; label: string; value: string }[] = [
-  { id: 'system', label: '系统默认', value: "-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif" },
-  { id: 'pingfang', label: '苹方', value: "'PingFang SC', 'Helvetica Neue', 'Microsoft YaHei', sans-serif" },
-  { id: 'yahei', label: '微软雅黑', value: "'Microsoft YaHei', 'PingFang SC', 'Heiti SC', sans-serif" },
-  { id: 'kaiti', label: '楷体', value: "'Kaiti SC', 'STKaiti', KaiTi, 'PingFang SC', serif" },
-  { id: 'heiti', label: '黑体', value: "'STHeiti', 'Heiti SC', 'SimHei', 'PingFang SC', sans-serif" },
-  { id: 'fangsong', label: '仿宋', value: "FangSong, STFangsong, 'FangSong_GB2312', 'Songti SC', serif" },
-  { id: 'aria', label: 'Arial', value: "Arial, 'Helvetica Neue', Helvetica, sans-serif" },
-  { id: 'verdana', label: 'Verdana', value: "Verdana, Geneva, 'Segoe UI', sans-serif" },
-  { id: 'trebuchet', label: 'Trebuchet', value: "'Trebuchet MS', 'Segoe UI', Verdana, sans-serif" },
-  { id: 'optima', label: 'Optima', value: "Optima, 'Optima Nova', 'Segoe UI', sans-serif" },
-  { id: 'georgia', label: 'Georgia', value: "Georgia, 'Times New Roman', 'Songti SC', serif" },
-  { id: 'palatino', label: 'Palatino', value: "Palatino, 'Palatino Linotype', 'Book Antiqua', Georgia, serif" },
-  { id: 'times', label: '宋体', value: "'Times New Roman', SimSun, 'Songti SC', serif" },
-  { id: 'courier', label: '等宽 Courier', value: "'Courier New', 'SF Mono', Consolas, monospace" },
-  { id: 'menlo', label: '等宽 Menlo', value: "Menlo, Monaco, 'Courier New', Consolas, monospace" },
-  { id: 'impact', label: 'Impact', value: "Impact, Haettenschweiler, 'Arial Narrow Bold', sans-serif" },
-  { id: 'comic', label: '手写体', value: "'Comic Sans MS', 'Chalkboard SE', cursive" },
-  { id: 'script', label: '行楷 Script', value: "'Snell Roundhand', 'Brush Script MT', 'STKaiti', cursive" },
+// labelKey 指向 i18n 的 font.* 词条：字体显示名随界面语言切换（中文环境显示
+// 「苹方 / 微软雅黑」，英文环境显示「PingFang / Microsoft YaHei」），value 不变。
+const FONTS: { id: string; labelKey: string; value: string }[] = [
+  { id: 'system', labelKey: 'font.system', value: "-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif" },
+  { id: 'pingfang', labelKey: 'font.pingfang', value: "'PingFang SC', 'Helvetica Neue', 'Microsoft YaHei', sans-serif" },
+  { id: 'yahei', labelKey: 'font.yahei', value: "'Microsoft YaHei', 'PingFang SC', 'Heiti SC', sans-serif" },
+  { id: 'kaiti', labelKey: 'font.kaiti', value: "'Kaiti SC', 'STKaiti', KaiTi, 'PingFang SC', serif" },
+  { id: 'heiti', labelKey: 'font.heiti', value: "'STHeiti', 'Heiti SC', 'SimHei', 'PingFang SC', sans-serif" },
+  { id: 'fangsong', labelKey: 'font.fangsong', value: "FangSong, STFangsong, 'FangSong_GB2312', 'Songti SC', serif" },
+  { id: 'aria', labelKey: 'font.arial', value: "Arial, 'Helvetica Neue', Helvetica, sans-serif" },
+  { id: 'verdana', labelKey: 'font.verdana', value: "Verdana, Geneva, 'Segoe UI', sans-serif" },
+  { id: 'trebuchet', labelKey: 'font.trebuchet', value: "'Trebuchet MS', 'Segoe UI', Verdana, sans-serif" },
+  { id: 'optima', labelKey: 'font.optima', value: "Optima, 'Optima Nova', 'Segoe UI', sans-serif" },
+  { id: 'georgia', labelKey: 'font.georgia', value: "Georgia, 'Times New Roman', 'Songti SC', serif" },
+  { id: 'palatino', labelKey: 'font.palatino', value: "Palatino, 'Palatino Linotype', 'Book Antiqua', Georgia, serif" },
+  { id: 'times', labelKey: 'font.times', value: "'Times New Roman', SimSun, 'Songti SC', serif" },
+  { id: 'courier', labelKey: 'font.courier', value: "'Courier New', 'SF Mono', Consolas, monospace" },
+  { id: 'menlo', labelKey: 'font.menlo', value: "Menlo, Monaco, 'Courier New', Consolas, monospace" },
+  { id: 'impact', labelKey: 'font.impact', value: "Impact, Haettenschweiler, 'Arial Narrow Bold', sans-serif" },
+  { id: 'comic', labelKey: 'font.comic', value: "'Comic Sans MS', 'Chalkboard SE', cursive" },
+  { id: 'script', labelKey: 'font.script', value: "'Snell Roundhand', 'Brush Script MT', 'STKaiti', cursive" },
 ];
 
 // 对齐图标（左 / 中 / 右）
@@ -462,7 +464,7 @@ export const AnnotationToolbar = () => {
               >
                 {FONTS.map((f) => (
                   <option key={f.id} value={f.value} style={{ fontFamily: f.value }}>
-                    {f.label}
+                    {t(f.labelKey)}
                   </option>
                 ))}
               </select>

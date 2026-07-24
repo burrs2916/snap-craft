@@ -35,6 +35,10 @@ interface ScreenshotState {
 
   setCurrentScreenshot: (screenshot: ScreenshotData | null) => void;
   addAnnotation: (annotation: AnnotationObject) => void;
+  /** 批量灌入标注且【不】压撤销栈（加载历史已存标注 / 裁剪后硬重置用）。
+   * 与 addAnnotation 逐条压 past 不同：这些场景的基线就是当前集合，
+   * ⌘Z 不应回退到「更少标注」的中间态。 */
+  loadAnnotations: (annotations: AnnotationObject[]) => void;
   updateAnnotation: (id: string, updates: Partial<AnnotationObject>) => void;
   deleteAnnotation: (id: string) => void;
   undo: () => void;
@@ -92,6 +96,14 @@ export const useScreenshotStore = create<ScreenshotState>((set, get) => ({
       annotations: anns,
       future: [],
     };
+  }),
+
+  loadAnnotations: (annotations) => set({
+    annotations,
+    past: [],
+    future: [],
+    selectedId: null,
+    selectedAnnotationIds: [],
   }),
 
   updateAnnotation: (id, updates) => set((state) => {
