@@ -5,7 +5,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { cleanOcrText, createToolExecutor } from '../../ai';
-import type { AiToolHost, NormRect } from '../../ai';
+import type { AiToolHost } from '../../ai';
 import {
   openAiWindow,
   pushAiContext,

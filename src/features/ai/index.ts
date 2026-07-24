@@ -40,7 +40,7 @@ export type { AiPreset, UserPreset } from './aiPresets';
 
 // ── 导出服务 ──
 export { exportAs, exportZip, buildPreviewHtml, buildRichTextHtml, resolveContext } from './export/exportService';
-export type { ExportContext, ExportFormat, ExportResult } from './export/exportService';
+export type { ExportContext, ExportFormat } from './export/exportService';
 
 // ── 导出路径 ──
 export { pickExportPath, buildDefaultPath, deriveFileHint, baseNameOf, revealInFolder } from './export/exportPath';

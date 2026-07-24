@@ -16,7 +16,7 @@ import { save as saveDialog } from '@tauri-apps/plugin-dialog';
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
 // Phase 18：OCR 文本清洗
 import { cleanOcrText, createToolExecutor } from '../../ai';
-import type { AiToolHost, NormRect } from '../../ai';
+import type { AiToolHost } from '../../ai';
 import { useI18n, t } from '../../../i18n';
 import { useScreenshotStore } from '../store/screenshotStore';
 import { AnnotationCanvas, type AnnotationCanvasHandle } from './AnnotationCanvas';
@@ -24,7 +24,7 @@ import { AnnotationToolbar } from './AnnotationToolbar';
 import type { OcrResult, OcrBlock, AnnotationObject } from '../types';
 import { openAiWindow, pushAiContext, setupMainBridge, type AiContext } from '../../../ai-window/bridge';
 import { clamp01, genAnnoId, normToPx, cropDataUrl } from '../utils/helpers';
-import { ocrReadingOrder, ocrHighlightParts, ocrExtractEntities, type OcrLayout, type OcrExportFmt, type OcrEntity } from '../utils/ocrUtils';
+import { ocrReadingOrder, ocrHighlightParts, ocrExtractEntities, type OcrLayout, type OcrExportFmt } from '../utils/ocrUtils';
 
 const elog = (msg: string) => {
   invoke('diag_log', { msg: `[editor-window] ${msg}` }).catch(() => {});
@@ -1195,7 +1195,7 @@ export const EditorWindow = () => {
     if (!path) return;
     try {
       await invoke('save_text_file', { content: txt, filePath: path });
-      flash(t('ocr.exported'), 'success');
+      flash(t('ocr.exported', { path }), 'success');
     } catch (e) {
       flash(t('ocr.exportFailed', { msg: String(e) }), 'error');
     }
@@ -1292,7 +1292,7 @@ export const EditorWindow = () => {
       });
       if (!path) return;
       await invoke('save_text_file', { content, filePath: path });
-      flash(t('ocr.exported'), 'success');
+      flash(t('ocr.exported', { path }), 'success');
     } catch (e) {
       flash(t('ocr.exportFailed', { msg: String(e) }), 'error');
     }
@@ -1412,7 +1412,7 @@ export const EditorWindow = () => {
           <button
             className="tbar-btn tbar-ghost"
             onClick={handleCopy}
-            title={sourceKind === 'text' ? t('editor.copyTitle') : t('editor.copyTitle', { mod: '⌘' })}
+            title={t('editor.copyTitle', { mod: '⌘' })}
           >
             {t('editor.copy')}
           </button>

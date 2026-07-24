@@ -16,8 +16,6 @@
 //
 // 依赖：仅 0 个外部包，可被 aiClient / aiStore 任何环境使用。
 
-import type { AiToolCall } from './aiTypes';
-
 export type ShapedToolCallKind =
   | 'json_fenced'
   | 'json_bare'
@@ -427,15 +425,6 @@ export function parseShapedToolCalls(text: string): ShapedParseResult {
   const ranges = deduped.map((c) => ({ start: c.start, end: c.end, kind: c.kind }));
   const detectedKinds = Array.from(new Set(deduped.map((c) => c.kind)));
   return { calls: deduped, ranges, detectedKinds };
-}
-
-/** 将 ShapedParseResult.calls 转为 aiStore/AIPanel 内部使用的 AiToolCall[] */
-export function toAiToolCalls(parsed: ShapedParseResult): AiToolCall[] {
-  return parsed.calls.map((c, i) => ({
-    id: `shaped-${i}-${c.name}`,
-    name: c.name,
-    arguments: c.arguments,
-  }));
 }
 
 /** 从最终输出文本中抹掉所有已识别为工具调用的片段（保留友好正文） */

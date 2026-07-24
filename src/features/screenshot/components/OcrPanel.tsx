@@ -3,7 +3,6 @@
 // 从 EnhancedScreenshotApp.tsx 的 JSX 3146-3820 行提取。
 
 import { invoke } from '@tauri-apps/api/core';
-import type { OcrResult, OcrBlock } from '../types';
 import {
   ocrHighlightParts,
   ocrExtractEntities,

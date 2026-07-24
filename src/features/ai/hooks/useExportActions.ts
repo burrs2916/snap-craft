@@ -7,7 +7,7 @@
 //   await exportActions.exportAs(ctx, 'docx');
 //   // exportActions.exporting / exportMsg / exportErr 驱动 UI 反馈
 
-import { useState, useCallback, useEffect, useRef } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import {
   exportAs,
   exportZip,

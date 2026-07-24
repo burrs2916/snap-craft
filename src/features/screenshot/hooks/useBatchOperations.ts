@@ -148,7 +148,7 @@ export function useBatchOperations(deps: UseBatchOperationsDeps) {
     if (!path) return;
     try {
       await invoke('save_text_file', { content: batchItems.map((i) => i.text).join('\n\n'), filePath: path });
-      flash(t('ocr.exported'), 'success');
+      flash(t('ocr.exported', { path }), 'success');
     } catch (e) {
       flash(t('ocr.exportFailed', { msg: String(e) }), 'error');
     }
@@ -169,7 +169,7 @@ export function useBatchOperations(deps: UseBatchOperationsDeps) {
     try {
       const md = aiBatchItems.map((it, idx) => `## 截图 ${idx + 1}：${it.time}\n\n${it.error ? '> ' + it.error : it.text}`).join('\n\n');
       await invoke('save_text_file', { content: md, filePath: path });
-      flash(t('ocr.exported'), 'success');
+      flash(t('ocr.exported', { path }), 'success');
     } catch (e) {
       flash(t('ocr.exportFailed', { msg: String(e) }), 'error');
     }
@@ -182,7 +182,7 @@ export function useBatchOperations(deps: UseBatchOperationsDeps) {
       const md = aiBatchItems.map((it, idx) => `## 截图 ${idx + 1}：${it.time}\n\n${it.error ? '> ' + it.error : it.text}`).join('\n\n');
       const bytes = await markdownToDocx(md, { title: t('ocr.batchAiTitle'), theme: useAiStore.getState().config?.theme });
       await invoke('save_binary_file', { bytes: Array.from(bytes), filePath: path });
-      flash(t('ocr.exported'), 'success');
+      flash(t('ocr.exported', { path }), 'success');
     } catch (e) {
       flash(t('ocr.exportFailed', { msg: String(e) }), 'error');
     }

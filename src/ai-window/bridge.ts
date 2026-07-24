@@ -11,7 +11,7 @@
 //  - 窗口关闭：取消本窗口未完成任务 + 通知主窗口复位 UI 态（已完成对话因 localStorage 自动持久化不丢）。
 
 import { invoke } from '@tauri-apps/api/core';
-import { listen, emit, emitTo, type UnlistenFn, type Event } from '@tauri-apps/api/event';
+import { listen, emitTo, type UnlistenFn, type Event } from '@tauri-apps/api/event';
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { getCurrentWindow, currentMonitor } from '@tauri-apps/api/window';
 

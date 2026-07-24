@@ -28,23 +28,6 @@ const REPEATED_CHAR_RE = /([\u4E00-\u9FFF\u3000-\u303F\uFF00-\uFFEFa-zA-Z0-9])\1
 /** 单行最大字符数（防御 OCR 输出超长行导致 AI 上下文爆炸） */
 const MAX_LINE_CHARS = 500;
 
-export interface OcrCleanStats {
-  /** 清洗前字符数 */
-  before: number;
-  /** 清洗后字符数 */
-  after: number;
-  /** 清除的零宽字符数 */
-  zeroWidth: number;
-  /** 清除的控制字符数 */
-  control: number;
-  /** 替换的连续空白组数（3+ 空格 → 1）*/
-  spaceRuns: number;
-  /** 截断的连续重复字串数 */
-  repeated: number;
-  /** 截断的超长行数 */
-  longLines: number;
-}
-
 /** 清洗 OCR 文本（纯函数） */
 export function cleanOcrText(input: string | null | undefined): string {
   if (!input) return '';
@@ -68,28 +51,4 @@ export function cleanOcrText(input: string | null | undefined): string {
   s = lines.join('\n');
   // 6. 头尾 trim（保留内部 \n）
   return s.trim();
-}
-
-/** 详细版：返回清洗统计（用于调试/UI 提示） */
-export function cleanOcrTextWithStats(input: string | null | undefined): {
-  text: string;
-  stats: OcrCleanStats;
-} {
-  if (!input) {
-    return {
-      text: '',
-      stats: { before: 0, after: 0, zeroWidth: 0, control: 0, spaceRuns: 0, repeated: 0, longLines: 0 },
-    };
-  }
-  const before = input.length;
-  const zeroWidth = (input.match(ZERO_WIDTH_RE) || []).length;
-  const control = (input.match(CONTROL_RE) || []).length;
-  const spaceRuns = (input.match(MULTI_SPACE_RE) || []).length;
-  const repeated = (input.match(REPEATED_CHAR_RE) || []).length;
-  const longLines = input.split(/\r?\n/).filter((l) => l.length > MAX_LINE_CHARS).length;
-  const text = cleanOcrText(input);
-  return {
-    text,
-    stats: { before, after: text.length, zeroWidth, control, spaceRuns, repeated, longLines },
-  };
 }

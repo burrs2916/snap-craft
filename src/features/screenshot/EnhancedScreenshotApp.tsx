@@ -23,7 +23,6 @@ import AnnotationCanvas, { AnnotationCanvasHandle } from './components/Annotatio
 import { openEditorWindow, openClipboardOcrWindow } from './components/EditorWindow';
 import { LanguageToggle } from '../../shared/components/LanguageToggle';
 import { useScreenshotStore } from './store/screenshotStore';
-import type { OcrResult, AnnotationObject } from './types';
 import { useI18n, t } from '../../i18n';
 import { useOcrPanel } from './hooks/useOcrPanel';
 import { useBatchOperations } from './hooks/useBatchOperations';

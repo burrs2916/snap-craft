@@ -52,55 +52,6 @@ export function isTableRow(line: string): boolean {
   return t.includes('|') && !isTableSep(t);
 }
 
-/** GFM 对齐方式 */
-export type Align = 'left' | 'center' | 'right' | '';
-
-/** 从 GFM 分隔行单元格解析对齐方式 */
-export function parseAlign(cell: string): Align {
-  const t = cell.trim();
-  const left = t.startsWith(':');
-  const right = t.endsWith(':');
-  if (left && right) return 'center';
-  if (right) return 'right';
-  if (left) return 'left';
-  return '';
-}
-
-/** 解析 GFM 分隔行，返回每列的对齐方式 */
-export function parseAligns(sepLine: string): Align[] {
-  return splitRow(sepLine).map(parseAlign);
-}
-
-/** 解析 GFM 表格块：返回表头、对齐、数据行 */
-export interface ParsedTable {
-  header: string[];
-  aligns: Align[];
-  rows: string[][];
-}
-
-/**
- * 从 Markdown 行数组中解析一个 GFM 表格块。
- * @param lines 完整行数组
- * @param startIdx 表头行索引
- * @returns 解析结果 + 表格结束后的下一行索引；若非表格返回 null
- */
-export function parseTableAt(lines: string[], startIdx: number): { table: ParsedTable; nextIdx: number } | null {
-  if (startIdx + 1 >= lines.length) return null;
-  const headerLine = lines[startIdx];
-  const sepLine = lines[startIdx + 1];
-  if (!headerLine.includes('|') || !isTableSep(sepLine)) return null;
-
-  const header = splitRow(headerLine);
-  const aligns = parseAligns(sepLine);
-  const rows: string[][] = [];
-  let i = startIdx + 2;
-  while (i < lines.length && lines[i].includes('|') && lines[i].trim()) {
-    rows.push(splitRow(lines[i]));
-    i++;
-  }
-  return { table: { header, aligns, rows }, nextIdx: i };
-}
-
 /**
  * 行内 Markdown 样式 → HTML 转换。
  * 覆盖：行内代码、粗体、斜体、删除线、链接。
@@ -123,17 +74,6 @@ export function inlineToHtml(raw: string): string {
 
 /** 匹配章节截图标记 <!--SNAP:k--> */
 export const SNAP_MARKER_RE = /^<!--\s*SNAP:(\d+)\s*-->$/;
-
-/** 判断一行是否为 SNAP 截图锚点 */
-export function isSnapMarker(line: string): boolean {
-  return SNAP_MARKER_RE.test(line.trim());
-}
-
-/** 从 SNAP 标记提取 1 基序号 */
-export function snapIndex(line: string): number | null {
-  const m = SNAP_MARKER_RE.exec(line.trim());
-  return m ? parseInt(m[1], 10) : null;
-}
 
 /** 把标题文本转成稳定、URL 安全的锚点 id（保留 CJK） */
 export function slugify(s: string): string {

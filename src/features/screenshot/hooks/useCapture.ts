@@ -8,7 +8,6 @@ import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
 import type { DisplayInfo } from './useScrollCapture';
-import { detectPlatform } from '../../../shared/platform';
 import { flog } from '../utils/helpers';
 
 // ── 安全隐藏：截图前隐藏主窗口 ──

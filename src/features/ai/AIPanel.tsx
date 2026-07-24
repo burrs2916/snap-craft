@@ -9,7 +9,7 @@
 //  - 导出增 .html（可 ⌘P 另存为 PDF），复用既有 save_text_file 后端命令。
 
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
-import { useAiStore, convHash, type AiConvMeta } from './aiStore';
+import { useAiStore, convHash } from './aiStore';
 import { type AiPreset, type UserPreset, stripSnapMarkers, hasSnapMarkers } from './aiPresets';
 import { AiMarkdown } from './aiMarkdown';
 import { chatOnce, estimateCost } from './aiClient';

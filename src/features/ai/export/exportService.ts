@@ -16,8 +16,8 @@ import { mdToHtml } from './markdownHtml';
 import { markdownToDocx } from './markdownDocx';
 import { markdownToPptx } from './markdownPptx';
 import { markdownToXlsx } from './markdownXlsx';
-import { buildZip, dataUrlToBytes, type ZipEntry } from './zipStore';
-import { pickExportPath, deriveFileHint, baseNameOf } from './exportPath';
+import { buildZip, type ZipEntry } from './zipStore';
+import { pickExportPath, deriveFileHint } from './exportPath';
 import { pushExportHistory } from './exportHistory';
 import { firstHeading, mdToPlainText, printHtmlViaIframe, frontImageBlockHtml } from '../aiUtils';
 import { stripSnapMarkers, hasSnapMarkers } from '../aiPresets';
@@ -54,13 +54,6 @@ export function resolveContext(ctx: ExportContext): ExportContext {
 }
 
 // ── 文本格式导出（MD / TXT / HTML） ──
-
-export interface ExportResult {
-  /** 保存路径（null = 用户取消） */
-  path: string | null;
-  /** 格式 */
-  format: string;
-}
 
 /**
  * 导出为 MD / TXT / HTML 文本格式。

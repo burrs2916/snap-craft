@@ -11,7 +11,7 @@
 import { save as saveDialog } from '@tauri-apps/plugin-dialog';
 import { invoke } from '@tauri-apps/api/core';
 // 平台检测统一使用共享模块（消除各文件重复的 UA 判断）
-import { isWindows, pathSep } from '../../../shared/platform';
+import { pathSep } from '../../../shared/platform';
 
 const LAST_DIR_KEY = 'snapcraft-ai-last-dir';
 const DEFAULT_BASENAME = 'snapcraft-ai';

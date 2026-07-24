@@ -465,8 +465,8 @@ export function useOcrPanel(deps: OcrPanelDeps): OcrPanelState {
           setOcrLastImage(card);
           setOcrSourceKind('text');
           flash(t('ocr.clipTextMode'), 'success');
-        } catch {
-          flash(t('ocr.clipTextRenderFailed'), 'error');
+        } catch (e) {
+          flash(t('ocr.clipTextRenderFailed', { msg: String(e) }), 'error');
         }
         return;
       }

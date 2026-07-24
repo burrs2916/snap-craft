@@ -10,7 +10,7 @@
 
 import type { AiToolHost } from '../features/ai/aiTools';
 import { emitTool, callTool } from './bridge';
-import { clamp01, normToPx, pointToPx, type NormRect, type NormPoint } from '../shared/geometry';
+import { normToPx, pointToPx, type NormRect, type NormPoint } from '../shared/geometry';
 
 export class RemoteToolHost implements AiToolHost {
   private size: { width: number; height: number } | null = null;
