@@ -121,7 +121,22 @@ function toAnthropicMessages(messages: AiMessage[]) {
       }
       return { role: m.role === 'assistant' ? 'assistant' : 'user', content: m.content };
     });
-  return { system, rest };
+  // 合并相邻同 role 消息：模型单轮发起多个工具调用（并行 tool calls）时，多个工具结果
+  // 会映射成多条连续 user 消息，而 Anthropic 严格要求 user/assistant 交替（否则 400）。
+  // 这里统一把 content 归一为 block 数组后按 role 合并，保证任意相邻消息 role 不同。
+  const merged: any[] = [];
+  for (const msg of rest) {
+    const blocks: any[] = Array.isArray(msg.content)
+      ? msg.content
+      : [{ type: 'text', text: msg.content }];
+    const last = merged[merged.length - 1];
+    if (last && last.role === msg.role) {
+      last.content.push(...blocks);
+    } else {
+      merged.push({ role: msg.role, content: [...blocks] });
+    }
+  }
+  return { system, rest: merged };
 }
 
 function buildUrl(config: AiConfig): string {

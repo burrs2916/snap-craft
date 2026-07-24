@@ -308,7 +308,10 @@ export async function callTool(
   return new Promise((resolve) => {
     let unsub: UnlistenFn | null = null;
     let timer: ReturnType<typeof setTimeout> | null = null;
+    let cleaned = false;
     const cleanup = () => {
+      if (cleaned) return;
+      cleaned = true;
       if (timer != null) {
         clearTimeout(timer);
         timer = null;
@@ -322,7 +325,13 @@ export async function callTool(
       }
     };
     listen<ToolResultMsg>(EVT_TOOL_RESULT, handler).then((u) => {
-      unsub = u;
+      // 竞态修复：若超时已先于 listen 注册完成触发 cleanup，此时 unsub 为 null 会漏卸载，
+      // 导致 EVT_TOOL_RESULT 监听器泄漏。已结算则注册即卸载。
+      if (cleaned) {
+        u();
+      } else {
+        unsub = u;
+      }
     });
     void emitTo(aiHost, EVT_TOOL, { callId, name, args }).catch(() => {});
     // v14 修复：主窗未响应（崩溃/未监听）时 Promise 永久挂起会卡死整段生成；加超时兜底

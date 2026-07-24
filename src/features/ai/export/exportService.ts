@@ -226,7 +226,9 @@ export async function exportXlsx(
 
 /**
  * 导出为 PDF（通过系统打印对话框）。
- * 返回 null 表示成功触发打印，返回字符串表示错误。
+ * 成功返回 null（表示已触发打印）；失败 throw Error（由消费方 catch 统一处理）。
+ * 2026-07-24 修复：旧版失败时返回错误码字符串，消费方只判 falsy/truthy，
+ * 错误码被当成路径落进成功分支（弹"导出成功"、污染导出历史）。改为 throw。
  */
 export async function exportPdf(ctx: ExportContext): Promise<string | null> {
   const resolved = resolveContext(ctx);
@@ -246,7 +248,11 @@ export async function exportPdf(ctx: ExportContext): Promise<string | null> {
     ? htmlBody.replace('<main class="doc-main">', `<main class="doc-main">${imgBlock}`)
     : htmlBody;
 
-  return printHtmlViaIframe(html);
+  const err = await printHtmlViaIframe(html);
+  if (err) {
+    throw new Error(`PDF 打印失败 (${err})`);
+  }
+  return null;
 }
 
 // ── ZIP 归档 ──

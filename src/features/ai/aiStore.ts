@@ -309,7 +309,9 @@ export const useAiStore = create<AiState>((set, get) => ({
         set({ status: 'idle' });
       } else {
         const msg = e?.message ? String(e.message) : String(e);
-        set({ status: 'error', error: t(aiErrorI18nKey(e), { msg }) });
+        // 回滚到请求前快照：用户轮次已先行入队，若失败不回滚会留下悬空 user 轮次，
+        // 下次发送将产生连续 user 消息（Anthropic 要求 user/assistant 交替 → 400）。
+        set({ status: 'error', error: t(aiErrorI18nKey(e), { msg }), conversation: conv });
       }
     } finally {
       abortCtl = null;
@@ -549,7 +551,8 @@ export const useAiStore = create<AiState>((set, get) => ({
         set({ status: 'idle' });
       } else {
         const msg = e?.message ? String(e.message) : String(e);
-        set({ status: 'error', error: t(aiErrorI18nKey(e), { msg }) });
+        // 回滚到请求前快照（同 chat）：避免失败后悬空 user 轮次导致下次请求连续 user → Anthropic 400。
+        set({ status: 'error', error: t(aiErrorI18nKey(e), { msg }), conversation: conv });
       }
     } finally {
       abortCtl = null;

@@ -349,6 +349,7 @@
     "cancelled": "Screenshot cancelled",
     "openRegionFailed": "Cannot open region selector: {msg}",
     "openWindowFailed": "Cannot open window selector: {msg}",
+    "aiOpenFailed": "Cannot open AI assistant: {msg}",
     "saved": "Saved to {path}",
     "saveFailed": "Save failed: {msg}",
     "savedWithReveal": "Saved to {path} · click to reveal in Finder",

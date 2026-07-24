@@ -349,6 +349,7 @@
     "cancelled": "已取消截图",
     "openRegionFailed": "无法打开区域选择：{msg}",
     "openWindowFailed": "无法打开窗口选择：{msg}",
+    "aiOpenFailed": "无法打开 AI 助手：{msg}",
     "saved": "已保存到 {path}",
     "saveFailed": "保存失败：{msg}",
     "savedWithReveal": "已保存到 {path}，点此在访达中显示",

@@ -11,6 +11,16 @@ import type { DocxImage } from './aiTypes';
  */
 export function printHtmlViaIframe(html: string): Promise<string | null> {
   return new Promise((resolve) => {
+    // 2026-07-24 修复挂起：外层 Promise 只靠 iframe.onload 驱动，若 onload 永不触发
+    // （webview 打印子系统异常 / about:blank 竞态），Promise 不 settle → 导出按钮永久禁用。
+    // 加顶层超时兜底，保证一定会 settle。
+    let settled = false;
+    const settle = (code: string | null, cleanupIframe: () => void) => {
+      if (settled) return;
+      settled = true;
+      cleanupIframe();
+      resolve(code);
+    };
     const iframe = document.createElement('iframe');
     iframe.style.position = 'fixed';
     iframe.style.left = '-10000px';
@@ -19,44 +29,47 @@ export function printHtmlViaIframe(html: string): Promise<string | null> {
     iframe.style.height = '10px';
     iframe.style.border = 'none';
     document.body.appendChild(iframe);
+    const removeIframe = () => {
+      if (iframe.parentNode) iframe.parentNode.removeChild(iframe);
+    };
+    // 顶层 15s 超时：覆盖 onload 不触发的极端情况
+    const topTimer = setTimeout(() => settle('timeout', removeIframe), 15000);
     const doc = iframe.contentDocument || iframe.contentWindow?.document;
     if (!doc) {
-      if (iframe.parentNode) iframe.parentNode.removeChild(iframe);
-      resolve('iframe');
+      clearTimeout(topTimer);
+      settle('iframe', removeIframe);
       return;
     }
     doc.open();
     doc.write(html);
     doc.close();
     const finish = () => {
+      clearTimeout(topTimer);
       try {
         iframe.contentWindow?.focus();
         iframe.contentWindow?.print();
       } catch { /* 忽略打印异常 */ }
-      setTimeout(() => {
-        if (iframe.parentNode) iframe.parentNode.removeChild(iframe);
-      }, 1000);
-      resolve(null);
+      setTimeout(removeIframe, 1000);
+      settle(null, () => {});
     };
     iframe.onload = () => {
       const imgs = Array.from(doc.images) as HTMLImageElement[];
       if (imgs.length === 0) { finish(); return; }
       let pending = imgs.length;
-      let settled = false;
-      const done = () => {
-        if (settled) return;
-        settled = true;
-        finish();
+      let done = false;
+      const onImgSettled = () => {
+        if (done) return;
+        if (--pending === 0) { done = true; finish(); }
       };
       imgs.forEach((img) => {
         if (img.complete && img.naturalWidth > 0) {
-          if (--pending === 0) done();
+          onImgSettled();
         } else {
-          img.addEventListener('load', () => { if (--pending === 0) done(); }, { once: true });
-          img.addEventListener('error', () => { if (--pending === 0) done(); }, { once: true });
+          img.addEventListener('load', onImgSettled, { once: true });
+          img.addEventListener('error', onImgSettled, { once: true });
         }
       });
-      setTimeout(done, 2500);
+      setTimeout(() => { if (!done) { done = true; finish(); } }, 2500);
     };
   });
 }

@@ -195,6 +195,8 @@ export const EditorWindow = () => {
     addAnnotation,
     activeTool,
     setPlatform,
+    clearAnnotations,
+    setActiveTool,
     // 贴回画布：复用当前文字样式默认值（来自 store 默认值）
     currentColor,
     currentStrokeWidth,
@@ -838,6 +840,7 @@ export const EditorWindow = () => {
   const execTool = useMemo(() => createToolExecutor(aiTools), [aiTools]);
   // 挂载跨窗口监听（仅一次）：AI 窗口请求上下文/工具调用/关闭/回写/刷新时响应
   useEffect(() => {
+    let cancelled = false;
     let handles: { unlisten: (() => void)[] } | null = null;
     setupMainBridge({
       getCtx: () => ctxRef.current,
@@ -853,9 +856,16 @@ export const EditorWindow = () => {
         void refreshAiVision();
       },
     }).then((h) => {
-      handles = h;
+      // 异步竞态修复：cleanup 先于 listen 注册完成执行时 handles 尚为 null 会漏卸载，
+      // 导致监听器泄漏 + 旧桥接残留（可能误触已卸载窗口的回调）。已取消则注册即卸载。
+      if (cancelled) {
+        h.unlisten.forEach((u) => u());
+      } else {
+        handles = h;
+      }
     });
     return () => {
+      cancelled = true;
       handles?.unlisten.forEach((u) => u());
     };
   }, [execTool]);
@@ -876,8 +886,15 @@ export const EditorWindow = () => {
       height: imgHeight,
     };
     setAiOpen(true);
-    await openAiWindow(ctx, host);
-    await pushAiContext(ctx);
+    try {
+      await openAiWindow(ctx, host);
+      await pushAiContext(ctx);
+    } catch (e) {
+      // 打开 AI 窗口失败时回滚开关状态：否则 aiOpen 卡 true，工具栏常亮，
+      // 且刷新 effect 会误以为 AI 窗已开而持续推送上下文。
+      setAiOpen(false);
+      flash(t('toast.aiOpenFailed', { msg: String(e) }), 'error');
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [imageData, aiVisionUrl, aiOcrText, imgWidth, imgHeight]);
 
@@ -1009,6 +1026,11 @@ export const EditorWindow = () => {
     };
   }, []);
 
+  // ⌘S 保存用 ref：handleSave 定义在下方且闭包依赖 screenshotId/annotations，
+  // 键盘监听只注册一次（[] deps），必须经 ref 调最新闭包，否则 stale closure
+  // 里 screenshotId='' 导致标注不落库。赋值见 handleSave 定义处（渲染期刷新）。
+  const handleSaveRef = useRef<() => Promise<void>>(async () => {});
+
   // ⌘S 保存 / ⌘C 复制
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -1016,7 +1038,7 @@ export const EditorWindow = () => {
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
       if ((e.metaKey || e.ctrlKey) && (e.key === 's' || e.key === 'S')) {
         e.preventDefault();
-        handleSave();
+        handleSaveRef.current();
       }
     };
     window.addEventListener('keydown', onKey);
@@ -1102,6 +1124,23 @@ export const EditorWindow = () => {
       setOcrBusy(false);
     }
   }, [ocrBusy, imageData, ocrLang, sourceKind, flash, t, ocrAutoCopy, ocrMerge, imgWidth, imgHeight, screenshotId]);
+
+  // 裁剪确认回调：AnnotationCanvas 裁出新图后回传 dataURL + 自然像素尺寸。
+  // 2026-07-24 修复：此前渲染 AnnotationCanvas 漏传 onCropped，裁剪确认按钮静默失效。
+  // 裁剪后旧标注的坐标系已失效，必须清空并复位工具。
+  const onCropped = useCallback(
+    (dataUrl: string, width: number, height: number) => {
+      setImageData(dataUrl);
+      setImgWidth(width);
+      setImgHeight(height);
+      clearAnnotations();
+      setActiveTool('select');
+      // 裁剪后同步刷新 AI 视觉上下文（若面板已打开，底图已变）
+      setAiVisionUrl(dataUrl);
+      flash(t('crop.done'), 'success');
+    },
+    [clearAnnotations, setActiveTool, flash, t],
+  );
 
   // 框选区域 OCR 回调：AnnotationCanvas 在 ocrRegionMode 下拖框松手，
   // 裁出该区域（自然像素）的 PNG dataURL 回传。
@@ -1192,6 +1231,9 @@ export const EditorWindow = () => {
       flash(t('toast.saveFailed', { msg: String(e) }), 'error');
     }
   }, [flash, t, saveAnnotations]);
+
+  // 持最新引用（每次渲染刷新），供 ⌘S 键盘监听器调用（避免 stale closure）
+  handleSaveRef.current = handleSave;
 
   // 复制：文字模式复制文字本身，图片模式复制合成后的图片
   const handleCopy = useCallback(async () => {
@@ -1411,6 +1453,7 @@ export const EditorWindow = () => {
               activeTool={activeTool}
               ocrRegionMode={ocrSelectionMode}
               onRegionOcr={handleRegionOcr}
+              onCropped={onCropped}
             />
           </div>
           {ocrSelectionMode && (

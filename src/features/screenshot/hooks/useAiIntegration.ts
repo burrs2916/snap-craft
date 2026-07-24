@@ -267,6 +267,7 @@ export function useAiIntegration(deps: AiIntegrationDeps) {
   const execTool = useMemo(() => createToolExecutor(aiTools), [aiTools]);
 
   useEffect(() => {
+    let cancelled = false;
     let handles: { unlisten: (() => void)[] } | null = null;
     setupMainBridge({
       getCtx: () => ctxRef.current,
@@ -275,8 +276,19 @@ export function useAiIntegration(deps: AiIntegrationDeps) {
       onApply: (text) => applyAiToScreenshot(text),
       onRefresh: () => { void refreshAiVision(); },
       onCommit: () => commitAiEditRef.current(),
-    }).then((h) => { handles = h; });
-    return () => { handles?.unlisten.forEach((u) => u()); };
+    }).then((h) => {
+      // 异步竞态修复：cleanup 先于 listen 注册完成执行时，handles 尚为 null 会漏卸载，
+      // 导致监听器泄漏 + 旧桥接残留。已取消则注册即卸载。
+      if (cancelled) {
+        h.unlisten.forEach((u) => u());
+      } else {
+        handles = h;
+      }
+    });
+    return () => {
+      cancelled = true;
+      handles?.unlisten.forEach((u) => u());
+    };
   }, [execTool]);
 
   // 推送上下文给已打开的 AI 窗口
