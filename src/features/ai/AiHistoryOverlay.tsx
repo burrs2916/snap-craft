@@ -1,21 +1,19 @@
 // AI 历史库覆盖层：列出所有截图各自的 AI 成稿线程，可搜索/阅读/载入追问/删除/导出。
 // 自包含组件：内部管理 historyList/activeConv/search/export 全部状态，
 // 仅通过 props 与父组件交互（载入对话、关闭面板、打开导出文件）。
+//
+// 2026-07-23 架构解耦：导出逻辑统一走 exportService.ts，消除与 AIPanel 的重复管线。
 import { useState } from 'react';
 import { useAiStore, type AiConvMeta } from './aiStore';
 import { stripSnapMarkers } from './aiPresets';
 import { AiMarkdown } from './aiMarkdown';
-import { markdownToDocx } from './markdownDocx';
-import { markdownToPptx } from './markdownPptx';
-import { markdownToXlsx } from './markdownXlsx';
-import { mdToHtml, DOC_THEMES } from './markdownHtml';
-import { buildZip, dataUrlToBytes } from './zipStore';
-import { pickExportPath, revealInFolder, deriveFileHint, baseNameOf } from './exportPath';
-import { pushExportHistory } from './exportHistory';
+import { exportAs, exportZip, type ExportContext, type ExportFormat } from './export/exportService';
+import { buildZip, dataUrlToBytes } from './export/zipStore';
+import { revealInFolder, deriveFileHint, baseNameOf } from './export/exportPath';
+import { pushExportHistory } from './export/exportHistory';
 import type { AiChatTurn } from './aiTypes';
 import { t } from '../../i18n';
-import { invoke } from '@tauri-apps/api/core';
-import { firstHeading, fmtTime, mdToPlainText, printHtmlViaIframe } from './aiUtils';
+import { firstHeading, fmtTime } from './aiUtils';
 
 export interface AiHistoryOverlayProps {
   onClose: () => void;
@@ -58,90 +56,33 @@ export function AiHistoryOverlay({ onClose, onHide, onLoadConv, windowChrome, op
         })()
       : '';
 
-  const handleHistoryExport = async (
-    fmt: 'md' | 'txt' | 'html' | 'xlsx' | 'docx' | 'pptx' | 'pdf',
-  ) => {
+  // 统一导出：委托 exportService，消除重复管线
+  const handleHistoryExport = async (fmt: ExportFormat) => {
     if (!activeConv) return;
-    const md = stripSnapMarkers(activeDoc);
-    const baseName = `snapcraft-ai-${Date.now()}`;
+    const md = activeDoc;
     const thumb = activeConv.meta.thumb;
     const coverImages =
       thumb && (fmt === 'docx' || fmt === 'pdf' || fmt === 'html' || fmt === 'pptx')
         ? [{ dataUrl: thumb, caption: activeConv.meta.firstGoal || undefined }]
         : undefined;
+
+    const ctx: ExportContext = {
+      markdown: md,
+      title: firstHeading(stripSnapMarkers(md)) || activeConv.meta.presetName,
+      subtitle: activeConv.meta.firstGoal,
+      theme: 'modern',
+      images: coverImages,
+      fileHint: deriveFileHint(activeConv.meta.firstGoal),
+    };
+
     try {
-      if (fmt === 'xlsx') {
-        const bytes = await markdownToXlsx(md, activeConv.meta.presetName);
-        const path = await pickExportPath({
-          ext: 'xlsx',
-          hint: deriveFileHint(activeConv.meta.firstGoal),
-          filters: [{ name: 'Excel', extensions: ['xlsx'] }],
-        });
-        if (!path) return;
-        await invoke('save_binary_file', { bytes: Array.from(bytes), filePath: path });
+      const path = await exportAs(ctx, fmt, activeConv.meta.presetName);
+      if (path) {
         setHistoryMsg(t('ai.exportOk', { path: baseNameOf(path) }));
         setLastExportedPath(path);
         setHistoryExportedPath(path);
-        pushExportHistory({ path, format: 'xlsx', title: firstHeading(md) || activeConv.meta.firstGoal, time: Date.now() });
-      } else if (fmt === 'docx') {
-        const bytes = await markdownToDocx(md, {
-          title: firstHeading(md) || activeConv.meta.presetName,
-          subtitle: activeConv.meta.firstGoal,
-          images: coverImages,
-        });
-        const path = await pickExportPath({
-          ext: 'docx',
-          hint: deriveFileHint(activeConv.meta.firstGoal),
-          filters: [{ name: 'Word', extensions: ['docx'] }],
-        });
-        if (!path) return;
-        await invoke('save_binary_file', { bytes: Array.from(bytes), filePath: path });
-        setHistoryMsg(t('ai.exportOk', { path: baseNameOf(path) }));
-        setLastExportedPath(path);
-        setHistoryExportedPath(path);
-        pushExportHistory({ path, format: 'docx', title: firstHeading(md) || activeConv.meta.firstGoal, time: Date.now() });
-      } else if (fmt === 'pptx') {
-        const bytes = await markdownToPptx(md, {
-          title: firstHeading(md) || activeConv.meta.presetName,
-          subtitle: activeConv.meta.firstGoal,
-          images: coverImages,
-        });
-        const path = await pickExportPath({
-          ext: 'pptx',
-          hint: deriveFileHint(activeConv.meta.firstGoal),
-          filters: [{ name: 'PowerPoint', extensions: ['pptx'] }],
-        });
-        if (!path) return;
-        await invoke('save_binary_file', { bytes: Array.from(bytes), filePath: path });
-        setHistoryMsg(t('ai.exportOk', { path: baseNameOf(path) }));
-        setLastExportedPath(path);
-        setHistoryExportedPath(path);
-        pushExportHistory({ path, format: 'pptx', title: firstHeading(md) || activeConv.meta.firstGoal, time: Date.now() });
       } else if (fmt === 'pdf') {
-        const html = mdToHtml(md, { theme: DOC_THEMES[0].id, title: firstHeading(md) || activeConv.meta.presetName, sectionImages: coverImages });
-        await printHtmlViaIframe(html);
         setHistoryMsg(t('ai.exportPdfHint'));
-      } else {
-        let content: string;
-        let ext: string;
-        if (fmt === 'html') {
-          content = mdToHtml(md, { theme: DOC_THEMES[0].id, title: firstHeading(md) || activeConv.meta.presetName, sectionImages: coverImages });
-          ext = 'html';
-        } else {
-          content = mdToPlainText(md);
-          ext = 'txt';
-        }
-        const path = await pickExportPath({
-          ext,
-          hint: deriveFileHint(activeConv.meta.firstGoal),
-          filters: [{ name: ext.toUpperCase(), extensions: [ext] }],
-        });
-        if (!path) return;
-        await invoke('save_text_file', { content, filePath: path });
-        setHistoryMsg(t('ai.exportOk', { path: baseNameOf(path) }));
-        setLastExportedPath(path);
-        setHistoryExportedPath(path);
-        pushExportHistory({ path, format: fmt, title: firstHeading(md) || activeConv.meta.firstGoal, time: Date.now() });
       }
     } catch (e: any) {
       const msg = e?.message ? String(e.message) : String(e);
@@ -176,24 +117,19 @@ export function AiHistoryOverlay({ onClose, onHide, onLoadConv, windowChrome, op
         .filter(Boolean)
         .join('\n');
       files.push({ name: 'README.txt', data: enc.encode(readme) });
-      const zip = buildZip(files);
-      const path = await pickExportPath({
-        ext: 'zip',
-        hint: activeConv ? deriveFileHint(activeConv.meta.firstGoal) : '',
-        filters: [{ name: 'ZIP', extensions: ['zip'] }],
-      });
-      if (!path) return;
-      await invoke('save_binary_file', { bytes: Array.from(zip), filePath: path });
-      setHistoryMsg(t('ai.exportOk', { path: baseNameOf(path) }));
-      setLastExportedPath(path);
-      pushExportHistory({ path, format: 'zip', title: activeConv.meta.firstGoal || 'Archive', time: Date.now() });
+
+      const path = await exportZip(files, activeConv.meta.firstGoal || 'archive');
+      if (path) {
+        setHistoryMsg(t('ai.exportOk', { path: baseNameOf(path) }));
+        setLastExportedPath(path);
+      }
     } catch (e: any) {
       const msg = e?.message ? String(e.message) : String(e);
       setHistoryMsg(t('ai.exportFail', { msg }));
     }
   };
 
-const filteredList = (() => {
+  const filteredList = (() => {
     const q = historySearch.trim().toLowerCase();
     if (!q) return historyList;
     return historyList.filter((m) =>

@@ -1,7 +1,8 @@
 // ===== AI 面板工具函数 =====
 // 从 AIPanel.tsx 提取的纯工具函数，零 React 依赖。
 
-import type { DocxImage } from './markdownDocx';
+// DocxImage 类型枢纽已移至 aiTypes.ts
+import type { DocxImage } from './aiTypes';
 
 /**
  * 通过隐藏 iframe 触发浏览器「打印 → 另存为 PDF」。

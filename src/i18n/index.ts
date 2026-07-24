@@ -2,6 +2,10 @@ import { useSyncExternalStore } from 'react';
 import { emit, listen } from '@tauri-apps/api/event';
 import zhCN from '../locales/zh-CN.json';
 import enUS from '../locales/en-US.json';
+// isTauri 统一使用共享平台模块（消除各文件重复定义）
+import { isTauri } from '../shared/platform';
+// re-export 保持向后兼容（多处从 i18n 导入 isTauri）
+export { isTauri };
 
 /**
  * 轻量国际化引擎（零依赖，结构对齐参考项目 biosphere-terminal-app）。
@@ -44,12 +48,6 @@ const listeners = new Set<() => void>();
 
 function notifyListeners() {
   listeners.forEach((l) => l());
-}
-
-// 当前是否运行在 Tauri 运行时（区分 vite dev 纯前端预览）：
-// 只有 Tauri 环境才需要跨窗口事件广播，避免纯前端下调用 Tauri API 报错。
-export function isTauri(): boolean {
-  return typeof window !== 'undefined' && !!(window as any).__TAURI_INTERNALS__;
 }
 
 function persist(lang: Lang) {

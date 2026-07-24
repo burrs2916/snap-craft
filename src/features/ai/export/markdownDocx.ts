@@ -28,14 +28,10 @@ import {
   PageNumber,
   ExternalHyperlink,
 } from 'docx';
-import type { DocThemeId } from './markdownHtml';
-
-export interface DocxImage {
-  /** 截图 dataUrl（png/jpeg），将内嵌到文档 */
-  dataUrl: string;
-  /** 图注（可选） */
-  caption?: string;
-}
+// DocThemeId / DocxImage 类型枢纽已移至 aiTypes.ts（消除循环类型依赖）
+import type { DocThemeId, DocxImage } from '../aiTypes';
+// re-export 保持向后兼容（aiUtils.ts / markdownPptx.ts 等从此处导入 DocxImage）
+export type { DocxImage };
 
 export interface MarkdownToDocxOptions {
   /** 文档标题（写入封面 + 正文首个 H1，可选） */
@@ -59,14 +55,8 @@ export interface MarkdownToDocxOptions {
   date?: string;
 }
 
-/** 主题 → 强调色（十六进制，不含 #），与 markdownHtml 的 5 套主题呼应 */
-const THEME_ACCENT: Record<DocThemeId, string> = {
-  modern: '4F46E5', // 靛蓝
-  elegant: '8B6F4E', // 暖棕
-  magazine: 'FF6B5E', // 珊瑚
-  product: '7C3AED', // 紫
-  tech: '06B6D4', // 青
-};
+/** 主题 → 强调色：统一使用 themeConstants（消除各格式独立维护的颜色映射） */
+import { THEME_ACCENT } from './themeConstants';
 
 /** 扫描 Markdown 生成目录（TOC）：标题 ≥4 个时自动生成，长文档更易导航（对齐 HTML 自动 TOC） */
 function buildToc(md: string, tocTitle?: string): Paragraph[] {
@@ -172,18 +162,9 @@ function parseInline(text: string, accent: string, defaultFont?: FontObj): Inlin
   return runs;
 }
 
-// 跨平台 CJK 字体对象：Latin 用 Calibri（全平台通用），East Asian 按平台选——
-// macOS 主战场用系统自带的 PingFang SC，Windows 用 Microsoft YaHei，
-// 避免 Word / WPS Mac 因缺失 "Microsoft YaHei" 而弹「字体缺失」并替换为陌生字体。
-// 传对象（而非字符串）才能分别指定 ascii/eastAsia；docx 库对缺失的 eastAsia 会在打开端按默认 EA 字体兜底。
-const IS_MAC =
-  typeof navigator !== 'undefined' &&
-  /Mac|iPhone|iPad|iPod/i.test(navigator.userAgent || navigator.platform || '');
-const CJK_FONT: { ascii: string; hAnsi: string; eastAsia: string } = {
-  ascii: 'Calibri',
-  hAnsi: 'Calibri',
-  eastAsia: IS_MAC ? 'PingFang SC' : 'Microsoft YaHei',
-};
+// 跨平台 CJK 字体：使用共享平台模块统一检测（消除各文件重复的 UA 判断）
+import { cjkFont } from '../../../shared/platform';
+const CJK_FONT = cjkFont();
 
 // ===== dataUrl → 字节 + 真实尺寸（用于 ImageRun 的 transformation） =====
 interface DecodedImage {
@@ -285,7 +266,9 @@ function parseAlign(cell: string) {
 
 // separator：GFM 分隔行（如 `| :--- | :---: | ---: |`），由 caller 单独传入（caller 收集时已跳过该行）；
 // 用于推导每列对齐。rows = [表头, ...数据行]（不含分隔行）。
-function buildTable(rows: string[], accent: string, separator?: string): Table {
+import { THEME_LIGHT_BG } from './themeConstants';
+
+function buildTable(rows: string[], accent: string, separator?: string, theme?: DocThemeId): Table {
   const thinBorder = { style: BorderStyle.SINGLE, size: 4, color: 'CCCCCC' };
   const borders = {
     top: thinBorder,
@@ -296,6 +279,7 @@ function buildTable(rows: string[], accent: string, separator?: string): Table {
   const headerCells = splitCells(rows[0]);
   const colCount = headerCells.length;
   const aligns = separator ? splitCells(separator).map(parseAlign) : [];
+  const lightBg = THEME_LIGHT_BG[theme ?? 'modern'] ?? 'F8FAFC';
   const tableRows = rows.map((rowLine, ri) => {
     const cells = splitCells(rowLine);
     const isHeader = ri === 0;
@@ -303,10 +287,11 @@ function buildTable(rows: string[], accent: string, separator?: string): Table {
       tableHeader: isHeader, // 标准 <w:tblHeader/>：跨页自动重复表头（全平台兼容，不绑特定 Word 版本）
       children: cells.map((c, ci) => {
         const align = aligns[ci] ?? AlignmentType.LEFT;
+        // 表头：主题强调色底 + 白字（与 HTML 主题严格一致）；数据行：斑马纹用主题浅底色
         const shading = isHeader
-          ? { type: ShadingType.CLEAR, fill: 'E8EAF6', color: 'auto' }
+          ? { type: ShadingType.CLEAR, fill: accent, color: 'auto' }
           : ri % 2 === 1
-            ? { type: ShadingType.CLEAR, fill: 'F4F5F9', color: 'auto' }
+            ? { type: ShadingType.CLEAR, fill: lightBg, color: 'auto' }
             : undefined;
         return new TableCell({
           width: { size: Math.floor(9000 / colCount), type: WidthType.DXA },
@@ -316,9 +301,9 @@ function buildTable(rows: string[], accent: string, separator?: string): Table {
             new Paragraph({
               alignment: align,
               spacing: { before: 40, after: 40 },
-              // 表头保持纯文本加粗（稳健）；数据单元格解析内联 **粗体**/`代码` 等并统一 CJK 字体
+              // 表头：白字加粗（配合主题强调色底色，与 HTML 主题一致）；数据单元格解析内联样式
               children: isHeader
-                ? [new TextRun({ text: c, bold: true, size: 20, font: CJK_FONT })]
+                ? [new TextRun({ text: c, bold: true, size: 20, color: 'FFFFFF', font: CJK_FONT })]
                 : parseInline(c, accent, CJK_FONT),
             }),
           ],
@@ -480,7 +465,7 @@ export async function markdownToDocx(
         tableLines.push(lines[i]);
         i += 1;
       }
-      children.push(buildTable(tableLines, accent, separator));
+      children.push(buildTable(tableLines, accent, separator, theme));
       continue;
     }
 

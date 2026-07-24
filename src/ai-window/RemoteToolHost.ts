@@ -8,9 +8,9 @@
 //  - summarize_region 是 async，走 callTool 请求/响应拿主窗口 OCR 结果。
 //  - 所有坐标原样以 0~1 转发，绝不碰像素。
 
-import type { AiToolHost, NormRect, NormPoint } from '../features/ai/aiTools';
+import type { AiToolHost } from '../features/ai/aiTools';
 import { emitTool, callTool } from './bridge';
-import { clamp01 } from '../features/screenshot/utils/helpers';
+import { clamp01, normToPx, pointToPx, type NormRect, type NormPoint } from '../shared/geometry';
 
 export class RemoteToolHost implements AiToolHost {
   private size: { width: number; height: number } | null = null;
@@ -28,20 +28,11 @@ export class RemoteToolHost implements AiToolHost {
     return this.size;
   }
 
-  // 与 EnhancedScreenshotApp.normToPx 完全一致：round + clamp01
-  private toPx(r: NormRect): { x: number; y: number; w: number; h: number } {
-    const W = this.size?.width ?? 0;
-    const H = this.size?.height ?? 0;
-    return {
-      x: Math.round(clamp01(r.x) * W),
-      y: Math.round(clamp01(r.y) * H),
-      w: Math.round(clamp01(r.w) * W),
-      h: Math.round(clamp01(r.h) * H),
-    };
-  }
+  private get W(): number { return this.size?.width ?? 0; }
+  private get H(): number { return this.size?.height ?? 0; }
 
   drawRectangle(rect: NormRect, opts?: { color?: string; label?: string }): string {
-    const { x, y, w, h } = this.toPx(rect);
+    const { x, y, w, h } = normToPx(rect, this.W, this.H);
     emitTool('draw_rectangle', {
       x: rect.x,
       y: rect.y,
@@ -54,24 +45,20 @@ export class RemoteToolHost implements AiToolHost {
   }
 
   redactArea(rect: NormRect, mode: 'blur' | 'mosaic' | 'black', strength?: number): string {
-    const { x, y, w, h } = this.toPx(rect);
+    const { x, y, w, h } = normToPx(rect, this.W, this.H);
     emitTool('redact_area', { x: rect.x, y: rect.y, w: rect.w, h: rect.h, mode, strength });
     return `(${x},${y})-(${x + w},${y + h})`;
   }
 
   highlightRect(rect: NormRect, color?: string): string {
-    const { x, y, w, h } = this.toPx(rect);
+    const { x, y, w, h } = normToPx(rect, this.W, this.H);
     emitTool('highlight_text', { x: rect.x, y: rect.y, w: rect.w, h: rect.h, color });
     return `(${x},${y})-(${x + w},${y + h})`;
   }
 
   drawArrow(from: NormPoint, to: NormPoint, opts?: { color?: string; label?: string }): string {
-    const W = this.size?.width ?? 0;
-    const H = this.size?.height ?? 0;
-    const fx = Math.round(clamp01(from.x) * W);
-    const fy = Math.round(clamp01(from.y) * H);
-    const tx = Math.round(clamp01(to.x) * W);
-    const ty = Math.round(clamp01(to.y) * H);
+    const fp = pointToPx(from, this.W, this.H);
+    const tp = pointToPx(to, this.W, this.H);
     emitTool('draw_arrow', {
       fromX: from.x,
       fromY: from.y,
@@ -80,7 +67,7 @@ export class RemoteToolHost implements AiToolHost {
       color: opts?.color,
       label: opts?.label,
     });
-    return `(${fx},${fy})→(${tx},${ty})`;
+    return `(${fp.x},${fp.y})→(${tp.x},${tp.y})`;
   }
 
   drawCallout(
@@ -88,12 +75,8 @@ export class RemoteToolHost implements AiToolHost {
     label: NormPoint,
     opts?: { color?: string; text?: string },
   ): string {
-    const W = this.size?.width ?? 0;
-    const H = this.size?.height ?? 0;
-    const ax = Math.round(clamp01(anchor.x) * W);
-    const ay = Math.round(clamp01(anchor.y) * H);
-    const lx = Math.round(clamp01(label.x) * W);
-    const ly = Math.round(clamp01(label.y) * H);
+    const ap = pointToPx(anchor, this.W, this.H);
+    const lp = pointToPx(label, this.W, this.H);
     emitTool('draw_callout', {
       ax: anchor.x,
       ay: anchor.y,
@@ -102,7 +85,7 @@ export class RemoteToolHost implements AiToolHost {
       color: opts?.color,
       text: opts?.text,
     });
-    return `锚点(${ax},${ay})→气泡(${lx},${ly}) 文字「${opts?.text || ''}」`;
+    return `锚点(${ap.x},${ap.y})→气泡(${lp.x},${lp.y}) 文字「${opts?.text || ''}」`;
   }
 
   async summarizeRegion(rect: NormRect): Promise<string> {

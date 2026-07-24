@@ -4,7 +4,21 @@
 // OpenAI 兼容接口（csp:null，外部 fetch 放行）。后端加固（密钥不下发渲染层、
 // 原生流式事件、对话持久化）留待 Phase 2。
 
-import type { DocThemeId } from './markdownHtml';
+// ── 类型枢纽：DocThemeId / DocxImage ──
+// 此前 DocThemeId 定义在 markdownHtml.ts，DocxImage 定义在 markdownDocx.ts，
+// 导致 aiTypes → markdownHtml → (被 markdownDocx/markdownPptx 依赖) 的循环类型引用。
+// 现统一移入本文件，各导出器从此处导入，消除循环依赖。
+
+/** 文档主题 ID（5 套主题：现代简约 / 雅致衬线 / 杂志风 / 产品推广 / 科技风） */
+export type DocThemeId = 'modern' | 'elegant' | 'magazine' | 'product' | 'tech';
+
+/** 内嵌截图描述（用于 DOCX / PPTX / HTML 图文报告） */
+export interface DocxImage {
+  /** 截图 dataUrl（png/jpeg），将内嵌到文档 */
+  dataUrl: string;
+  /** 图注（可选） */
+  caption?: string;
+}
 
 export type AiApiType = 'openai' | 'anthropic';
 

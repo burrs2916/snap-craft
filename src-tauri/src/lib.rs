@@ -2,6 +2,7 @@
 #[macro_use]
 mod logger;
 mod commands;
+mod platform;
 mod store;
 
 use commands::permission::get_platform;

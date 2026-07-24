@@ -42,7 +42,11 @@ use std::sync::{Arc, Condvar, Mutex};
     }
 
     // ===== 显示器几何（用于区域/窗口坐标转换：全局物理像素 ↔ ScreenCaptureKit 屏幕空间点）=====
-    // 复用与 capture.rs 一致的 CoreGraphics 绑定（独立模块，零外部依赖）。
+    // 2026-07-23 架构解耦：display_backing_pixels 提取至 platform::macos_display 共享模块。
+    // CGGetActiveDisplayList / CGDisplayBounds 保留本地声明（返回 objc2_core_foundation::CGRect，
+    // 与共享模块的 raw C CGRect 是不同类型，ScreenCaptureKit API 需要 objc2 版本）。
+    use crate::platform::macos_display::display_backing_pixels;
+
     #[link(name = "CoreGraphics", kind = "framework")]
     extern "C" {
         fn CGGetActiveDisplayList(
@@ -51,26 +55,6 @@ use std::sync::{Arc, Condvar, Mutex};
             display_count: *mut u32,
         ) -> i32;
         fn CGDisplayBounds(display: u32) -> CGRect;
-        fn CGDisplayCopyDisplayMode(display: u32) -> *mut std::ffi::c_void;
-        fn CGDisplayModeGetPixelWidth(mode: *mut std::ffi::c_void) -> usize;
-        fn CGDisplayModeGetPixelHeight(mode: *mut std::ffi::c_void) -> usize;
-        fn CGDisplayModeRelease(mode: *mut std::ffi::c_void);
-    }
-
-    /// 显示器真实 backing 像素尺寸（HiDPI 缩放屏也准确）。
-    fn display_backing_pixels(display: u32, logical_w: f64, logical_h: f64) -> (u32, u32) {
-        unsafe {
-            let mode = CGDisplayCopyDisplayMode(display);
-            if !mode.is_null() {
-                let pw = CGDisplayModeGetPixelWidth(mode) as u32;
-                let ph = CGDisplayModeGetPixelHeight(mode) as u32;
-                CGDisplayModeRelease(mode);
-                if pw > 0 && ph > 0 {
-                    return (pw, ph);
-                }
-            }
-        }
-        (logical_w.max(0.0) as u32, logical_h.max(0.0) as u32)
     }
 
     /// 找到包含给定「全局物理像素点」的显示器，返回其 scale（物理像素/逻辑点）。

@@ -15,14 +15,13 @@ import { getCurrentWindow, currentMonitor } from '@tauri-apps/api/window';
 import { save as saveDialog } from '@tauri-apps/plugin-dialog';
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
 // Phase 18：OCR 文本清洗
-import { cleanOcrText } from '../../ai/ocrClean';
+import { cleanOcrText, createToolExecutor } from '../../ai';
+import type { AiToolHost, NormRect } from '../../ai';
 import { useI18n, t } from '../../../i18n';
 import { useScreenshotStore } from '../store/screenshotStore';
 import { AnnotationCanvas, type AnnotationCanvasHandle } from './AnnotationCanvas';
 import { AnnotationToolbar } from './AnnotationToolbar';
 import type { OcrResult, OcrBlock, AnnotationObject } from '../types';
-import type { AiToolHost, NormRect } from '../../ai/aiTools';
-import { createToolExecutor } from '../../ai/aiTools';
 import { openAiWindow, pushAiContext, setupMainBridge, type AiContext } from '../../../ai-window/bridge';
 import { clamp01, genAnnoId, normToPx, cropDataUrl } from '../utils/helpers';
 import { ocrReadingOrder, ocrHighlightParts, ocrExtractEntities, type OcrLayout, type OcrExportFmt, type OcrEntity } from '../utils/ocrUtils';

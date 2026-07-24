@@ -10,20 +10,10 @@
 
 import { getLang } from '../../i18n';
 import type { AiToolDef } from './aiTypes';
+import { clamp01, type NormRect, type NormPoint } from '../../shared/geometry';
 
-/** 归一化矩形（0~1 相对比例，左上角 0,0） */
-export interface NormRect {
-  x: number;
-  y: number;
-  w: number;
-  h: number;
-}
-
-/** 归一化点（0~1 相对比例，左上角 0,0），用于箭头起止点 */
-export interface NormPoint {
-  x: number;
-  y: number;
-}
+// 向后兼容：此前 NormRect / NormPoint 定义在本文件，外部消费者仍可从 aiTools 导入
+export type { NormRect, NormPoint } from '../../shared/geometry';
 
 /**
  * 宿主侧（编辑器）实现的工具宿主：AI 工具执行器通过它真实修改截图。
@@ -151,8 +141,6 @@ export const AI_TOOL_DEFS: AiToolDef[] = [
     },
   },
 ];
-
-const clamp01 = (v: any): number => Math.max(0, Math.min(1, Number(v) || 0));
 
 /**
  * 把模型给出的工具调用派发到宿主侧执行，封装为「工具循环」可用的 executor。

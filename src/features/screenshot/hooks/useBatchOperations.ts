@@ -4,10 +4,7 @@
 import { useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { save } from '@tauri-apps/plugin-dialog';
-import { cleanOcrText } from '../../ai/ocrClean';
-import { chatOnce } from '../../ai/aiClient';
-import { markdownToDocx } from '../../ai/markdownDocx';
-import { useAiStore } from '../../ai/aiStore';
+import { cleanOcrText, chatOnce, markdownToDocx, useAiStore } from '../../ai';
 import type { OcrResult } from '../types';
 
 // ── 类型 ──

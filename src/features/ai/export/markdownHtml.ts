@@ -9,7 +9,9 @@
 // 覆盖常见块级/行内语法：标题、列表、代码块、表格、引用、分割线、
 // 链接、粗体/斜体/删除线、行内代码、段落与换行。
 
-export type DocThemeId = 'modern' | 'elegant' | 'magazine' | 'product' | 'tech';
+// DocThemeId 类型枢纽已移至 aiTypes.ts（消除循环类型依赖），此处 re-export 保持向后兼容
+import type { DocThemeId } from '../aiTypes';
+export type { DocThemeId };
 
 export interface DocThemeMeta {
   id: DocThemeId;
@@ -82,36 +84,12 @@ export interface MdToHtmlOpts {
   fragment?: boolean;
 }
 
-function esc(s: string): string {
-  return s
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
-}
+// 共享 Markdown 解析工具（消除 5 处重复）
+import { escHtml, splitRow, slugify, inlineToHtml } from '../../../shared/markdownParse';
 
-function inline(raw: string): string {
-  let s = esc(raw);
-  // 行内代码
-  s = s.replace(/`([^`]+)`/g, '<code>$1</code>');
-  // 粗体
-  s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
-  // 斜体（避免误伤 **）
-  s = s.replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<em>$2</em>');
-  s = s.replace(/(^|[^_])_([^_\n]+)_/g, '$1<em>$2</em>');
-  // 删除线
-  s = s.replace(/~~([^~]+)~~/g, '<del>$1</del>');
-  // 链接 [文本](url)
-  s = s.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, '<a href="$2">$1</a>');
-  return s;
-}
-
-function splitRow(line: string): string[] {
-  let s = line.trim();
-  if (s.startsWith('|')) s = s.slice(1);
-  if (s.endsWith('|')) s = s.slice(0, -1);
-  return s.split('|').map((c) => c.trim());
-}
+// 向后兼容别名
+const esc = escHtml;
+const inline = inlineToHtml;
 
 // ===================== 主题样式 =====================
 
@@ -129,17 +107,6 @@ const COMMON =
   '.doc-toc a:hover { color: #4f46e5; text-decoration: underline; }' +
   '.doc-toc-l3 { padding-left: 20px; font-size: .92em; }' +
   '@media print { .doc-toc { page-break-inside: avoid; } }';
-
-/** 把标题文本转成稳定、URL 安全的锚点 id（保留 CJK，去 Markdown 标记与非法字符） */
-function slugify(s: string): string {
-  const base = s
-    .toLowerCase()
-    .replace(/[`*_~]/g, '')
-    .replace(/[^\w一-鿿-]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 48);
-  return base || 'h';
-}
 
 const THEME_CSS: Record<DocThemeId, string> = {
   modern: `

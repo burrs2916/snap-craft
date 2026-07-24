@@ -258,7 +258,7 @@ pub async fn capture_screen(
         //   仅在找不到序号或结果尺寸异常时兜底 `-x -R`（宁可 1x 也不能全黑）。
         if let Some(did) = display_id {
             // 查询该 display 的全局边界
-            let bounds = unsafe { CGDisplayBounds(did) };
+            let bounds = unsafe { cg::CGDisplayBounds(did) };
             // 校验 bounds 有效性：显示器断开时 CGDisplayBounds 返回全零
             if bounds.size.width < 1.0 || bounds.size.height < 1.0 {
                 clog!("capture", "display_id={} 的 bounds 无效(可能已断开): {:?}x{:?}", did, bounds.size.width, bounds.size.height);
@@ -273,7 +273,7 @@ pub async fn capture_screen(
             } else {
                 1.0
             };
-            let is_main = did == unsafe { CGMainDisplayID() };
+            let is_main = did == unsafe { cg::CGMainDisplayID() };
             if is_main {
                 // 主屏：不带 -R（app 窗口隐藏后，-R 0,0,W,H 可能截到未重绘的黑屏；
                 // screencapture -x 不带 -R 时截取主屏，行为更可靠）
@@ -339,8 +339,8 @@ pub async fn capture_screen(
         // 无 display_id：截取主显示器。
         // 主屏不带 -R（app 窗口隐藏后，-R 0,0,W,H 可能截到未重绘的黑屏；
         // screencapture -x 不带 -R 时截取主屏，此系统上验证过行为可靠）。
-        let main = unsafe { CGMainDisplayID() };
-        let mb = unsafe { CGDisplayBounds(main) };
+        let main = unsafe { cg::CGMainDisplayID() };
+        let mb = unsafe { cg::CGDisplayBounds(main) };
         let (px_w, px_h) = display_backing_pixels(main, mb.size.width, mb.size.height);
         clog!(
             "capture",
@@ -788,83 +788,14 @@ mod xcap_capture {
 }
 
 // ===== macOS 显示器枚举（CoreGraphics） =====
+// 2026-07-23 架构解耦：FFI 绑定与工具函数提取至 platform::macos_display 共享模块，
+// 消除 capture.rs 与 screen_capture_kit.rs 之间的重复声明。
 #[cfg(target_os = "macos")]
-#[link(name = "CoreGraphics", kind = "framework")]
-extern "C" {
-    fn CGGetActiveDisplayList(
-        max_displays: u32,
-        active_displays: *mut u32,
-        display_count: *mut u32,
-    ) -> i32;
-    fn CGDisplayBounds(display: u32) -> CGRect;
-    fn CGMainDisplayID() -> u32;
-    // ⚠️ CGDisplayPixelsWide/High 在 HiDPI「缩放」显示器上返回的是逻辑点数而非真实 backing 像素
-    //   （实测某台 4K 屏用 1080p 缩放模式时，PixelsWide 返回 1920，但 screencapture 实际输出 3840）。
-    //   这会让 scale 被误算成 1.0，前端按 1x 处理 2x 的图 → 缩放不对/显示不全。
-    //   正确来源：CGDisplayCopyDisplayMode + CGDisplayModeGetPixelWidth/Height（真实 backing 像素）。
-    fn CGDisplayCopyDisplayMode(display: u32) -> *mut std::ffi::c_void;
-    fn CGDisplayModeGetPixelWidth(mode: *mut std::ffi::c_void) -> usize;
-    fn CGDisplayModeGetPixelHeight(mode: *mut std::ffi::c_void) -> usize;
-    fn CGDisplayModeRelease(mode: *mut std::ffi::c_void);
-}
-
-/// 获取显示器真实 backing 像素尺寸（宽, 高）。
-/// 优先用 CGDisplayCopyDisplayMode 的 PixelWidth/Height（对 HiDPI 缩放屏也准确）；
-/// 拿不到则退回逻辑点尺寸（等价 scale=1）。
-#[cfg(target_os = "macos")]
-fn display_backing_pixels(display: u32, logical_w: f64, logical_h: f64) -> (u32, u32) {
-    unsafe {
-        let mode = CGDisplayCopyDisplayMode(display);
-        if !mode.is_null() {
-            let pw = CGDisplayModeGetPixelWidth(mode) as u32;
-            let ph = CGDisplayModeGetPixelHeight(mode) as u32;
-            CGDisplayModeRelease(mode);
-            if pw > 0 && ph > 0 {
-                return (pw, ph);
-            }
-        }
-    }
-    (logical_w.max(0.0) as u32, logical_h.max(0.0) as u32)
-}
-
-/// 查 display id 在 CGGetActiveDisplayList 中的 1 基序号（`screencapture -D<n>` 需要）。
-/// 未找到返回 None。
-#[cfg(target_os = "macos")]
-fn active_display_index_1based(target: u32) -> Option<u32> {
-    const MAX: u32 = 32;
-    let mut displays: [u32; MAX as usize] = [0; MAX as usize];
-    let mut count: u32 = 0;
-    unsafe {
-        CGGetActiveDisplayList(MAX, displays.as_mut_ptr(), &mut count);
-    }
-    for (i, &d) in displays.iter().take(count as usize).enumerate() {
-        if d == target {
-            return Some((i as u32) + 1);
-        }
-    }
-    None
-}
-
-#[cfg(target_os = "macos")]
-#[repr(C)]
-struct CGPoint {
-    x: f64,
-    y: f64,
-}
-
-#[cfg(target_os = "macos")]
-#[repr(C)]
-struct CGSize {
-    width: f64,
-    height: f64,
-}
-
-#[cfg(target_os = "macos")]
-#[repr(C)]
-struct CGRect {
-    origin: CGPoint,
-    size: CGSize,
-}
+use crate::platform::macos_display::{
+    self as cg,
+    display_backing_pixels, active_display_index_1based,
+    has_screen_capture_access as mac_has_screen_capture_access,
+};
 
 /// 枚举所有显示器：全局坐标 (x,y,width,height 为逻辑点)、是否主屏、scale。
 /// 用于前端显示器选择器与覆盖层跨屏铺满。
@@ -876,12 +807,12 @@ pub fn list_displays() -> Vec<DisplayInfo> {
         let mut displays: [u32; MAX as usize] = [0; MAX as usize];
         let mut count: u32 = 0;
         unsafe {
-            CGGetActiveDisplayList(MAX, displays.as_mut_ptr(), &mut count);
+            cg::CGGetActiveDisplayList(MAX, displays.as_mut_ptr(), &mut count);
         }
-        let main = unsafe { CGMainDisplayID() };
+        let main = unsafe { cg::CGMainDisplayID() };
         let mut out = Vec::new();
         for &d in displays.iter().take(count as usize) {
-            let b = unsafe { CGDisplayBounds(d) };
+            let b = unsafe { cg::CGDisplayBounds(d) };
             // 真实 backing 像素（对 HiDPI 缩放屏也准确，修复 scale 被误算成 1.0 的老 bug）
             let (px_w, px_h) = display_backing_pixels(d, b.size.width, b.size.height);
             // scale = 物理像素 / 逻辑点（Retina 2x → 2.0；自定义缩放如 1.5x），两轴取平均更稳健
@@ -935,19 +866,7 @@ pub fn list_displays() -> Vec<DisplayInfo> {
 }
 
 // ===== macOS 屏幕录制权限（仅 macOS） =====
-// CGPreflightScreenCaptureAccess：预检权限状态，不弹窗
-// CGRequestScreenCaptureAccess：请求权限，首次调用会弹出系统授权对话框
-#[cfg(target_os = "macos")]
-#[link(name = "CoreGraphics", kind = "framework")]
-extern "C" {
-    fn CGPreflightScreenCaptureAccess() -> std::os::raw::c_uchar;
-    fn CGRequestScreenCaptureAccess() -> std::os::raw::c_uchar;
-}
-
-#[cfg(target_os = "macos")]
-fn mac_has_screen_capture_access() -> bool {
-    unsafe { CGPreflightScreenCaptureAccess() != 0 }
-}
+// 2026-07-23 架构解耦：FFI 绑定提取至 platform::macos_display，此处仅保留业务逻辑。
 
 /// 截图前的权限闸门：没有屏幕录制权限就主动触发系统授权弹窗，
 /// 并返回清晰的可操作提示。这解决了之前「screencapture -x 无 UI 不弹窗、
@@ -997,12 +916,7 @@ pub fn check_screen_capture_access() -> bool {
 pub fn request_screen_capture_access() -> bool {
     #[cfg(target_os = "macos")]
     {
-        // 先预检：已授权就直接返回，避免重复弹窗
-        if mac_has_screen_capture_access() {
-            return true;
-        }
-        // 请求权限——会弹出系统授权对话框
-        unsafe { CGRequestScreenCaptureAccess() != 0 }
+        crate::platform::macos_display::request_screen_capture_access()
     }
     #[cfg(not(target_os = "macos"))]
     {

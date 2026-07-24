@@ -4,7 +4,8 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { cleanOcrText } from '../../ai/ocrClean';
+import { cleanOcrText, createToolExecutor } from '../../ai';
+import type { AiToolHost, NormRect } from '../../ai';
 import {
   openAiWindow,
   pushAiContext,
@@ -12,8 +13,6 @@ import {
   EVT_COMMIT,
   type AiContext,
 } from '../../../ai-window/bridge';
-import { createToolExecutor } from '../../ai/aiTools';
-import type { AiToolHost, NormRect } from '../../ai/aiTools';
 import type { OcrResult, AnnotationObject } from '../types';
 import { clamp01, genAnnoId, normToPx, cropDataUrl } from '../utils/helpers';
 

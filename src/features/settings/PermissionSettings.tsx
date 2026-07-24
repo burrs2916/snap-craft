@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { useI18n, t } from '../../i18n';
+import { isWindows } from '../../shared/platform';
 import './PermissionSettings.css';
 
 interface PermissionState {
@@ -83,9 +84,7 @@ export function PermissionSettings() {
     } catch {
       // 兜底：跨平台安全 — Windows 跳 ms-settings，macOS 跳 Apple 系统设置，
       // 杜绝「Windows 落到 x-apple.systempreferences: 专属 URL」导致的无声失效。
-      const isWin =
-        typeof navigator !== 'undefined' && /Windows/i.test(navigator.userAgent);
-      const target = isWin
+      const target = isWindows()
         ? 'ms-settings:privacy'
         : 'x-apple.systempreferences:com.apple.preference.security';
       try {

@@ -10,6 +10,8 @@
 
 import { save as saveDialog } from '@tauri-apps/plugin-dialog';
 import { invoke } from '@tauri-apps/api/core';
+// 平台检测统一使用共享模块（消除各文件重复的 UA 判断）
+import { isWindows, pathSep } from '../../../shared/platform';
 
 const LAST_DIR_KEY = 'snapcraft-ai-last-dir';
 const DEFAULT_BASENAME = 'snapcraft-ai';
@@ -78,23 +80,6 @@ export interface BuildDefaultPathOpts {
   prefix?: string; // 命名前缀，默认 "snapcraft-ai"
   /** 是否加时间戳（默认 true；批量场景可关掉） */
   withTs?: boolean;
-}
-
-/**
- * 当前是否 Windows。依赖零：沿用本 App 的 `detectPlatformFromUA` 思路用 UA 判定，
- * 避免为这一个工具函数引入 @tauri-apps/plugin-os 依赖。
- * （UA 在渲染进程稳定可读，与后端 `std::env::consts::OS` 判定一致。）
- */
-function isWindows(): boolean {
-  if (typeof navigator !== 'undefined' && navigator.userAgent) {
-    return /Windows/i.test(navigator.userAgent);
-  }
-  return false;
-}
-
-/** 当前平台的路径分隔符：Windows 用反斜杠，其余（macOS/Linux）用正斜杠。 */
-function pathSep(): string {
-  return isWindows() ? '\\' : '/';
 }
 
 /** 生成 saveDialog 的 defaultPath：lastDir + sanitize(hint) + ts + ext */

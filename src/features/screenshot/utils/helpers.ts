@@ -1,21 +1,18 @@
 // ===== 共享辅助函数 =====
 // 从 EnhancedScreenshotApp.tsx 提取，供 OCR / AI / 编辑器等多模块复用。
+//
+// 2026-07-23 架构解耦：几何类型与计算（NormRect / clamp01 / normToPx）
+// 已迁移至 shared/geometry.ts，打破 screenshot ↔ ai 循环依赖。
+// 本文件保留 re-export 确保既有导入路径不受影响。
 
 import { invoke } from '@tauri-apps/api/core';
-import type { NormRect } from '../../ai/aiTools';
+
+// 向后兼容：此前从 aiTools 导入 NormRect，现统一从 shared/geometry 导入
+export { clamp01, normToPx, type NormRect, type NormPoint } from '../../../shared/geometry';
+import { clamp01 } from '../../../shared/geometry';
 
 // ── 通用 ──
-export const clamp01 = (v: any): number => Math.max(0, Math.min(1, Number(v) || 0));
 export const genAnnoId = () => `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
-
-/** 归一化矩形(0~1) → 原图像素坐标 */
-export function normToPx(r: NormRect, W: number, H: number) {
-  const x = Math.round(clamp01(r.x) * W);
-  const y = Math.round(clamp01(r.y) * H);
-  const w = Math.round(clamp01(r.w) * W);
-  const h = Math.round(clamp01(r.h) * H);
-  return { x, y, w, h };
-}
 
 /** 从源图 dataURL 裁剪指定像素区域，返回新的 dataURL（供区域 OCR 使用） */
 export function cropDataUrl(src: string, x: number, y: number, w: number, h: number): Promise<string> {

@@ -266,6 +266,9 @@ pub async fn read_clipboard_text() -> Result<String, String> {
 /// 将纯文本（如 OCR 识别结果）写入指定文件路径。
 /// 与 save_screenshot 平级、互不干扰：前者写图片字节，本命令写 UTF-8 文本。
 /// 由前端「导出文本」按钮在拿到用户选择的保存路径后调用。
+///
+/// 跨平台行尾处理：Windows 上把 \n 转为 \r\n，确保记事本等编辑器正确换行；
+/// macOS/Linux 保持 \n 不变。
 #[tauri::command]
 pub async fn save_text_file(
     _app: AppHandle,
@@ -274,7 +277,16 @@ pub async fn save_text_file(
 ) -> Result<(), String> {
     clog!("ocr", "save_text_file 调用: 长度={} 路径={}", content.len(), file_path);
     let path = Path::new(&file_path);
-    store::write_bytes(path, content.as_bytes()).map_err(|e| {
+    // Windows 行尾规范化：\r\n 是 Windows 文本文件的标准行尾，
+    // 记事本 / WPS / VS Code 等编辑器依赖它正确换行。
+    #[cfg(target_os = "windows")]
+    let bytes = {
+        let normalized = content.replace("\r\n", "\n").replace('\n', "\r\n");
+        normalized.into_bytes()
+    };
+    #[cfg(not(target_os = "windows"))]
+    let bytes = content.into_bytes();
+    store::write_bytes(path, &bytes).map_err(|e| {
         clog!("ocr", "写入文本文件失败: {:?} err={}", path, e);
         format!("写入文本文件失败: {}", e)
     })?;

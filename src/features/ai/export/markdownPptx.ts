@@ -1,5 +1,5 @@
 // src/features/ai/markdownPptx.ts
-// 零依赖 PPTX 生成：手搓 store 模式 ZIP（CRC32，无任何第三方库）+ 最小可用 OOXML。
+// 零依赖 PPTX 生成：复用 zipStore.ts 的 store 模式 ZIP 写入器 + 最小可用 OOXML。
 // 仅供 AI 助手模块「导出 PPT」使用。纯增量，不引入新依赖、不触碰 Rust。
 //
 // 设计取舍（MVP）：
@@ -7,20 +7,13 @@
 // - 支持：段落、无序列表(•)、有序列表(数字前缀)、引用(缩进灰斜体)、代码块(等宽)、表格行(降级等宽文本)。
 // - 截图/图片首版不内嵌（OOXML media 关系复杂，留作后续增量）。AI 输出的文字要点/列表直接成演示稿。
 
-import type { DocxImage } from './markdownDocx';
-import type { DocThemeId } from './markdownHtml';
+// 类型枢纽已移至 aiTypes.ts（消除循环类型依赖）
+import type { DocxImage, DocThemeId } from '../aiTypes';
+// 复用 zipStore 的 CRC32 + store 模式 ZIP 写入器（此前本文件内重复实现了 ~100 行）
+import { buildZip, dataUrlToBytes, type ZipEntry } from './zipStore';
 
-// 主题色与 DOCX / HTML 严格对齐：之前 PPTX 自带一套 6 主题（modern/classic/elegant/sunset/forest/rose），
-// 但 UI 仅暴露 5 套（modern/elegant/magazine/product/tech），导致 magazine/product/tech 静默回退 modern
-// → 用户选"杂志风"导出 PPTX 得到蓝色标题，与 HTML/DOCX 的珊瑚色不一致。
-// 现在统一到 DocThemeId 五套，颜色值与 markdownDocx 的 THEME_ACCENT 一致。
-const THEME_ACCENT: Record<DocThemeId, string> = {
-  modern: '4F46E5', // 靛蓝
-  elegant: '8B6F4E', // 暖棕
-  magazine: 'FF6B5E', // 珊瑚
-  product: '7C3AED', // 紫
-  tech: '06B6D4', // 青
-};
+// 主题色统一使用 themeConstants（消除各格式独立维护的颜色映射，确保 HTML/DOCX/PPTX 严格一致）
+import { THEME_ACCENT } from './themeConstants';
 
 /** 从 dataUrl 头解析实际图片格式 → PPTX media 文件扩展名。
  *  修复前：无论 PNG/JPEG 都命名为 imageN.png，PowerPoint 严格模式会"文件已损坏"或图片不显示。
@@ -44,120 +37,8 @@ export interface MarkdownToPptxOptions {
   images?: DocxImage[];
 }
 
-// ---------- CRC32 ----------
-const CRC_TABLE = (() => {
-  const t = new Uint32Array(256);
-  for (let n = 0; n < 256; n++) {
-    let c = n;
-    for (let k = 0; k < 8; k++) {
-      c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
-    }
-    t[n] = c >>> 0;
-  }
-  return t;
-})();
-
-function crc32(bytes: Uint8Array): number {
-  let c = 0xffffffff;
-  for (let i = 0; i < bytes.length; i++) {
-    c = CRC_TABLE[(c ^ bytes[i]) & 0xff] ^ (c >>> 8);
-  }
-  return (c ^ 0xffffffff) >>> 0;
-}
-
-// ---------- store 模式 ZIP（零依赖）----------
-interface ZipEntry {
-  name: string;
-  data: Uint8Array;
-}
-
-function zipStore(files: ZipEntry[]): Uint8Array {
-  const enc = new TextEncoder();
-  const chunks: Uint8Array[] = [];
-  const central: Uint8Array[] = [];
-  let offset = 0;
-  const now = new Date();
-  const time = ((now.getHours() << 11) | (now.getMinutes() << 5) | (now.getSeconds() >> 1)) & 0xffff;
-  const date = (((now.getFullYear() - 1980) << 9) | ((now.getMonth() + 1) << 5) | now.getDate()) & 0xffff;
-
-  for (const f of files) {
-    const nameBytes = enc.encode(f.name);
-    const crc = crc32(f.data);
-    const size = f.data.length;
-    const local = new Uint8Array(30 + nameBytes.length);
-    const dv = new DataView(local.buffer);
-    dv.setUint32(0, 0x04034b50, true);
-    dv.setUint16(4, 20, true);
-    dv.setUint16(6, 0x0800, true); // general flag: UTF-8 filename
-    dv.setUint16(8, 0, true); // method: store
-    dv.setUint16(10, time, true);
-    dv.setUint16(12, date, true);
-    dv.setUint32(14, crc, true);
-    dv.setUint32(18, size, true);
-    dv.setUint32(22, size, true);
-    dv.setUint16(26, nameBytes.length, true);
-    dv.setUint16(28, 0, true);
-    local.set(nameBytes, 30);
-
-    chunks.push(local, f.data);
-
-    const cd = new Uint8Array(46 + nameBytes.length);
-    const cdv = new DataView(cd.buffer);
-    cdv.setUint32(0, 0x02014b50, true);
-    cdv.setUint16(4, 20, true);
-    cdv.setUint16(6, 20, true);
-    cdv.setUint16(8, 0x0800, true);
-    cdv.setUint16(10, 0, true);
-    cdv.setUint16(12, time, true);
-    cdv.setUint16(14, date, true);
-    cdv.setUint32(16, crc, true);
-    cdv.setUint32(20, size, true);
-    cdv.setUint32(24, size, true);
-    cdv.setUint16(28, nameBytes.length, true);
-    cdv.setUint16(30, 0, true);
-    cdv.setUint16(32, 0, true);
-    cdv.setUint16(34, 0, true);
-    cdv.setUint16(36, 0, true);
-    cdv.setUint32(38, 0, true);
-    cdv.setUint32(42, offset, true);
-    cd.set(nameBytes, 46);
-    central.push(cd);
-
-    offset += local.length + f.data.length;
-  }
-
-  const centralSize = central.reduce((s, c) => s + c.length, 0);
-  const centralOffset = offset;
-  const eocd = new Uint8Array(22);
-  const edv = new DataView(eocd.buffer);
-  edv.setUint32(0, 0x06054b50, true);
-  edv.setUint16(4, 0, true);
-  edv.setUint16(6, 0, true);
-  edv.setUint16(8, files.length, true);
-  edv.setUint16(10, files.length, true);
-  edv.setUint32(12, centralSize, true);
-  edv.setUint32(16, centralOffset, true);
-  edv.setUint16(20, 0, true);
-
-  const all = [...chunks, ...central, eocd];
-  const total = all.reduce((s, c) => s + c.length, 0);
-  const out = new Uint8Array(total);
-  let pos = 0;
-  for (const c of all) {
-    out.set(c, pos);
-    pos += c.length;
-  }
-  return out;
-}
-
 // ---------- 图片内嵌辅助（PPTX media 部件）----------
-function base64ToBytes(dataUrl: string): Uint8Array {
-  const base64 = dataUrl.includes(',') ? dataUrl.split(',')[1] : dataUrl;
-  const bin = atob(base64);
-  const bytes = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-  return bytes;
-}
+// base64ToBytes 已复用 zipStore.ts 的 dataUrlToBytes（消除重复实现）
 
 // 从 dataUrl 头解码像素尺寸（PNG / JPEG），失败回退 16:9，用于按比例排布图片避免拉伸。
 function dataUrlDims(dataUrl: string): { w: number; h: number } {
@@ -196,14 +77,8 @@ function dataUrlDims(dataUrl: string): { w: number; h: number } {
 }
 
 // ---------- XML helpers ----------
-function esc(s: string): string {
-  return s
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&apos;');
-}
+// esc / splitRow / isTableSep 已复用共享 markdownParse 模块（消除 5 处重复）
+import { escXml as esc, splitRow, isTableSep } from '../../../shared/markdownParse';
 function encStr(s: string): Uint8Array {
   return new TextEncoder().encode(s);
 }
@@ -339,16 +214,7 @@ type BodyBlock =
   | { type: 'text'; lines: string[] }
   | { type: 'table'; header: string[]; aligns: string[]; rows: string[][] };
 
-function isTableSep(line: string): boolean {
-  const t = line.trim();
-  return t.length > 0 && /^[\s|:\-]+$/.test(t) && t.includes('-');
-}
-function splitRow(line: string): string[] {
-  let s = line.trim();
-  if (s.startsWith('|')) s = s.slice(1);
-  if (s.endsWith('|')) s = s.slice(0, -1);
-  return s.split('|').map((c) => c.trim());
-}
+// alignOf 保留本地实现：PPTX OOXML 需要短码 'l'/'r'/'ctr'，与共享 parseAlign 的 'left'/'center'/'right' 不同
 function alignOf(cell: string): 'l' | 'r' | 'ctr' | '' {
   const t = cell.trim();
   const left = t.startsWith(':');
@@ -393,9 +259,10 @@ function parseBodyBlocks(body: string[]): BodyBlock[] {
   return blocks;
 }
 
-/** 渲染单个 GFM 表格块为合法 OOXML <a:tbl>，含边框与表头底色 */
+/** 渲染单个 GFM 表格块为合法 OOXML <a:tbl>，含边框与表头底色（主题色感知） */
 function renderTableBlock(
   blk: Extract<BodyBlock, { type: 'table' }>,
+  accent: string,
 ): { xml: string; h: number; w: number } {
   const colCount = Math.max(blk.header.length, ...blk.rows.map((r) => r.length), 1);
   const norm = (cells: string[]): string[] => {
@@ -412,7 +279,7 @@ function renderTableBlock(
   const colW = Math.floor(totalW / colCount);
   const cellXml = (text: string, align: string, head: boolean): string => {
     const algn = align === 'l' ? 'l' : align === 'r' ? 'r' : align === 'ctr' ? 'ctr' : 'l';
-    const fill = head ? '<a:solidFill><a:srgbClr val="4F46E5"/></a:solidFill>' : '';
+    const fill = head ? `<a:solidFill><a:srgbClr val="${accent}"/></a:solidFill>` : '';
     const txColor = head ? '<a:solidFill><a:srgbClr val="FFFFFF"/></a:solidFill>' : '';
     return (
       `<a:tc><a:txBody><a:bodyPr/><a:lstStyle/>` +
@@ -542,7 +409,7 @@ function buildSlideXml(
       y += h + 140000;
       shapeId++;
     } else {
-      const { xml, h, w } = renderTableBlock(blk);
+      const { xml, h, w } = renderTableBlock(blk, accent);
       bodyShapes.push(`<p:graphicFrame>
         <p:nvGraphicFramePr><p:cNvPr id="${shapeId}" name="Table${shapeId}"/><p:cNvGraphicFramePr><a:graphicFrameLocks noGrp="1"/></p:cNvGraphicFramePr><p:nvPr/></p:nvGraphicFramePr>
         <p:xfrm><a:off x="600000" y="${y}"/><a:ext cx="${w}" cy="${h}"/></p:xfrm>
@@ -786,7 +653,7 @@ export function markdownToPptx(markdown: string, opts: MarkdownToPptxOptions = {
               const ext = mediaExtOfDataUrl(img.dataUrl);
               mediaName = `image${mediaCounter}.${ext}`;
               mediaNameOfIdx.set(idx, mediaName);
-              files.push({ name: `ppt/media/${mediaName}`, data: base64ToBytes(img.dataUrl) });
+              files.push({ name: `ppt/media/${mediaName}`, data: dataUrlToBytes(img.dataUrl)! });
             }
             pics.push({ relId: '', mediaName, caption: img.caption, dataUrl: img.dataUrl });
           }
@@ -802,7 +669,7 @@ export function markdownToPptx(markdown: string, opts: MarkdownToPptxOptions = {
           mediaCounter++;
           const ext = mediaExtOfDataUrl(img.dataUrl);
           const mediaName = `image${mediaCounter}.${ext}`;
-          files.push({ name: `ppt/media/${mediaName}`, data: base64ToBytes(img.dataUrl) });
+          files.push({ name: `ppt/media/${mediaName}`, data: dataUrlToBytes(img.dataUrl)! });
           pics.push({ relId: '', mediaName, caption: img.caption, dataUrl: img.dataUrl });
         }
       }
@@ -835,5 +702,5 @@ export function markdownToPptx(markdown: string, opts: MarkdownToPptxOptions = {
   files.push({ name: 'docProps/core.xml', data: encStr(coreXml(opts.title ?? '', new Date().toISOString().split('.')[0] + 'Z')) });
   files.push({ name: 'docProps/app.xml', data: encStr(appXml(n)) });
 
-  return zipStore(files);
+  return buildZip(files);
 }

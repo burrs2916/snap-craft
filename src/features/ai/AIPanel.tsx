@@ -15,40 +15,25 @@ import { AiMarkdown } from './aiMarkdown';
 import { chatOnce, estimateCost } from './aiClient';
 import { type AiToolHost, toolLabel } from './aiTools';
 import { requestRefresh, notifyAiCommit } from '../../ai-window/bridge';
-import { mdToHtml, DOC_THEMES } from './markdownHtml';
-import { markdownToDocx, type DocxImage } from './markdownDocx';
-import { markdownToPptx } from './markdownPptx';
-import { markdownToXlsx } from './markdownXlsx';
-import { buildZip, dataUrlToBytes } from './zipStore';
-import { pickExportPath, buildDefaultPath, rememberDirFromPath, revealInFolder, deriveFileHint, baseNameOf } from './exportPath';
-import { pushExportHistory, listExportHistory, clearExportHistory, type ExportHistoryItem } from './exportHistory';
-import type { AiApiType, AiChatTurn } from './aiTypes';
-import { t, getLang, isTauri } from '../../i18n';
+import { DOC_THEMES } from './export/markdownHtml';
+import type { DocxImage } from './export/markdownDocx';
+import { buildDefaultPath, deriveFileHint, baseNameOf } from './export/exportPath';
+import type { ExportHistoryItem } from './export/exportHistory';
+import type { AiApiType } from './aiTypes';
+import { t, getLang } from '../../i18n';
 import { invoke } from '@tauri-apps/api/core';
-import { save as saveDialog } from '@tauri-apps/plugin-dialog';
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import { printHtmlViaIframe, mdToPlainText, docStats, frontImageBlockHtml, firstHeading, fmtTime } from './aiUtils';
+import { mdToPlainText, docStats, firstHeading, fmtTime } from './aiUtils';
 import { AiTemplateManager } from './AiTemplateManager';
 import { AiHistoryOverlay } from './AiHistoryOverlay';
+import { loadSelection, saveSelection } from './lib/persistence';
+import { useExportActions } from './hooks/useExportActions';
+import type { ExportContext } from './export/exportService';
 
 
-// 多截图章节顺序持久化（按截图哈希分桶）：关闭面板后仍可恢复，避免图文报告顺序丢失
-const SEL_PREFIX = 'snapcraft-ai-sel:';
-const loadSel = (hash: string): string[] => {
-  try {
-    const raw = localStorage.getItem(SEL_PREFIX + hash);
-    return raw ? (JSON.parse(raw) as string[]) : [];
-  } catch {
-    return [];
-  }
-};
-const saveSel = (hash: string, ids: string[]) => {
-  try {
-    localStorage.setItem(SEL_PREFIX + hash, JSON.stringify(ids));
-  } catch {
-    /* 忽略写入失败 */
-  }
-};
+// 多截图章节顺序持久化：委托 lib/persistence（消除与 AIPanel 的重复实现）
+const loadSel = loadSelection;
+const saveSel = saveSelection;
 
 // 截图历史条目（与 Rust HistoryItem 对齐，仅取面板所需字段）
 interface HistoryItem {
@@ -172,23 +157,30 @@ export default function AIPanel({
   const [testMsg, setTestMsg] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [copiedRich, setCopiedRich] = useState(false);
-  const [exportMsg, setExportMsg] = useState<string | null>(null);
-  // 应用内预览层 HTML（Tauri 环境替代 window.open 弹窗；null 表示未打开）
-  const [previewHtml, setPreviewHtml] = useState<string | null>(null);
   // 面板内富文本二次编辑：编辑态下用 textarea 改 markdown 源码，完成后写回 output（setOutput 同步会话与落盘）
   const [isEditing, setIsEditing] = useState(false);
   const [editDraft, setEditDraft] = useState('');
-  const [exportErr, setExportErr] = useState(false);
-  // 导出成功后，记忆"上一次导出文件路径"，供"在 Finder 中显示"按钮使用。
-  // 跨 6 种格式复用：用户点过哪个格式的 reveal，下一次该格式成功后仍能 reveal。
-  // P1-2：持久化到 localStorage，重开应用后仍可定位上次导出。
-  const LAST_EXPORT_KEY = 'snapcraft-ai-last-exported-path';
-  const [lastExportedPath, setLastExportedPath] = useState<string | null>(() => {
-    try { return localStorage.getItem(LAST_EXPORT_KEY); } catch { return null; }
-  });
-  // 历史库导出的落盘路径（与实时导出区区分，让「在 Finder 显示 / 打开文件」双按钮出现在历史阅读器内，
-  // 而非挤在实时导出区，避免用户从历史区导出后找不到对应操作按钮）。
-  const [exporting, setExporting] = useState(false);
+
+  // 2026-07-23 架构解耦：导出状态与操作统一由 useExportActions hook 管理，
+  // 消除 AIPanel 内重复的 7 格式导出管线代码（~300 行）。
+  const {
+    exporting,
+    exportMsg,
+    exportErr,
+    lastExportedPath,
+    previewHtml,
+    doExport,
+    doExportZip,
+    doPreview,
+    doCopyRich,
+    revealExported,
+    openExported,
+    closePreview,
+    clearMsg: clearExportMsg,
+    setLastExportedPath,
+    getExportHistory,
+    doClearExportHistory,
+  } = useExportActions();
   // 流式输出独立弹出框（解决右侧抽屉太局促的体验问题）：
   //   popupOpen：本组件实例内的显示状态；由 isStreaming 自动驱动首次出现
   //   popupDismissed：用户主动关闭后，本轮流式期间不再自动弹（用户可点 📌 钉住恢复）
@@ -332,22 +324,7 @@ export default function AIPanel({
     setPopupDismissed(false);
   }, [convKey]);
 
-  // P1-2：lastExportedPath / historyExportedPath 持久化——变更时同步写 localStorage，
-  // 重开应用后「在 Finder 显示 / 打开文件」仍可定位上次导出。失败静默不影响主流程。
-  useEffect(() => {
-    try {
-      if (lastExportedPath) localStorage.setItem(LAST_EXPORT_KEY, lastExportedPath);
-      else localStorage.removeItem(LAST_EXPORT_KEY);
-    } catch { /* 忽略 */ }
-  }, [lastExportedPath]);
-
-  // P1-3：导出成功反馈自动消失（4s）——成功消息停留过久会让用户误以为还在导出。
-  // 错误消息（exportErr=true）保留，需用户手动关闭或下次操作清空。
-  useEffect(() => {
-    if (!exportMsg || exportErr) return;
-    const timer = setTimeout(() => setExportMsg(null), 4000);
-    return () => clearTimeout(timer);
-  }, [exportMsg, exportErr]);
+  // lastExportedPath 持久化 + exportMsg 自动消失已由 useExportActions hook 内部管理
 
 
   if (!open) return null;
@@ -433,6 +410,21 @@ export default function AIPanel({
     return imgs;
   };
 
+  // 构建导出上下文：把 AIPanel 当前状态组装为 exportService 所需的 ExportContext。
+  // resolveContext 会自动检测 SNAP 标记并分配 sectionImages / images。
+  const buildExportContext = useCallback((): ExportContext => {
+    const md = output ?? '';
+    return {
+      markdown: md,
+      title: firstHeading(md) || presetLabel(activePreset),
+      subtitle: goal,
+      theme: config.theme ?? 'modern',
+      images: orderedImages(),
+      fileHint: deriveFileHint(goal),
+      tocTitle: t('ai.toc'),
+    };
+  }, [output, activePreset, goal, config.theme, attachImage, agentMode, sentinelMode, visionImg, selectedOrder, history]);
+
   // ===== 一键成报告（图文混排）=====
   // 强制携带当前截图与识别文字，确保章节标记 <!--SNAP:k--> 与图片顺序严格对应。
   const handleMakeReport = () => {
@@ -491,7 +483,7 @@ export default function AIPanel({
   const handleFollow = () => {
     const msg = follow.trim();
     if (!msg || isStreaming) return;
-    setExportMsg(null);
+    clearExportMsg();
     setFollow('');
     chat(msg, {
       preset: activePreset,
@@ -513,64 +505,17 @@ export default function AIPanel({
     }
   };
 
-  // 复制为富文本：把 Markdown 渲染成 HTML 片段，以 text/html 写入剪贴板，
-  // 粘贴到 Word / 邮件 / 富文本编辑器时保留结构（标题/列表/表格/引用/代码），
-  // 而非裸 Markdown 源码（带 **、| 等标记）。text/plain 兜底为 Markdown 源码。
+  // 复制为富文本：委托 useExportActions hook，消除重复的 HTML 构建 + 剪贴板写入逻辑
   const handleCopyRich = async () => {
     if (!output) return;
-    try {
-      const hasSec = hasSnapMarkers(output);
-      const clean = stripSnapMarkers(output);
-      // 图文报告（含 <!--SNAP:k-->）必须传「未剥离标记」的原文给渲染器——
-      // 渲染器据标记内嵌对应截图；若先 strip 掉标记，sectionImages 永不触发 → 富文本复制丢图。
-      const source = hasSec ? output : clean;
-      let html = mdToHtml(source, {
-        fragment: true,
-        sectionImages: hasSec ? orderedImages() : undefined,
-        theme: config.theme,
-      });
-      // 纯文档（无章节标记）同样把来源截图整块前置内嵌，与「导出 / 预览」行为对齐，
-      // 否则粘贴到 Word / 邮件的纯文档看不到截图证据。
-      if (!hasSec) {
-        const imgs = orderedImages();
-        if (imgs.length) {
-          const imgHtml = imgs
-            .map(
-              (im) =>
-                `<figure class="doc-fig"><img class="doc-img" src="${im.dataUrl}" alt="" /><figcaption class="doc-cap">${im.caption ?? ''}</figcaption></figure>`,
-            )
-            .join('');
-          html = imgHtml + html;
-        }
-      }
-      const htmlBlob = new Blob([html], { type: 'text/html' });
-      const textBlob = new Blob([clean], { type: 'text/plain' });
-      await navigator.clipboard.write([
-        new ClipboardItem({
-          'text/html': htmlBlob,
-          'text/plain': textBlob,
-        }),
-      ]);
+    const ok = await doCopyRich(buildExportContext(), stripSnapMarkers(output));
+    if (ok) {
       setCopiedRich(true);
       setTimeout(() => setCopiedRich(false), 1500);
-    } catch {
-      /* 忽略复制失败（如剪贴板权限受限、环境不支持 ClipboardItem） */
     }
   };
 
-  // 用系统默认应用打开已导出的文件。
-  // 调用后端 open_external 命令（open.rs），内部对本地文件路径走 opener 插件的 open_path，
-  // 对 URL 走 open_url，已正确注册在 invoke_handler。
-  const openExported = async (path: string) => {
-    if (!path) return;
-    try {
-      await invoke('open_external', { target: path });
-    } catch (e: any) {
-      const msg = e?.message ? String(e.message) : String(e);
-      setExportMsg(t('ai.exportFail', { msg }));
-      setExportErr(true);
-    }
-  };
+  // openExported 已由 useExportActions hook 提供，无需本地重复实现
 
   // 进入/退出「编辑文档」态：进入时把当前 output 载入草稿 textarea；
   // 完成（退出）时写回 store——setOutput 会同步对话线程末条 assistant 并落盘，保证「编辑→重导」与「重开恢复」同源。
@@ -616,258 +561,42 @@ export default function AIPanel({
     }
   };
 
-  // 导出为文件（复用 Rust save_text_file，零新后端）
+  // ===== 导出操作：统一委托 useExportActions hook =====
+  // 此前 AIPanel 内各自实现了 7 格式导出管线（MD/TXT/HTML/DOCX/PPTX/XLSX/PDF），
+  // 与 exportService.ts + useExportActions.ts 完全重复。现统一走 hook，消除 ~250 行冗余。
   const handleExport = async (fmt: 'md' | 'txt' | 'html') => {
-    if (!output || exporting) return;
-    // 含章节标记时，把「未剥离标记」的原文交给 HTML 渲染器（渲染器据标记内嵌截图）；
-    // .md / .txt 仍需剥离标记保持干净。
-    const hasSec = hasSnapMarkers(output);
-    const clean = stripSnapMarkers(output);
-    const isHtml = fmt === 'html';
-    let content: string;
-    if (isHtml) {
-      let html = mdToHtml(hasSec ? output : clean, {
-        title: firstHeading(hasSec ? output : clean) || presetLabel(activePreset),
-        subtitle: goal,
-        tocTitle: t('ai.toc'),
-        sectionImages: hasSec ? orderedImages() : undefined,
-        theme: config.theme,
-      });
-      // 回退：纯文档（无章节标记）也把来源截图整块内嵌到正文前（顶部），与 DOCX/PPTX 行为对齐，
-      // 否则「导出的 HTML 把截图丢在底部、而 docx 在顶部」会造成明显的导出位置不一致。
-      if (!hasSec) {
-        const block = frontImageBlockHtml(orderedImages());
-        if (block) html = html.replace('<main class="doc-main">', block + '<main class="doc-main">');
-      }
-      content = html;
-    } else {
-      content = fmt === 'md' ? clean : mdToPlainText(clean);
-    }
-    const path = await pickExportPath({
-      ext: fmt,
-      hint: deriveFileHint(goal),
-      filters: [{ name: fmt.toUpperCase(), extensions: [fmt] }],
-    });
-    if (!path) return;
-    try {
-      await invoke('save_text_file', { content, filePath: path });
-      const name = baseNameOf(path);
-      setExportMsg(t('ai.exportOk', { path: name }));
-      setExportErr(false);
-      setLastExportedPath(path);
-      pushExportHistory({ path, format: fmt, title: firstHeading(output) || goal, time: Date.now() });
-    } catch (e: any) {
-      const msg = e?.message ? String(e.message) : String(e);
-      setExportMsg(t('ai.exportFail', { msg }));
-      setExportErr(true);
-    }
+    if (!output) return;
+    await doExport(buildExportContext(), fmt);
   };
 
-  // 导出真实 Word(.docx)：Markdown → docx，并按章节标记把来源截图内嵌到对应小节前
-  // （图文报告）；未含标记时回退为整块前置内嵌（截图工具独有价值）。
   const handleExportDocx = async () => {
-    if (!output || exporting) return;
-    setExporting(true);
-    setExportMsg(null);
-    try {
-      const useSections = hasSnapMarkers(output);
-      const imgs = orderedImages();
-      // 含章节标记时同样把未剥离的原文交给 docx 渲染器（渲染器据标记内嵌章节截图）
-      const bytes = await markdownToDocx(useSections ? output : stripSnapMarkers(output), {
-        title: firstHeading(useSections ? output : stripSnapMarkers(output)) || presetLabel(activePreset),
-        subtitle: goal,
-        theme: config.theme,
-        tocTitle: t('ai.toc'),
-        sectionImages: useSections ? imgs : [],
-        images: useSections ? [] : imgs,
-      });
-      const path = await pickExportPath({
-        ext: 'docx',
-        hint: deriveFileHint(goal),
-        filters: [{ name: 'Word', extensions: ['docx'] }],
-      });
-      if (!path) {
-        setExporting(false);
-        return;
-      }
-      await invoke('save_binary_file', { bytes: Array.from(bytes), filePath: path });
-      const name = baseNameOf(path);
-      setExportMsg(t('ai.exportOk', { path: name }));
-      setExportErr(false);
-      setLastExportedPath(path);
-      pushExportHistory({ path, format: 'docx', title: firstHeading(output) || goal, time: Date.now() });
-    } catch (e: any) {
-      const msg = e?.message ? String(e.message) : String(e);
-      setExportMsg(t('ai.exportFail', { msg }));
-      setExportErr(true);
-    } finally {
-      setExporting(false);
-    }
+    if (!output) return;
+    await doExport(buildExportContext(), 'docx');
   };
 
-  // 导出 PowerPoint(.pptx)：Markdown 按 #/## 标题断页成幻灯片（手搓 OOXML+ZIP，零依赖）。
-  // 图文报告：含 SNAP 标记时按标记把对应截图内嵌到对应幻灯片；否则整块前置内嵌（对齐 docx 行为）。
   const handleExportPptx = async () => {
-    if (!output || exporting) return;
-    setExporting(true);
-    setExportMsg(null);
-    try {
-      const useSections = hasSnapMarkers(output);
-      const imgs = orderedImages();
-      const bytes = markdownToPptx(useSections ? output : stripSnapMarkers(output), {
-        title: firstHeading(useSections ? output : stripSnapMarkers(output)) || presetLabel(activePreset),
-        subtitle: goal,
-        theme: config.theme,
-        sectionImages: useSections ? imgs : [],
-        images: useSections ? [] : imgs,
-      });
-      const path = await pickExportPath({
-        ext: 'pptx',
-        hint: deriveFileHint(goal),
-        filters: [{ name: 'PowerPoint', extensions: ['pptx'] }],
-      });
-      if (!path) {
-        setExporting(false);
-        return;
-      }
-      await invoke('save_binary_file', { bytes: Array.from(bytes), filePath: path });
-      const name = baseNameOf(path);
-      setExportMsg(t('ai.exportOk', { path: name }));
-      setExportErr(false);
-      setLastExportedPath(path);
-      pushExportHistory({ path, format: 'pptx', title: firstHeading(output) || goal, time: Date.now() });
-    } catch (e: any) {
-      const msg = e?.message ? String(e.message) : String(e);
-      setExportMsg(t('ai.exportFail', { msg }));
-      setExportErr(true);
-    } finally {
-      setExporting(false);
-    }
+    if (!output) return;
+    await doExport(buildExportContext(), 'pptx');
   };
 
-  // 导出 Excel(.xlsx)：Markdown 表格 → 可编辑电子表格（与 privdoc-ai 的 xlsx 导出对齐）。
-  // 文档含表格时按表生成多 sheet；无表格时回退为「内容」sheet（每行一段），保证任何结果都能落地成 Excel。
-  // 截图工具的独有价值：配合「提取表格」预设，把截图里的数据/表格一键变成可编辑 Excel。
   const handleExportXlsx = async () => {
-    if (!output || exporting) return;
-    setExporting(true);
-    setExportMsg(null);
-    try {
-      const md = stripSnapMarkers(output);
-      const bytes = markdownToXlsx(md, presetLabel(activePreset));
-      const path = await pickExportPath({
-        ext: 'xlsx',
-        hint: deriveFileHint(goal),
-        filters: [{ name: 'Excel', extensions: ['xlsx'] }],
-      });
-      if (!path) {
-        setExporting(false);
-        return;
-      }
-      await invoke('save_binary_file', { bytes: Array.from(bytes), filePath: path });
-      const name = baseNameOf(path);
-      setExportMsg(t('ai.exportOk', { path: name }));
-      setExportErr(false);
-      setLastExportedPath(path);
-      pushExportHistory({ path, format: 'xlsx', title: firstHeading(output) || goal, time: Date.now() });
-    } catch (e: any) {
-      const msg = e?.message ? String(e.message) : String(e);
-      setExportMsg(t('ai.exportFail', { msg }));
-      setExportErr(true);
-    } finally {
-      setExporting(false);
-    }
+    if (!output) return;
+    await doExport(buildExportContext(), 'xlsx', presetLabel(activePreset));
   };
 
-  // 导出 PDF：复用 mdToHtml 渲染（含章节内嵌截图），再用隐藏 iframe 触发打印（可「另存为 PDF」）
   const handleExportPdf = async () => {
-    if (!output || exporting) return;
-    // P1-1/P1-9：与其他 5 种格式对齐——设 loading 态 + finally 收尾，
-    // 用户点击后立即有「导出中」反馈，异常时也统一复位 exporting。
-    setExporting(true);
-    setExportMsg(null);
-    try {
-      const useSections = hasSnapMarkers(output);
-      const imgs = orderedImages();
-      const md = useSections ? output : stripSnapMarkers(output);
-      let html = mdToHtml(md, {
-        title: firstHeading(md) || presetLabel(activePreset),
-        subtitle: goal,
-        tocTitle: t('ai.toc'),
-        sectionImages: useSections ? imgs : undefined,
-        theme: config.theme,
-      });
-      if (!useSections) {
-        // 回退：把全部截图整块内嵌到正文前（顶部，沿用主题化 .doc-fig 样式），与 DOCX/PPTX 对齐
-        const block = frontImageBlockHtml(imgs);
-        if (block) html = html.replace('<main class="doc-main">', block + '<main class="doc-main">');
-      }
-      const err = await printHtmlViaIframe(html);
-      if (err) {
-        setExportMsg(t('ai.exportFail', { msg: err }));
-        setExportErr(true);
-        return;
-      }
-      // PDF 是「打印式」导出：文件由用户在系统打印弹窗里「存储为 PDF」落地，
-      // 应用拿不到最终路径，所以只给诚实提示、不写 lastExportedPath（避免「在 Finder 中显示」指向不存在文件）。
-      setExportMsg(t('ai.exportPdfHint'));
-      setExportErr(false);
-    } catch (e: any) {
-      const msg = e?.message ? String(e.message) : String(e);
-      setExportMsg(t('ai.exportFail', { msg }));
-      setExportErr(true);
-    } finally {
-      setExporting(false);
-    }
+    if (!output) return;
+    await doExport(buildExportContext(), 'pdf');
   };
 
-  // 预览：把主题化 HTML 打开预览。Tauri 环境 window.open 弹窗会被 webview 拦截，
-  // 改用应用内 iframe(srcDoc) 预览层（同源、必被允许），零 Rust、不依赖临时文件；
-  // 纯前端 dev 环境保留 Blob + 新标签预览。
   const handlePreview = () => {
-    if (!output || exporting) return;
-    setExportMsg(null);
-    try {
-      const md = stripSnapMarkers(output);
-      const useSections = hasSnapMarkers(output);
-      let html = mdToHtml(md, {
-        title: firstHeading(md) || presetLabel(activePreset),
-        subtitle: goal,
-        tocTitle: t('ai.toc'),
-        sectionImages: useSections ? orderedImages() : undefined,
-        theme: config.theme,
-      });
-      // 回退：纯文档（无章节标记）也把来源截图整块内嵌到正文前（顶部），与 DOCX/PPTX 导出、HTML 文件导出对齐，
-      // 让应用内预览与最终产物视觉一致。
-      if (!useSections) {
-        const block = frontImageBlockHtml(orderedImages());
-        if (block) html = html.replace('<main class="doc-main">', block + '<main class="doc-main">');
-      }
-      if (isTauri()) {
-        // Tauri 运行时：应用内预览，规避 window.open 被拦截的报错
-        setPreviewHtml(html);
-        return;
-      }
-      const blob = new Blob([html], { type: 'text/html' });
-      const url = URL.createObjectURL(blob);
-      const win = window.open(url, '_blank');
-      if (!win) {
-        setExportMsg(t('ai.previewBlocked'));
-        setExportErr(true);
-        return;
-      }
-      // 预览窗口加载后释放 Blob URL（延迟避免提前回收）
-      setTimeout(() => URL.revokeObjectURL(url), 60000);
-    } catch (e: any) {
-      const msg = e?.message ? String(e.message) : String(e);
-      setExportMsg(t('ai.exportFail', { msg }));
-      setExportErr(true);
-    }
+    if (!output) return;
+    doPreview(buildExportContext());
   };
 
   // 快速润色：以上一轮结果为输入，追加润色指令再生成
   const handleRefine = (instruction: string) => {
-    setExportMsg(null);
+    clearExportMsg();
     refine(instruction);
   };
 
@@ -1337,7 +1066,7 @@ export default function AIPanel({
               className="ai-btn ai-btn-sm"
               onClick={() => {
                 setShowExportHistory((v) => !v);
-                setExportHistoryList(listExportHistory());
+                setExportHistoryList(getExportHistory());
               }}
               title={t('ai.exportHistory')}
             >
@@ -1361,13 +1090,7 @@ export default function AIPanel({
                       <button
                         className="ai-btn ai-btn-sm ai-btn-reveal"
                         title={t('ai.exportRevealTitle')}
-                        onClick={async () => {
-                          const err = await revealInFolder(it.path);
-                          if (err) {
-                            setExportMsg(t('ai.exportFail', { msg: err }));
-                            setExportErr(true);
-                          }
-                        }}
+                        onClick={() => revealExported(it.path)}
                       >
                         {t('ai.exportReveal')}
                       </button>
@@ -1376,7 +1099,7 @@ export default function AIPanel({
                   <button
                     className="ai-link ai-link-danger"
                     onClick={() => {
-                      clearExportHistory();
+                      doClearExportHistory();
                       setExportHistoryList([]);
                     }}
                   >
@@ -1462,13 +1185,7 @@ export default function AIPanel({
                   <button
                     className="ai-btn ai-btn-sm ai-btn-reveal"
                     title={t('ai.exportRevealTitle')}
-                    onClick={async () => {
-                      const err = await revealInFolder(lastExportedPath);
-                      if (err) {
-                        setExportMsg(t('ai.exportFail', { msg: err }));
-                        setExportErr(true);
-                      }
-                    }}
+                    onClick={() => revealExported(lastExportedPath)}
                   >
                     {t('ai.exportReveal')}
                   </button>
@@ -2010,7 +1727,7 @@ export default function AIPanel({
                     className="ai-btn ai-btn-sm"
                     onClick={() => {
                       setShowExportHistory((v) => !v);
-                      setExportHistoryList(listExportHistory());
+                      setExportHistoryList(getExportHistory());
                     }}
                     title={t('ai.exportHistory')}
                   >
@@ -2035,13 +1752,7 @@ export default function AIPanel({
                           <button
                             className="ai-btn ai-btn-sm ai-btn-reveal"
                             title={t('ai.exportRevealTitle')}
-                            onClick={async () => {
-                              const err = await revealInFolder(it.path);
-                              if (err) {
-                                setExportMsg(t('ai.exportFail', { msg: err }));
-                                setExportErr(true);
-                              }
-                            }}
+                            onClick={() => revealExported(it.path)}
                           >
                             {t('ai.exportReveal')}
                           </button>
@@ -2050,7 +1761,7 @@ export default function AIPanel({
                       <button
                         className="ai-link ai-link-danger"
                         onClick={() => {
-                          clearExportHistory();
+                          doClearExportHistory();
                           setExportHistoryList([]);
                         }}
                       >
@@ -2101,13 +1812,7 @@ export default function AIPanel({
                       <button
                         className="ai-btn ai-btn-sm ai-btn-reveal"
                         title={t('ai.exportRevealTitle')}
-                        onClick={async () => {
-                          const err = await revealInFolder(lastExportedPath);
-                          if (err) {
-                            setExportMsg(t('ai.exportFail', { msg: err }));
-                            setExportErr(true);
-                          }
-                        }}
+                        onClick={() => revealExported(lastExportedPath)}
                       >
                         {t('ai.exportReveal')}
                       </button>
@@ -2150,7 +1855,7 @@ export default function AIPanel({
         <div
           className="ai-preview-overlay"
           onMouseDown={(e) => {
-            if (e.target === e.currentTarget) setPreviewHtml(null);
+            if (e.target === e.currentTarget) closePreview();
           }}
         >
           <div className="ai-preview-modal">
@@ -2159,7 +1864,7 @@ export default function AIPanel({
               <button
                 type="button"
                 className="ai-panel-close"
-                onClick={() => setPreviewHtml(null)}
+                onClick={() => closePreview()}
                 title={t('ai.close')}
               >
                 ✕

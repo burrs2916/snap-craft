@@ -5,7 +5,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { save } from '@tauri-apps/plugin-dialog';
-import { cleanOcrText } from '../../ai/ocrClean';
+import { cleanOcrText } from '../../ai';
 import { useScreenshotStore } from '../store/screenshotStore';
 import { openEditorWindow } from '../components/EditorWindow';
 import type { OcrResult, OcrBlock, AnnotationObject } from '../types';

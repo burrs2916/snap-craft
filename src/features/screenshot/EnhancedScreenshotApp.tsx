@@ -21,21 +21,9 @@ import { BatchBar, BatchOcrPanel, AiBatchPanel } from './components/BatchOperati
 import { OcrPanel } from './components/OcrPanel';
 import { clamp01, genAnnoId, normToPx, cropDataUrl, flog } from './utils/helpers';
 
-/**
- * 平台兜底检测（不依赖 IPC）：当 `get_platform` 命令调用失败时，
- * 用 `navigator.userAgent` 判定平台，杜绝「失败回落到 macOS」导致
- * Windows / Linux 误走 macOS 专属分支（如快捷键提示 ⌘⇧、区域截屏走
- * screencapture -i 等）——这是跨平台对等（parity）的关键边界用例（R2）。
- * 返回值与 Rust `std::env::consts::OS` 一致：'macos' | 'windows' | 'linux'。
- */
-function detectPlatformFromUA(): string {
-  if (typeof navigator === 'undefined') return 'linux';
-  const ua = navigator.userAgent;
-  if (/Windows/i.test(ua)) return 'windows';
-  if (/Mac OS X|Macintosh/i.test(ua)) return 'macos';
-  if (/Linux/i.test(ua)) return 'linux';
-  return 'linux';
-}
+// 平台兜底检测统一使用共享模块（消除各文件重复的 UA 判断）
+import { detectPlatform } from '../../shared/platform';
+const detectPlatformFromUA = detectPlatform;
 
 // 截图前安全隐藏主窗口。
 // ⚠️ macOS 原生全屏（绿灯/最大化）会把窗口放进独立的 Space（专属全屏空间）。
