@@ -41,6 +41,12 @@ export function saveMemories(key: string, mem: AiMemory[]) {
   } catch { /* 忽略写入失败 */ }
 }
 
+export function removeMemories(key: string): void {
+  try {
+    localStorage.removeItem(MEM_PREFIX + key);
+  } catch { /* 忽略 */ }
+}
+
 // ── 检索 ──
 /** 把文本切成检索 token：拉丁/数字词（小写）+ CJK 单字 + CJK 二元组 */
 export function tokenize(text: string): string[] {

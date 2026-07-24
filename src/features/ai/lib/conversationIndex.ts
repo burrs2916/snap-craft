@@ -5,7 +5,8 @@
 
 import type { AiChatTurn } from '../aiTypes';
 import type { AiPreset } from '../aiPresets';
-import { loadConversation, saveConversation, removeConversation } from './persistence';
+import { loadConversation, saveConversation, removeConversation, removeSelection } from './persistence';
+import { removeMemories } from '../aiMemory';
 import { t } from '../../../i18n';
 
 // ── 索引存储 ──
@@ -203,4 +204,62 @@ export function forkConversation(
     saveConvIndex(list);
   }
   return newHash;
+}
+
+// ── 脏数据清理：删除截图时级联清除所有关联 AI 数据 ──
+
+const CONV_PREFIX = 'snapcraft-ai-conv:';
+const SEL_PREFIX = 'snapcraft-ai-sel:';
+const MEM_PREFIX = 'snapcraft-ai-mem:';
+
+/**
+ * 彻底清除某张截图关联的全部 AI localStorage 数据：
+ * - conv:<hash>（对话线程）
+ * - sel:<hash>（多截图选择顺序）
+ * - mem:<hash>（AI 长期记忆）
+ * - conv:<hash>::fork-*（所有 fork 分支对话）
+ * - conv-index 中 hash 匹配或 parent 指向该 hash 的条目
+ */
+export function purgeAiDataForHash(hash: string): void {
+  // 1. 移除主键
+  removeConversation(hash);
+  removeSelection(hash);
+  removeMemories(hash);
+
+  // 2. 扫描并移除所有 fork 分支（键格式：snapcraft-ai-conv:<hash>::fork-xxx）
+  const forkPrefix = CONV_PREFIX + hash + '::';
+  const keysToRemove: string[] = [];
+  for (let i = 0; i < localStorage.length; i++) {
+    const k = localStorage.key(i);
+    if (k && k.startsWith(forkPrefix)) keysToRemove.push(k);
+  }
+  keysToRemove.forEach((k) => localStorage.removeItem(k));
+
+  // 3. 清理 conv-index：移除自身 + 所有以该 hash 为 parent 的 fork 条目
+  const list = loadConvIndex();
+  const filtered = list.filter(
+    (m) => m.hash !== hash && m.parent !== hash && !m.hash.startsWith(hash + '::'),
+  );
+  if (filtered.length !== list.length) saveConvIndex(filtered);
+}
+
+/**
+ * 清空全部 AI localStorage 数据（用于「清空历史」场景）。
+ * 遍历所有键，移除 conv:/sel:/mem: 前缀及 conv-index。
+ */
+export function purgeAllAiData(): void {
+  const keysToRemove: string[] = [];
+  for (let i = 0; i < localStorage.length; i++) {
+    const k = localStorage.key(i);
+    if (
+      k &&
+      (k.startsWith(CONV_PREFIX) ||
+        k.startsWith(SEL_PREFIX) ||
+        k.startsWith(MEM_PREFIX) ||
+        k === INDEX_KEY)
+    ) {
+      keysToRemove.push(k);
+    }
+  }
+  keysToRemove.forEach((k) => localStorage.removeItem(k));
 }

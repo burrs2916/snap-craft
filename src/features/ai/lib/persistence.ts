@@ -112,3 +112,11 @@ export function saveSelection(hash: string, ids: string[]): void {
     /* 忽略写入失败 */
   }
 }
+
+export function removeSelection(hash: string): void {
+  try {
+    localStorage.removeItem(SEL_PREFIX + hash);
+  } catch {
+    /* 忽略 */
+  }
+}

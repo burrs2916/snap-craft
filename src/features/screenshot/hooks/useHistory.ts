@@ -2,9 +2,11 @@
 // 从 EnhancedScreenshotApp.tsx 提取的历史记录 CRUD + 搜索 + 持久化逻辑。
 // 职责单一：只管历史数据的增删查改与搜索过滤，不涉及截图/编辑/AI 等功能。
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
+import { convHash } from '../../ai/aiStore';
+import { purgeAiDataForHash, purgeAllAiData } from '../../ai/lib/conversationIndex';
 
 export interface HistoryEntry {
   id: string;
@@ -74,6 +76,10 @@ export function useHistory(
   const [history, setHistory] = useState<HistoryEntry[]>([]);
   const [historySearch, setHistorySearch] = useState('');
 
+  // 始终指向最新 history，供 deleteEntry 查找 dataUrl（避免将 history 加入 deps）
+  const historyRef = useRef(history);
+  historyRef.current = history;
+
   // 搜索过滤：匹配 OCR 文字或时间
   const filteredHistory = (() => {
     const q = historySearch.trim().toLowerCase();
@@ -133,6 +139,9 @@ export function useHistory(
       try {
         // 先关闭对应编辑窗，避免删除后遗留孤儿窗口（其关窗回写会静默失败）
         await closeEditorWindowById(id);
+        // 级联清除该截图关联的全部 AI localStorage 数据（对话/选择/记忆/fork/索引）
+        const entry = historyRef.current.find((x) => x.id === id);
+        if (entry) purgeAiDataForHash(convHash(entry.dataUrl));
         await invoke('delete_history', { id });
         setHistory((h) => h.filter((x) => x.id !== id));
         onDeleted?.(id);
@@ -150,6 +159,8 @@ export function useHistory(
       try {
         // 关闭所有编辑窗，避免清空后遗留孤儿窗口
         await closeAllEditorWindows();
+        // 级联清除全部 AI localStorage 数据（所有截图的对话/选择/记忆/索引）
+        purgeAllAiData();
         await invoke('clear_history');
         setHistory([]);
         flash(t('toast.historyCleared'), 'success');
