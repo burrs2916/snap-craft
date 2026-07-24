@@ -421,46 +421,19 @@ jobs:
           if-no-files-found: warn
 
       # ---- Build & Upload MSIX (Windows, 微软商城用) ----
-      # 使用 @choochmeque/tauri-windows-bundle 从已编译的 exe 生成 MSIX 包
-      # ---- Init Windows bundle tool (best-effort, 仅首次需要) ----
-      - name: Init tauri-windows-bundle (Windows)
+      # 使用 Windows SDK 自带的 makeappx.exe 直接打包（官方工具，稳定可靠）。
+      # 前置：tauri build 已生成 release exe + DLL。
+      # 产物：src-tauri/target/windows-store/SnapCraft_<ver>_x64.msix
+      # Store 提交时微软会重签，故无需自签证书。
+      - name: Build MSIX package (Windows, makeappx)
         if: matrix.platform == 'Windows'
-        continue-on-error: true
         shell: pwsh
         run: |
-          Write-Host "=== Initializing tauri-windows-bundle (creates MSIX template) ==="
-          # 生成 MSIX 模板(msix.template.xml / 资源清单)，未 init 时 build 会直接失败。
-          # 幂等：已 init 时该命令安全跳过。
-          # 根因：该工具 findProjectRoot() 在 -p 为相对路径('.') 时，因 path.dirname('.')==='.'
-          # 导致 while 循环不进入，直接抛 "Could not find Tauri project root"。
-          # 故不传 -p，让其回退到绝对路径 process.cwd()（CI 默认即仓库根 GITHUB_WORKSPACE）。
-          npx @choochmeque/tauri-windows-bundle@0.1.28 init 2>&1
+          Write-Host "=== Building MSIX with makeappx.exe (Windows SDK) ==="
+          .\src-tauri\windows-store\build-msix.ps1 -Target "${{ matrix.target }}"
           if ($LASTEXITCODE -ne 0) {
-            echo "::warning::tauri-windows-bundle init 失败（可忽略，build 步骤会再次尝试）。"
-          }
-
-      # ---- Build MSIX (best-effort, 微软商城用) ----
-      # MS Store 真实上架需：①在 src-tauri/tauri.microsoftstore.conf.json 填入
-      #   Partner Center 分配的 publisher / identity.name；②MSIX 由微软重签，
-      #   故 certificateThumbprint 留空、webviewInstallMode=emulation（不内嵌离线安装包）。
-      # 本步用默认配置生成「自签名 MSIX」仅作 sideload 冒烟测试；Store 提交请用
-      # `pnpm tauri build --config src-tauri/tauri.microsoftstore.conf.json` 产出未签名 MSIX。
-      - name: Build MSIX package (Windows)
-        if: matrix.platform == 'Windows'
-        continue-on-error: true   # 仅微软商城用；缺 init / Store 证书时本步失败,但不阻塞主产物(MSI/NSIS/portable)
-        shell: pwsh
-        run: |
-          Write-Host "=== Building MSIX package (best-effort, Microsoft Store submission only) ==="
-          # 使用 tauri-windows-bundle 生成 MSIX（固定版本,避免 @latest 供应链漂移）
-          npx @choochmeque/tauri-windows-bundle@0.1.28 build --runner pnpm 2>&1
-          if ($LASTEXITCODE -ne 0) {
-            echo "::warning::MSIX build failed (needs Microsoft Store publisher identity in tauri.microsoftstore.conf.json). Non-fatal — MSI/NSIS/portable artifacts are unaffected."
-            exit 0
-          }
-          # 列出 MSIX 产物
-          Write-Host "=== MSIX output ==="
-          Get-ChildItem -Path "src-tauri/target" -Recurse -Include "*.msix","*.msixbundle" -ErrorAction SilentlyContinue | ForEach-Object {
-            Write-Host "  $($_.FullName)"
+            echo "::error::MSIX build failed."
+            exit 1
           }
 
       - name: Upload MSIX artifacts (Windows)
@@ -469,9 +442,8 @@ jobs:
         with:
           name: windows-msix
           path: |
-            src-tauri/target/**/*.msix
-            src-tauri/target/**/*.msixbundle
-          if-no-files-found: warn
+            src-tauri/target/windows-store/*.msix
+          if-no-files-found: error
 
       # ---- Build & Upload portable zip (Windows, 免安装+免 WebView2 引导) ----
       # exe + 所有依赖 DLL + README，打包成 zip 供本地测试
@@ -612,8 +584,7 @@ jobs:
             src-tauri/target/**/release/bundle/**/*.msi
             src-tauri/target/**/release/bundle/**/*.exe
             src-tauri/target/**/release/bundle/**/*.app.zip
-            src-tauri/target/**/release/bundle/**/*.msix
-            src-tauri/target/**/release/bundle/**/*.msixbundle
+            src-tauri/target/windows-store/*.msix
             src-tauri/target/**/release/snap-craft.exe
             src-tauri/target/**/windows-portable.zip
 
