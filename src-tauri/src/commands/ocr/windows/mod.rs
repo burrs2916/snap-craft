@@ -34,7 +34,7 @@ fn run_native_ocr(path: &std::path::Path, lang: Option<&str>) -> Result<OcrResul
 
 #[cfg(any(target_os = "windows", test))]
 #[allow(dead_code)]
-fn run_native_ocr_windows(
+pub(crate) fn run_native_ocr_windows(
     path: &std::path::Path,
     lang: Option<&str>,
     raw_bytes: Option<&[u8]>,
