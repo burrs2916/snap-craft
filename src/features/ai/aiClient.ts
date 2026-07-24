@@ -626,15 +626,20 @@ export function trimHistoryToBudget(
 
   const preserve = Math.min(rest.length, preserveLastRounds * 2);
   let dropFrom = rest.length - preserve;
-  // 逐步减少丢弃量，直到剩余历史落入预算（至少保留 preserve 轮）。
+  // 先保留最近 preserve 条；若仍超预算则继续丢弃（dropFrom++ 丢弃更多、保留更少），
+  // 直到落入预算。注意方向：dropFrom 越大保留越少，token 越小。
+  // 此前误写为 dropFrom--（保留更多），当最近 preserve 轮本身已超预算时循环永不收敛，
+  // 最终 dropFrom 减到 0 返回全部消息，护栏形同虚设，仍会触发 API 400/413。
   // 注意：估算需把每张图片的 token 一并计入（每张约 256 token），否则多截图 / 长 OCR
-  // 会话即便裁剪后仍可能超模型上下文上限，触发 API 400/413。
-  while (dropFrom > 0) {
+  // 会话即便裁剪后仍可能超模型上下文上限。
+  // 边界：最近 preserve 轮自身就超预算（如超长首轮 OCR / 大量图片）时，只能牺牲
+  // 「保留最近 N 轮」的保证来满足预算硬约束；终止于 rest.length - 1，至少保留最后一条。
+  while (dropFrom < rest.length - 1) {
     const keptTokens = rest
       .slice(dropFrom)
       .reduce((s, m) => s + estimateTokens(m.content) + (m.images?.length ?? 0) * 256, 0);
     if (keptTokens <= budgetTokens) break;
-    dropFrom--;
+    dropFrom++;
   }
   return [...sys, ...rest.slice(dropFrom)];
 }

@@ -538,9 +538,11 @@ export const useAiStore = create<AiState>((set, get) => ({
         signal: ctl.signal,
       });
       const finalConv: AiChatTurn[] = [...newConv, { role: 'assistant', content: full }];
+      // 先停止 sink 的 100ms 缓冲刷新定时器，再写入最终输出；
+      // 否则残留缓冲可能在 set 之后再次刷到 output 上，污染已完成的结果（与 chat 保持一致）。
+      sink?.stop();
       set({ status: 'done', output: full, conversation: finalConv });
       saveConversation(convKey, finalConv);
-      sink?.stop();
       get().recordConvMeta(convKey, finalConv, input.preset, input.imageDataUrl, text);
       if (finalConv.length > MAX_LIVE_ENTRIES) {
         await get().compactMemory();

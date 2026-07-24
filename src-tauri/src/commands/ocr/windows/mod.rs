@@ -27,6 +27,59 @@ pub(crate) use quality::{rerun_if_garble_detected, detect_ocr_garble_score, cons
 #[allow(unused_imports)]
 pub(crate) use reassemble::{reassemble_words_to_lines, postprocess_fullwidth_symbols, attach_heuristic_confidence, join_words_for_line, normalize_block_text, WinWord, is_cjk_or_fullwidth, is_latin_or_digit};
 
+/// 带超时地运行子进程并等待退出（纯 std 实现，不引入 wait-timeout / tokio 依赖）。
+///
+/// 语义与 `Command::output()` 一致（返回 `Output { status, stdout, stderr }`），
+/// 但保证在 `timeout` 内必然返回：超时则 kill 子进程并返回
+/// `io::ErrorKind::TimedOut`。此前直接用 `.output()` 无超时——WinRT OCR 偶发
+/// 死锁/挂起时，`invoke('ocr_image')` 永不 resolve，前端 `ocrBusy` 永久为 true，
+/// 用户只能强杀应用。
+///
+/// stdout/stderr 各用独立线程读到 EOF，避免管道缓冲区写满导致子进程阻塞在输出上
+/// （OCR 结果 JSON 可能很大，超过默认管道缓冲）。
+#[cfg(any(target_os = "windows", test))]
+fn run_command_with_timeout(
+    cmd: &mut std::process::Command,
+    timeout: std::time::Duration,
+) -> std::io::Result<std::process::Output> {
+    use std::io::Read;
+    use std::process::Stdio;
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = cmd.spawn()?;
+    let mut stdout_pipe = child.stdout.take().expect("stdout 已设为 piped");
+    let mut stderr_pipe = child.stderr.take().expect("stderr 已设为 piped");
+    let out_handle = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stdout_pipe.read_to_end(&mut buf);
+        buf
+    });
+    let err_handle = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stderr_pipe.read_to_end(&mut buf);
+        buf
+    });
+    let start = std::time::Instant::now();
+    let status = loop {
+        match child.try_wait()? {
+            Some(s) => break s,
+            None => {
+                if start.elapsed() >= timeout {
+                    let _ = child.kill();
+                    let _ = child.wait(); // 回收，避免僵尸进程
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        format!("OCR 子进程超时（超过 {} 秒）", timeout.as_secs()),
+                    ));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        }
+    };
+    let stdout = out_handle.join().unwrap_or_default();
+    let stderr = err_handle.join().unwrap_or_default();
+    Ok(std::process::Output { status, stdout, stderr })
+}
+
 #[cfg(target_os = "windows")]
 fn run_native_ocr(path: &std::path::Path, lang: Option<&str>) -> Result<OcrResult, String> {
     run_native_ocr_windows(path, lang, None)
@@ -437,17 +490,20 @@ try {
 
     // ---- ③ 用 -File 执行，绕过 -Command 引号地狱和 ExecutionPolicy 限制 ----
     // powershell.exe 是 Windows PowerShell 5.1（PS7 pwsh 移除了 WinRT 投影，不能用）
+    // 带 60s 超时：WinRT OCR 偶发死锁时保证 invoke 必然 resolve，前端不会永久卡死。
     let ps_started = std::time::Instant::now();
-    let output = Command::new("powershell")
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-File",
-            &ps1_path.to_string_lossy(),
-        ])
-        .output();
+    let output = run_command_with_timeout(
+        Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                &ps1_path.to_string_lossy(),
+            ]),
+        std::time::Duration::from_secs(60),
+    );
     let ps_ms = ps_started.elapsed().as_millis();
 
     // 无论成败，先清理临时脚本 / 参数文件（避免 %TEMP% 堆积）
@@ -460,8 +516,10 @@ try {
 
     let output = output.map_err(|e| {
         let msg = e.to_string();
-        clog!("ocr", "无法启动 PowerShell: {}", msg);
-        if msg.contains("not found") || msg.contains("os error 2") {
+        clog!("ocr", "PowerShell OCR 失败: {}", msg);
+        if e.kind() == std::io::ErrorKind::TimedOut {
+            "Windows OCR 超时（超过 60 秒），WinRT 引擎可能无响应。请重试；若持续出现请重启应用。".to_string()
+        } else if msg.contains("not found") || msg.contains("os error 2") {
             "系统未找到 Windows PowerShell 5.1（powershell.exe）。请确认 Windows 未卸载该组件。".to_string()
         } else {
             format!("无法启动 PowerShell 5.1: {}", msg)

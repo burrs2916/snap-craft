@@ -2,8 +2,12 @@
 //
 // 思路：用户手动滚动、每次捕获同一块区域一帧。相邻两帧在纵向存在重叠——
 // 在「上一帧底部一段」与「当前帧」之间做逐行灰度差分（SAD），找到差异最小的
-// 纵向偏移，即重叠高度；裁掉重复部分再往长图上拼。匹配置信度过低时直接相接
-// 并标记 warning，由调用方提示用户。
+// 纵向偏移，即重叠高度；裁掉重复部分再往长图上拼。
+//
+// 低置信度兜底（2026-07-24 修复）：
+//   1) 绝对误差极小但区分度不足（大面积纯色/均匀内容）→ 检测值仍可用；
+//   2) 弱匹配 → 复用上一条成功接缝的重叠高度（用户每步滚动量通常稳定）；
+//   3) 完全无参考 → 直接相接并标记 warning，由调用方提示用户。
 //
 // 前提：每帧尺寸一致（同一 rect 捕获），因此只需在纵向找偏移，横向恒定对齐，
 // Retina/高 DPI 下同区域每帧物理像素一致，无缩放问题。
@@ -46,20 +50,25 @@ const toGray = (
 
 /**
  * 在 prev 帧底部与 cur 帧之间检测纵向重叠高度。
- * 返回 { overlap, confident }：overlap 为 cur 顶部与 prev 底部重合的像素高度。
+ * 返回 { overlap, confident, score }：overlap 为 cur 顶部与 prev 底部重合的像素高度，
+ * score 为最佳匹配的像素平均灰度差（越小越可信）。
  *
  * 算法：取 prev 底部一条参考带（高 band），在 cur 顶部滑动，逐行比较灰度平均绝对差，
  * 找到 SAD 最小的位置。为提速：横向按步长采样、纵向只比较参考带若干行。
+ *
+ * 几何关系（2026-07-24 修复）：参考带最佳匹配 cur 的行 [bestOffset, bestOffset+band)，
+ * 即 cur 第 0 行对应 prev 第 (h - band - bestOffset) 行，故真实重叠 = band + bestOffset。
+ * 此前仅返回 bestOffset，导致每条接缝少裁 band 像素（约 35% 帧高），长图出现大段重复。
  */
 export const detectOverlap = (
   prevGray: Uint8ClampedArray,
   curGray: Uint8ClampedArray,
   w: number,
   h: number
-): { overlap: number; confident: boolean } => {
+): { overlap: number; confident: boolean; score: number } => {
   // 参考带高度：一帧的 ~35%，但不超过 240px（够用且快）
   const band = Math.min(Math.floor(h * 0.35), 240);
-  if (band < 8) return { overlap: 0, confident: false };
+  if (band < 8) return { overlap: 0, confident: false, score: Infinity };
 
   // 横向采样步长（跳采加速），保证至少 ~64 个采样列
   const xStep = Math.max(1, Math.floor(w / 64));
@@ -100,10 +109,10 @@ export const detectOverlap = (
   }
 
   // 置信度：最佳分数要足够小（像素平均差 < 12），且明显优于次佳（区分度）。
-  // bestOffset 即 prev 底部参考带在 cur 中出现的位置 → cur 顶部有 bestOffset 行是
-  // prev 已包含的内容（重叠）。
+  // 真实重叠 = 参考带高度 + 参考带在 cur 中的最佳对齐偏移（参考带本身也属于重叠区）。
+  const overlap = Math.min(band + bestOffset, h);
   const confident = bestScore < 12 && bestScore < secondBest * 0.85;
-  return { overlap: confident ? bestOffset : 0, confident };
+  return { overlap, confident, score: bestScore };
 };
 
 /**
@@ -125,12 +134,33 @@ export const stitchFrames = (frames: StitchFrame[]): StitchResult => {
   let hadLowConfidence = false;
   // 每帧在长图中要绘制的「有效高度」（裁掉与上一帧重叠的部分）
   const drawHeights: number[] = [frames[0].height];
+  // 最近一次可信接缝的重叠高度，作为弱匹配接缝的兜底值
+  let lastGoodOverlap = 0;
 
   for (let i = 1; i < frames.length; i++) {
-    const { overlap, confident } = detectOverlap(grays[i - 1], grays[i], w, frames[i].height);
-    if (!confident) hadLowConfidence = true;
-    overlaps.push(overlap);
-    drawHeights.push(frames[i].height - overlap);
+    const { overlap, confident, score } = detectOverlap(grays[i - 1], grays[i], w, frames[i].height);
+    let ov: number;
+    if (confident) {
+      ov = overlap;
+      lastGoodOverlap = overlap;
+    } else if (score < 12) {
+      // 绝对误差极小但区分度不足：通常是大面积纯色/均匀内容（各偏移得分都 ≈ 0）。
+      // 此时平台区内任意偏移视觉等价，采用检测值安全；标记低置信度供用户复核。
+      hadLowConfidence = true;
+      ov = overlap;
+      lastGoodOverlap = overlap;
+    } else if (lastGoodOverlap > 0) {
+      // 弱匹配：复用上一条成功接缝的重叠高度（用户每步滚动量通常稳定），
+      // 好过直接相接导致整段重叠区重复。
+      hadLowConfidence = true;
+      ov = Math.min(lastGoodOverlap, frames[i].height - 1);
+    } else {
+      // 完全无参考（首条接缝即失败）：直接相接并标记 warning。
+      hadLowConfidence = true;
+      ov = 0;
+    }
+    overlaps.push(ov);
+    drawHeights.push(frames[i].height - ov);
   }
 
   const totalH = drawHeights.reduce((a, b) => a + b, 0);

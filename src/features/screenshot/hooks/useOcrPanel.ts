@@ -197,6 +197,10 @@ export function useOcrPanel(deps: OcrPanelDeps): OcrPanelState {
   const ocrMergeRef = useRef(ocrMerge);
   useEffect(() => { ocrAutoCopyRef.current = ocrAutoCopy; }, [ocrAutoCopy]);
   useEffect(() => { ocrMergeRef.current = ocrMerge; }, [ocrMerge]);
+  // OCR 单飞锁（ref 同步判定）：ocrBusy 是异步 state，快速双击时两次调用都可能
+  // 读到 false 而并发触发 OCR；ref 在同步路径上立即置位，可拦下重入。
+  // 与 EditorWindow.doOcr 的 ocrInFlight 同一模式。
+  const ocrInFlight = useRef(false);
   // 面板快捷键：Esc 关闭 / Cmd+F 聚焦搜索
   useEffect(() => {
     if (ocrResult === null) return;
@@ -223,7 +227,9 @@ export function useOcrPanel(deps: OcrPanelDeps): OcrPanelState {
   // ===== 核心回调 =====
   const runOcr = useCallback(
     async (imageData: string, langOverride?: string | null) => {
-      if (ocrBusy) return null;
+      // 单飞：ref 同步判定拦下快速双击的并发重入（ocrBusy 异步 state 来不及拦）
+      if (ocrInFlight.current || ocrBusy) return null;
+      ocrInFlight.current = true;
       setOcrBusy(true);
       setOcrElapsed(null);
       setOcrLastImage(imageData);
@@ -279,6 +285,7 @@ export function useOcrPanel(deps: OcrPanelDeps): OcrPanelState {
         }
         return null;
       } finally {
+        ocrInFlight.current = false;
         setOcrBusy(false);
       }
     },
