@@ -127,7 +127,8 @@ foreach ($asset in $storeAssets) {
 $manifestTemplate = Get-Content (Join-Path $storeDir "AppxManifest.xml") -Raw
 $manifest = $manifestTemplate -replace 'Version="[^"]*"', "Version=`"$Version`""
 $manifestPath = Join-Path $stageDir "AppxManifest.xml"
-$manifest | Out-File -FilePath $manifestPath -Encoding UTF8
+# 必须写无 BOM 的 UTF-8，否则 makeappx 报 "Incorrect xml declaration syntax"
+[System.IO.File]::WriteAllText($manifestPath, $manifest, [System.Text.UTF8Encoding]::new($false))
 Write-Host "  Generated: AppxManifest.xml (Version=$Version)"
 
 # ── 打包 MSIX ──
