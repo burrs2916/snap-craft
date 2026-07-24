@@ -125,9 +125,11 @@ foreach ($asset in $storeAssets) {
 
 # ── 生成 AppxManifest.xml（替换版本号） ──
 $manifestTemplate = Get-Content (Join-Path $storeDir "AppxManifest.xml") -Raw
-$manifest = $manifestTemplate -replace 'Version="[^"]*"', "Version=`"$Version`""
+# 用 -creplace（区分大小写）：只替换 Identity 的大写 Version，
+# 不动 XML 声明的小写 version（否则 makeappx 报 "Incorrect xml declaration syntax"）
+$manifest = $manifestTemplate -creplace 'Version="[^"]*"', "Version=`"$Version`""
 $manifestPath = Join-Path $stageDir "AppxManifest.xml"
-# 必须写无 BOM 的 UTF-8，否则 makeappx 报 "Incorrect xml declaration syntax"
+# 必须写无 BOM 的 UTF-8，否则 makeappx 同样报 XML 解析错误
 [System.IO.File]::WriteAllText($manifestPath, $manifest, [System.Text.UTF8Encoding]::new($false))
 Write-Host "  Generated: AppxManifest.xml (Version=$Version)"
 
