@@ -158,3 +158,56 @@ export function revealActionLabel(): string {
   return isMac() ? 'Finder' : 'Explorer';
 }
 
+// ── 2026-07-24 跨平台快捷键格式化 ──
+
+/**
+ * 格式化快捷键为平台原生风格：
+ *   macOS: ⌘⇧S（符号紧凑）
+ *   Windows: Ctrl+Shift+S（文字+加号）
+ * 传入修饰键数组（如 ['mod', 'shift']）与主键（如 'S'），返回格式化字符串。
+ */
+export function formatShortcut(keys: string[], mainKey: string): string {
+  if (isMac()) {
+    const macKeys = keys.map((k) => {
+      switch (k.toLowerCase()) {
+        case 'mod': case 'cmd': case 'command': case 'meta': return '⌘';
+        case 'shift': return '⇧';
+        case 'alt': case 'option': return '⌥';
+        case 'ctrl': case 'control': return '⌃';
+        default: return k;
+      }
+    });
+    return macKeys.join('') + mainKey.toUpperCase();
+  }
+  const winKeys = keys.map((k) => {
+    switch (k.toLowerCase()) {
+      case 'mod': case 'cmd': case 'command': case 'meta': case 'ctrl': case 'control': return 'Ctrl';
+      case 'shift': return 'Shift';
+      case 'alt': case 'option': return 'Alt';
+      default: return k;
+    }
+  });
+  return [...winKeys, mainKey.toUpperCase()].join('+');
+}
+
+/**
+ * 跨平台「打开外部链接」：
+ * macOS 用 open，Windows 用 start，Linux 用 xdg-open。
+ * 在 Tauri 中应优先使用 tauri-plugin-opener，此函数仅作兜底。
+ */
+export function openExternalCmd(url: string): { cmd: string; args: string[] } {
+  if (isMac()) return { cmd: 'open', args: [url] };
+  if (isWindows()) return { cmd: 'cmd', args: ['/c', 'start', '', url] };
+  return { cmd: 'xdg-open', args: [url] };
+}
+
+/**
+ * 跨平台临时目录路径（与 Rust 侧 std::env::temp_dir() 对齐）。
+ * 前端通常不需要直接操作临时文件，但调试/日志场景可能需要。
+ */
+export function tempDirHint(): string {
+  if (isMac()) return '/tmp';
+  if (isWindows()) return '%TEMP%';
+  return '/tmp';
+}
+

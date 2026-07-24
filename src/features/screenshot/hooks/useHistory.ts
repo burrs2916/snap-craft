@@ -1,0 +1,144 @@
+// ===== 截图历史管理 Hook =====
+// 从 EnhancedScreenshotApp.tsx 提取的历史记录 CRUD + 搜索 + 持久化逻辑。
+// 职责单一：只管历史数据的增删查改与搜索过滤，不涉及截图/编辑/AI 等功能。
+
+import { useCallback, useEffect, useState } from 'react';
+import { invoke } from '@tauri-apps/api/core';
+
+export interface HistoryEntry {
+  id: string;
+  dataUrl: string;
+  createdAt: string;
+  width: number;
+  height: number;
+  /** 来源：'capture'=本机截图，'clipboard'=剪贴板图片，'ai_edit'=AI 编辑烧录产物 */
+  source?: 'capture' | 'clipboard' | 'ai_edit';
+  /** OCR 识别结果（已落库），用于按文字搜索 */
+  ocr_text?: string;
+}
+
+export interface UseHistoryReturn {
+  history: HistoryEntry[];
+  setHistory: React.Dispatch<React.SetStateAction<HistoryEntry[]>>;
+  /** 按 OCR 文字 / 时间搜索过滤后的列表 */
+  filteredHistory: HistoryEntry[];
+  historySearch: string;
+  setHistorySearch: (q: string) => void;
+  /** 添加一条历史（前端 + 后端持久化） */
+  addEntry: (entry: HistoryEntry) => Promise<void>;
+  /** 删除单条历史 */
+  deleteEntry: (id: string) => Promise<void>;
+  /** 清空全部历史（含二次确认） */
+  clearAll: (confirmMsg: string) => Promise<boolean>;
+}
+
+/**
+ * 截图历史管理 Hook。
+ *
+ * @param flash  通知回调（成功/失败提示）
+ * @param t      i18n 翻译函数
+ * @param onDeleted 删除后的额外回调（如清空当前编辑引用）
+ */
+export function useHistory(
+  flash: (msg: string, type?: 'success' | 'error' | 'info') => void,
+  t: (key: string, vars?: Record<string, any>) => string,
+  onDeleted?: (id: string) => void,
+): UseHistoryReturn {
+  const [history, setHistory] = useState<HistoryEntry[]>([]);
+  const [historySearch, setHistorySearch] = useState('');
+
+  // 搜索过滤：匹配 OCR 文字或时间
+  const filteredHistory = (() => {
+    const q = historySearch.trim().toLowerCase();
+    if (!q) return history;
+    return history.filter((h) => {
+      const ocr = (h.ocr_text || '').toLowerCase();
+      const time = new Date(h.createdAt).toLocaleString().toLowerCase();
+      return ocr.includes(q) || time.includes(q);
+    });
+  })();
+
+  // 启动时加载历史
+  useEffect(() => {
+    (async () => {
+      try {
+        const raw = (await invoke('get_history')) as any[];
+        if (Array.isArray(raw)) {
+          setHistory(
+            raw.map((i) => ({
+              id: i.id,
+              dataUrl: i.data_url,
+              createdAt: i.created_at,
+              width: i.width,
+              height: i.height,
+              source: i.source === 'clipboard' ? 'clipboard' : i.source === 'ai_edit' ? 'ai_edit' : 'capture',
+              ocr_text: i.ocr_text,
+            })),
+          );
+        }
+      } catch {
+        /* 历史为空或读取失败，忽略 */
+      }
+    })();
+  }, []);
+
+  const addEntry = useCallback(async (entry: HistoryEntry) => {
+    setHistory((h) => [entry, ...h]);
+    try {
+      await invoke('add_history', {
+        item: {
+          id: entry.id,
+          data_url: entry.dataUrl,
+          created_at: entry.createdAt,
+          width: entry.width,
+          height: entry.height,
+          source: entry.source || 'capture',
+        },
+      });
+    } catch {
+      /* 持久化失败不阻断使用 */
+    }
+  }, []);
+
+  const deleteEntry = useCallback(
+    async (id: string) => {
+      if (!id) return;
+      try {
+        await invoke('delete_history', { id });
+        setHistory((h) => h.filter((x) => x.id !== id));
+        onDeleted?.(id);
+        flash(t('toast.deleted'), 'success');
+      } catch (e) {
+        flash(t('toast.deleteFailed', { msg: String(e) }), 'error');
+      }
+    },
+    [flash, t, onDeleted],
+  );
+
+  const clearAll = useCallback(
+    async (confirmMsg: string): Promise<boolean> => {
+      if (!window.confirm(confirmMsg)) return false;
+      try {
+        await invoke('clear_history');
+        setHistory([]);
+        flash(t('toast.historyCleared'), 'success');
+        return true;
+      } catch (e) {
+        flash(t('toast.historyClearFailed', { msg: String(e) }), 'error');
+        return false;
+      }
+    },
+    [flash, t],
+  );
+
+  return {
+    history,
+    setHistory,
+    filteredHistory,
+    historySearch,
+    setHistorySearch,
+    addEntry,
+    deleteEntry,
+    clearAll,
+  };
+}

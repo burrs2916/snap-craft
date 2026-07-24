@@ -106,7 +106,26 @@ const COMMON =
   '.doc-toc a { color: #374151; text-decoration: none; }' +
   '.doc-toc a:hover { color: #4f46e5; text-decoration: underline; }' +
   '.doc-toc-l3 { padding-left: 20px; font-size: .92em; }' +
-  '@media print { .doc-toc { page-break-inside: avoid; } }';
+  // 2026-07-24 排版增强：跨主题统一的表格/代码/引用优化
+  '.doc-main table { border-spacing: 0; }' +
+  '.doc-main td, .doc-main th { vertical-align: top; }' +
+  // 表格数字列右对齐（数据类文档更专业）
+  '.doc-main td:nth-child(n+2):not(:last-child) { text-align: right; font-variant-numeric: tabular-nums; }' +
+  // 代码块优化：更好的可读性与打印适配
+  '.doc-main pre { line-height: 1.55; tab-size: 2; }' +
+  '.doc-main pre code { white-space: pre-wrap; word-break: break-word; }' +
+  // 引用块内段落间距收紧
+  '.doc-main blockquote p { margin: .4em 0; }' +
+  // 列表项内段落间距收紧
+  '.doc-main li p { margin: .3em 0; }' +
+  // 强调文本微调：加粗词间距
+  '.doc-main strong { font-weight: 700; letter-spacing: .01em; }' +
+  // 打印优化：避免标题孤行、图片截断
+  '@media print {' +
+  '  .doc-toc { page-break-inside: avoid; }' +
+  '  .doc-main h2, .doc-main h3, .doc-main h4 { page-break-after: avoid; }' +
+  '  .doc-main p, .doc-main li { orphans: 3; widows: 3; }' +
+  '}';
 
 const THEME_CSS: Record<DocThemeId, string> = {
   modern: `
