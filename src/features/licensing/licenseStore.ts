@@ -7,6 +7,7 @@ import {
   resetLicense,
 } from './licensingService';
 import { applyPreview, getPreviewTier, setPreviewTier, statusFromTier } from './licensePreview';
+import { isWindows } from '../../shared/platform';
 
 /// All Pro features gated by the license system. Keep in sync with
 /// `ProFeature` in `licenseTypes.ts`.
@@ -61,22 +62,44 @@ export const useLicenseStore = create<LicenseState>((set, get) => ({
         set({ status: applyPreview(status), loading: false });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        console.warn('[license] refresh failed (fail-open → Pro):', message);
-        // Fail-open：invoke 失败时回退到 Pro，避免锁死全部功能。
-        // 后端是本进程内的 Rust 命令，不可达说明二进制未重编译或命令未注册，
-        // 此时锁死用户体验极差；macOS/Linux 后端本就无条件返回 Pro。
-        const fallback: LicenseStatus = {
-          tier: 'pro',
-          isPro: true,
-          isTrial: false,
-          isExpired: false,
-          trialDaysRemaining: 0,
-          trialStartedAt: null,
-          trialExpiresAt: null,
-          subscriptionExpiresAt: null,
-          reason: 'Backend unreachable — fail-open Pro',
-        };
-        set({ status: applyPreview(fallback), loading: false });
+        console.warn('[license] refresh failed:', message);
+        if (isWindows()) {
+          // Windows 是付费平台：invoke 失败时不能 fail-open，否则试用到期后
+          // 任何后端异常都会让用户白嫖 Pro。保留上一次已知状态；若从未成功
+          // 拉取过（首次启动即失败），回退到 free/expired 锁定功能。
+          const prev = get().status;
+          if (!prev) {
+            const locked: LicenseStatus = {
+              tier: 'free',
+              isPro: false,
+              isTrial: false,
+              isExpired: true,
+              trialDaysRemaining: 0,
+              trialStartedAt: null,
+              trialExpiresAt: null,
+              subscriptionExpiresAt: null,
+              reason: 'Backend unreachable — Windows fail-closed',
+            };
+            set({ status: applyPreview(locked), loading: false });
+          } else {
+            set({ loading: false });
+          }
+        } else {
+          // macOS/Linux：后端本就无条件返回 Pro，invoke 失败说明二进制未重编
+          // 或命令未注册，锁死用户体验极差 → fail-open 放行。
+          const fallback: LicenseStatus = {
+            tier: 'pro',
+            isPro: true,
+            isTrial: false,
+            isExpired: false,
+            trialDaysRemaining: 0,
+            trialStartedAt: null,
+            trialExpiresAt: null,
+            subscriptionExpiresAt: null,
+            reason: 'Backend unreachable — fail-open Pro (non-Windows)',
+          };
+          set({ status: applyPreview(fallback), loading: false });
+        }
       } finally {
         refreshAttempted = true;
       }
@@ -145,9 +168,12 @@ export const useLicenseStore = create<LicenseState>((set, get) => ({
   canUse: (feature: ProFeature) => {
     void feature;
     const status = get().status;
-    // Fail-open：status 为 null（后端尚未响应或不可达）时放行，
-    // 避免异步时序或 invoke 失败导致用户被锁。
-    if (!status) return true;
+    if (!status) {
+      // 首次 refresh 尚未完成前乐观放行（避免 UI 闪烁）；
+      // Windows 上若 refresh 已尝试过但 status 仍为 null（极端异常），锁定。
+      if (isWindows() && refreshAttempted) return false;
+      return true;
+    }
     if (status.isPro) return true;
     if (status.isTrial) return true;
     return false;

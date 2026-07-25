@@ -341,8 +341,11 @@ export const AnnotationToolbar = () => {
   const redoHint = isWinLike ? 'Ctrl+Shift+Z' : '⇧⌘Z';
 
   // 付费门禁：马赛克 / 打码属于 Pro 功能；免费/试用结束态下锁定该工具。
+  // 使用 store 的 canUse（平台感知：Windows fail-closed，macOS/Linux fail-open）。
   const licenseStatus = useLicenseStore((s) => s.status);
-  const canRedact = licenseStatus ? licenseStatus.isPro || licenseStatus.isTrial : true;
+  const canUseFn = useLicenseStore((s) => s.canUse);
+  void licenseStatus; // 订阅 status 确保状态变化时重渲染
+  const canRedact = canUseFn('redact');
   const openUpgrade = useUpgradeDialogStore((s) => s.openDialog);
 
   const [tip, setTip] = useState<TipState>(null);
