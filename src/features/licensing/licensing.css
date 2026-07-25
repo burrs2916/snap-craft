@@ -1,0 +1,266 @@
+/* ===== SnapCraft 授权 / 订阅门禁 UI ===== */
+
+/* ---- 锁定占位（LockedScreen） ---- */
+.license-locked {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  height: 100%;
+  padding: 32px;
+  text-align: center;
+  color: var(--text-sub, #888);
+}
+.license-locked-icon {
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 28px;
+  background: linear-gradient(135deg, rgba(108, 99, 255, 0.15), rgba(79, 195, 247, 0.1));
+  border: 1px solid var(--divider, rgba(255, 255, 255, 0.12));
+}
+.license-locked-title {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--text, #fff);
+}
+.license-locked-desc {
+  font-size: 13px;
+  max-width: 420px;
+  line-height: 1.6;
+}
+
+/* ---- 通用升级按钮 ---- */
+.license-upgrade-btn {
+  margin-top: 4px;
+  padding: 10px 22px;
+  border: none;
+  border-radius: 10px;
+  font-size: 14px;
+  font-weight: 700;
+  color: #fff;
+  cursor: pointer;
+  background: linear-gradient(135deg, #6c63ff 0%, #4fc3f7 100%);
+  transition: filter 0.15s ease, transform 0.05s ease;
+}
+.license-upgrade-btn:hover {
+  filter: brightness(1.08);
+}
+.license-upgrade-btn:active {
+  transform: translateY(1px);
+}
+.license-upgrade-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+.license-upgrade-btn-lg {
+  width: 100%;
+  padding: 13px;
+  font-size: 15px;
+  text-decoration: none;
+  text-align: center;
+  display: inline-block;
+  box-sizing: border-box;
+}
+
+/* ---- 升级弹窗（UpgradeDialog） ---- */
+.license-dialog-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(4px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 9999;
+}
+.license-dialog {
+  width: min(440px, calc(100vw - 32px));
+  max-height: calc(100vh - 48px);
+  overflow-y: auto;
+  border-radius: 16px;
+  background: var(--bg-elevated, #1e1e24);
+  border: 1px solid var(--divider, rgba(255, 255, 255, 0.12));
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
+  background-image: linear-gradient(135deg, rgba(108, 99, 255, 0.08), rgba(79, 195, 247, 0.05));
+}
+.license-dialog-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 18px 10px;
+}
+.license-dialog-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 17px;
+  font-weight: 700;
+  color: var(--text, #fff);
+}
+.license-dialog-spark {
+  font-size: 18px;
+}
+.license-dialog-close {
+  border: none;
+  background: transparent;
+  color: var(--text-sub, #999);
+  font-size: 16px;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 8px;
+}
+.license-dialog-close:hover {
+  background: rgba(127, 127, 127, 0.15);
+}
+.license-dialog-body {
+  padding: 4px 18px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.license-dialog-headline {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text, #fff);
+  line-height: 1.5;
+}
+.license-dialog-sub {
+  font-size: 13px;
+  color: var(--text-sub, #999);
+  line-height: 1.5;
+}
+.license-dialog-divider {
+  height: 1px;
+  background: var(--divider, rgba(255, 255, 255, 0.1));
+  margin: 2px 0;
+}
+.license-dialog-features-label {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-sub, #999);
+}
+.license-dialog-features {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.license-feature-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text, #fff);
+}
+.license-feature-check {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #00e676;
+  color: #04210f;
+  font-size: 12px;
+  font-weight: 800;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.license-feature-required {
+  margin-left: auto;
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(108, 99, 255, 0.2);
+  color: #b3aeff;
+}
+.license-dialog-error {
+  font-size: 12px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  color: #ff8a80;
+  background: rgba(255, 59, 48, 0.12);
+  border: 1px solid rgba(255, 59, 48, 0.3);
+}
+.license-dialog-hint {
+  font-size: 12px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  line-height: 1.6;
+  color: #8fd3ff;
+  background: rgba(79, 195, 247, 0.1);
+  border: 1px solid rgba(79, 195, 247, 0.25);
+}
+.license-dialog-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 2px;
+}
+.license-dialog-text-btn {
+  border: none;
+  background: transparent;
+  color: var(--text-sub, #999);
+  font-size: 13px;
+  cursor: pointer;
+  padding: 6px;
+  text-decoration: none;
+  text-align: center;
+}
+.license-dialog-text-btn:hover {
+  color: var(--text, #fff);
+}
+.license-dialog-disclaimer {
+  font-size: 11px;
+  color: var(--text-sub, #777);
+  text-align: center;
+  line-height: 1.5;
+}
+
+/* ---- 档位徽标（LicenseBadge） ---- */
+.license-badge {
+  position: fixed;
+  left: 12px;
+  bottom: 12px;
+  z-index: 5000;
+  border: none;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 5px 11px;
+  border-radius: 999px;
+  color: #fff;
+  backdrop-filter: blur(6px);
+}
+.license-badge-pro {
+  background: rgba(108, 99, 255, 0.85);
+}
+.license-badge-trial {
+  background: rgba(255, 176, 32, 0.9);
+  color: #3a2a00;
+}
+.license-badge-free {
+  background: rgba(120, 120, 130, 0.7);
+}
+
+/* ---- 工具栏被锁定的 Pro 工具（马赛克） ---- */
+.tool-btn-locked {
+  position: relative;
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.tool-btn-locked::after {
+  content: '🔒';
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  font-size: 9px;
+  line-height: 1;
+  filter: grayscale(0.2);
+}

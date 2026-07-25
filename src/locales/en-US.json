@@ -722,5 +722,41 @@
     "historyBack": "Back to list",
     "historyNoGoal": "(untitled)",
     "historyMsgs": "{n} rounds"
+  },
+  "license": {
+    "trialBadge": "Trial",
+    "proBadge": "Pro",
+    "freeBadge": "Free",
+    "upgrade": {
+      "title": "Upgrade to AI-SnapScribe Pro",
+      "headlineTrial": "{trialDaysLeft} days left in trial — upgrade Pro to unlock everything",
+      "headlineExpired": "Your trial has ended. Upgrade Pro to keep using AI & advanced features.",
+      "headlineDefault": "AI-SnapScribe Pro subscription",
+      "subheadlineFeature": "Pro required for: {feature}",
+      "subheadlineDefault": "Subscribe to unlock all AI & advanced features",
+      "featuresLabel": "Everything in Pro",
+      "requiredChip": "Required",
+      "cta": "Subscribe to Pro",
+      "processing": "Processing…",
+      "buyOnStore": "Buy on Microsoft Store",
+      "restore": "Restore purchase",
+      "viewOnStore": "View on Microsoft Store",
+      "sideloadHint": "In-app purchase is only available in the Microsoft Store build. Please buy the subscription on Microsoft Store; installing the Store build will unlock automatically.",
+      "disclaimer": "Your subscription is tied to your Microsoft account and restores on reinstall."
+    },
+    "feature": {
+      "ai": "AI generate & edit",
+      "export_doc": "Export Word / PPT / Excel / PDF",
+      "redact": "Mosaic / redact"
+    },
+    "locked": {
+      "title": "This feature requires Pro",
+      "desc": {
+        "ai": "AI generation, polishing and smart editing are Pro features, unlocked by subscription after the 14-day trial.",
+        "export_doc": "Word / PPT / Excel / PDF export is AI-generated and a Pro feature.",
+        "redact": "Mosaic / blur / solid redact are Pro features."
+      },
+      "upgrade": "Upgrade Pro"
+    }
   }
 }

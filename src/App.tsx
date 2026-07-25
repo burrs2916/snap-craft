@@ -3,29 +3,41 @@ import { PinWindow } from './features/screenshot/components/PinWindow';
 import { RegionOverlay } from './features/screenshot/components/RegionOverlay';
 import { WindowOverlay } from './features/screenshot/components/WindowOverlay';
 import { EditorWindow } from './features/screenshot/components/EditorWindow';
+import { LicenseProvider, UpgradeDialog, LicenseBadge } from './features/licensing';
+import './features/licensing/licensing.css';
 
 function App() {
   // 钉图浮窗以独立窗口加载同一 SPA，通过 hash 区分渲染
+  let content;
   if (typeof window !== 'undefined' && window.location.hash.startsWith('#pin')) {
-    return <PinWindow />;
+    content = <PinWindow />;
   }
   // 独立编辑窗：每个截图一个独立窗口，可同时开多个
-  if (typeof window !== 'undefined' && window.location.hash.startsWith('#editor')) {
-    return <EditorWindow />;
+  else if (typeof window !== 'undefined' && window.location.hash.startsWith('#editor')) {
+    content = <EditorWindow />;
   }
   // 剪贴板取字独立窗：自己读剪贴板（文字/图片），可多开
-  if (typeof window !== 'undefined' && window.location.hash.startsWith('#clipboard-ocr')) {
-    return <EditorWindow />;
+  else if (typeof window !== 'undefined' && window.location.hash.startsWith('#clipboard-ocr')) {
+    content = <EditorWindow />;
   }
   // 区域截图覆盖层（Windows/Linux 专用，独立全屏窗口）
-  if (typeof window !== 'undefined' && window.location.hash.startsWith('#region-overlay')) {
-    return <RegionOverlay />;
+  else if (typeof window !== 'undefined' && window.location.hash.startsWith('#region-overlay')) {
+    content = <RegionOverlay />;
   }
   // 窗口点选覆盖层（Windows/Linux 专用）
-  if (typeof window !== 'undefined' && window.location.hash.startsWith('#window-overlay')) {
-    return <WindowOverlay />;
+  else if (typeof window !== 'undefined' && window.location.hash.startsWith('#window-overlay')) {
+    content = <WindowOverlay />;
+  } else {
+    content = <EnhancedScreenshotApp />;
   }
-  return <EnhancedScreenshotApp />;
+
+  return (
+    <LicenseProvider>
+      {content}
+      <LicenseBadge />
+      <UpgradeDialog />
+    </LicenseProvider>
+  );
 }
 
 export default App;

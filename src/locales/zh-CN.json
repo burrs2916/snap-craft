@@ -722,5 +722,41 @@
     "historyBack": "返回列表",
     "historyNoGoal": "（无标题）",
     "historyMsgs": "{n} 轮对话"
+  },
+  "license": {
+    "trialBadge": "试用",
+    "proBadge": "Pro",
+    "freeBadge": "免费",
+    "upgrade": {
+      "title": "升级到 AI-SnapScribe Pro",
+      "headlineTrial": "试用还剩 {trialDaysLeft} 天，升级 Pro 解锁全部高级功能",
+      "headlineExpired": "试用已结束，升级 Pro 继续使用 AI 与高级功能",
+      "headlineDefault": "AI-SnapScribe Pro 订阅",
+      "subheadlineFeature": "该功能需要 Pro：{feature}",
+      "subheadlineDefault": "订阅解锁全部 AI 与高级功能",
+      "featuresLabel": "Pro 包含",
+      "requiredChip": "需要",
+      "cta": "订阅 Pro",
+      "processing": "处理中…",
+      "buyOnStore": "在 Microsoft Store 购买",
+      "restore": "恢复购买",
+      "viewOnStore": "在 Microsoft Store 查看",
+      "sideloadHint": "应用内购买仅限从 Microsoft Store 安装的版本。请前往 Microsoft Store 购买订阅，安装商店版后订阅会自动解锁。",
+      "disclaimer": "订阅与你的 Microsoft 账户绑定，同一账户重装自动恢复。"
+    },
+    "feature": {
+      "ai": "AI 智能生成与编辑",
+      "export_doc": "导出 Word / PPT / Excel / PDF 文档",
+      "redact": "马赛克 / 打码"
+    },
+    "locked": {
+      "title": "该功能需要 Pro",
+      "desc": {
+        "ai": "AI 生成、润色与智能编辑属于 Pro 功能，14 天试用后需订阅解锁。",
+        "export_doc": "导出 Word / PPT / Excel / PDF 由 AI 生成，属于 Pro 功能。",
+        "redact": "马赛克 / 高斯模糊 / 涂黑打码属于 Pro 功能。"
+      },
+      "upgrade": "升级 Pro"
+    }
   }
 }

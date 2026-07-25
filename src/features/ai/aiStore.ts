@@ -26,6 +26,8 @@ import {
   type UserPreset,
 } from './aiPresets';
 import { t, getLang } from '../../i18n';
+import { useLicenseStore } from '../licensing/licenseStore';
+import { useUpgradeDialogStore } from '../licensing/upgradeDialogStore';
 import { loadMemories, saveMemories, selectMemories, MAX_LIVE_ENTRIES, COMPACT_ENTRIES, isCompacting, setCompacting } from './aiMemory';
 
 // 提取的子模块
@@ -175,6 +177,11 @@ export const useAiStore = create<AiState>((set, get) => ({
       .find((p) => p.id === id) ?? getPreset(id),
 
   generate: async (input) => {
+    // 付费门禁：AI 全部功能试用结束后需订阅。无权限时弹出升级弹窗并提前返回。
+    if (!useLicenseStore.getState().canUse('ai')) {
+      useUpgradeDialogStore.getState().openDialog('ai');
+      return;
+    }
     await get().chat(input.goal, {
       preset: input.preset,
       imageDataUrl: input.imageDataUrl,
@@ -416,6 +423,11 @@ export const useAiStore = create<AiState>((set, get) => ({
   },
 
   refine: async (instruction: string) => {
+    // 付费门禁：AI 润色属于 Pro 功能。
+    if (!useLicenseStore.getState().canUse('ai')) {
+      useUpgradeDialogStore.getState().openDialog('ai');
+      return;
+    }
     let sink: ReturnType<typeof makeStreamSink> | null = null;
     const { config, output, conversation } = get();
     if (!output.trim() || !config.apiKey.trim()) return;
@@ -473,6 +485,11 @@ export const useAiStore = create<AiState>((set, get) => ({
   },
 
   runAgent: async (input) => {
+    // 付费门禁：AI Agent 属于 Pro 功能。
+    if (!useLicenseStore.getState().canUse('ai')) {
+      useUpgradeDialogStore.getState().openDialog('ai');
+      return;
+    }
     let sink: ReturnType<typeof makeStreamSink> | null = null;
     const { config, attachImage, attachOcr, conversation, convKey } = get();
     if (!config.apiKey.trim()) {

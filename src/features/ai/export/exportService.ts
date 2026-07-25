@@ -22,6 +22,8 @@ import { pushExportHistory } from './exportHistory';
 import { firstHeading, mdToPlainText, printHtmlViaIframe, frontImageBlockHtml } from '../aiUtils';
 import { stripSnapMarkers, hasSnapMarkers } from '../aiPresets';
 import { t } from '../../../i18n';
+import { useLicenseStore } from '../../licensing/licenseStore';
+import { useUpgradeDialogStore } from '../../licensing/upgradeDialogStore';
 
 // ── 导出上下文：调用方组装，描述「要导出什么」 ──
 
@@ -336,6 +338,12 @@ export async function exportAs(
   fmt: ExportFormat,
   sheetName?: string,
 ): Promise<string | null> {
+  // 付费门禁：AI 生成的文档（含 MD/TXT/HTML/DOCX/PPTX/XLSX/PDF）试用结束后需订阅。
+  // 无权限时弹出升级弹窗，并返回 null（等同用户取消，不触发错误提示）。
+  if (!useLicenseStore.getState().canUse('export_doc')) {
+    useUpgradeDialogStore.getState().openDialog('export_doc');
+    return null;
+  }
   switch (fmt) {
     case 'md':
     case 'txt':

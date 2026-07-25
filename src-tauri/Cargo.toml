@@ -43,6 +43,24 @@ objc2-core-foundation = "0.3"
 objc2-uniform-type-identifiers = "0.3"
 block2 = "0.6"
 
+# Windows Microsoft Store 订阅 IAP（Windows.Services.Store）—— 仅 Windows 编译。
+# 锁定 windows 0.61 与 biosphere 一致：0.62 会与 tauri 传递的 windows-core 0.61
+# 形成两份 windows-core 导致 trait 约束冲突（HSTRING: RuntimeType not satisfied）。
+# windows 0.61 把 IIterable 移到了独立 crate windows-collections 0.2，需显式依赖。
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.61", features = [
+    "Foundation",
+    "Foundation_Collections",
+    "Services_Store",
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_System_WinRT",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+windows-core = "0.61"
+windows-collections = "0.2"
+
 # ============================================================
 # [patch] apple-vision 0.16.7 —— 修复 CI 跨 SDK 编译阻断
 # ------------------------------------------------------------

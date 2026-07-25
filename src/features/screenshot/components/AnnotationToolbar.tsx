@@ -2,6 +2,8 @@ import type { ReactNode } from 'react';
 import { useState, useCallback } from 'react';
 import { useScreenshotStore } from '../store/screenshotStore';
 import { useI18n, t } from '../../../i18n';
+import { useLicenseStore } from '../../licensing/licenseStore';
+import { useUpgradeDialogStore } from '../../licensing/upgradeDialogStore';
 
 /* ── 统一线性图标（stroke=currentColor，跟随主题与选中态）────────── */
 const Icon = ({ children }: { children: ReactNode }) => (
@@ -338,6 +340,11 @@ export const AnnotationToolbar = () => {
   const undoHint = isWinLike ? 'Ctrl+Z' : '⌘Z';
   const redoHint = isWinLike ? 'Ctrl+Shift+Z' : '⇧⌘Z';
 
+  // 付费门禁：马赛克 / 打码属于 Pro 功能；免费/试用结束态下锁定该工具。
+  const licenseStatus = useLicenseStore((s) => s.status);
+  const canRedact = licenseStatus ? licenseStatus.isPro || licenseStatus.isTrial : true;
+  const openUpgrade = useUpgradeDialogStore((s) => s.openDialog);
+
   const [tip, setTip] = useState<TipState>(null);
 
   // 鼠标进入按钮：读取按钮位置，在其正下方定位提示浮层
@@ -380,12 +387,20 @@ export const AnnotationToolbar = () => {
             {TOOLS.map((tool) => (
               <button
                 key={tool.id}
-                className={`tool-btn${activeTool === tool.id ? ' active' : ''}`}
+                className={`tool-btn${activeTool === tool.id ? ' active' : ''}${
+                  tool.id === 'mosaic' && !canRedact ? ' tool-btn-locked' : ''
+                }`}
                 aria-label={`${t('tool.' + tool.id)} (${tool.hint})`}
                 aria-pressed={activeTool === tool.id}
                 onMouseEnter={(e) => showTip(e, t('tool.' + tool.id), tool.hint)}
                 onMouseLeave={hideTip}
-                onClick={() => setActiveTool(tool.id)}
+                onClick={() => {
+                  if (tool.id === 'mosaic' && !canRedact) {
+                    openUpgrade('redact');
+                    return;
+                  }
+                  setActiveTool(tool.id);
+                }}
               >
                 <Icon>{ICONS[tool.id]}</Icon>
               </button>

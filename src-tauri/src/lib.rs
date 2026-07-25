@@ -2,10 +2,13 @@
 #[macro_use]
 mod logger;
 mod commands;
+mod licensing;
 mod platform;
 mod store;
 
 use commands::permission::get_platform;
+use licensing::LicensingService;
+use std::sync::Arc;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{Emitter, Manager, WindowEvent};
@@ -227,6 +230,25 @@ pub fn run() {
                 })
                 .build(app)?;
 
+            // ===== 许可证 / 订阅服务 =====
+            // 状态持久化到 app_local_data_dir/license.json（原子写）。
+            // Windows 商店版：首启记录试用起点，启动后异步与 Microsoft Store
+            // 复核订阅 entitlement。macOS / 侧载 / dev：默认 Pro（SNAP_FORCE_TIER
+            // 可本地预览各档）。
+            let data_dir = app
+                .path()
+                .app_local_data_dir()
+                .map_err(|e| format!("无法解析本地数据目录: {}", e))?;
+            let licensing = Arc::new(LicensingService::new(data_dir));
+            app.manage(licensing.clone());
+            #[cfg(target_os = "windows")]
+            {
+                let app_handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    licensing.sync_with_store(&app_handle).await;
+                });
+            }
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -269,6 +291,12 @@ pub fn run() {
             save_temp_file,
             read_temp_file,
             cleanup_temp_files,
+            licensing::commands::check_license_status,
+            licensing::commands::purchase_subscription,
+            licensing::commands::restore_purchase,
+            licensing::commands::reset_license,
+            licensing::commands::extend_trial,
+            licensing::commands::get_subscription_product_id,
         ])
         .on_window_event(|window, event| {
             // 点主窗口关闭按钮时不退出进程，改为隐藏到菜单栏托盘，
