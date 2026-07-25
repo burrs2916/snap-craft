@@ -227,12 +227,38 @@ function collectLiterals(s) {
   return { lits: [...a.lits, ...b.lits], static: a.static && b.static };
 }
 
-// ---- 解析后端注册命令集 ----
+// ---- 解析后端注册命令集（直接解析 lib.rs 的 generate_handler! 宏块，
+//      取每条命令的末段路径作为命令名，兼容 commands::mod::fn 与
+//      licensing::commands::fn 等任意深度的路径写法；语义上即“该命令是否真在
+//      generate_handler! 中注册”）。用括号配平扫描，避免宏体内 #[cfg(...)] 的 ]
+//      提前截断匹配） ----
 const libRsPath = path.join(ROOT, 'src-tauri', 'src', 'lib.rs');
 const libRs = fs.readFileSync(libRsPath, 'utf8');
 const registeredCmds = new Set();
-for (const m of libRs.matchAll(/commands::[a-z_]+::([a-z_]+)/g)) registeredCmds.add(m[1]);
-for (const m of libRs.matchAll(/^\s*(?:pub\s+)?fn\s+([a-z_]+)/gm)) registeredCmds.add(m[1]);
+const ghStart = libRs.indexOf('generate_handler!');
+if (ghStart !== -1) {
+  const openIdx = libRs.indexOf('[', ghStart);
+  let depth = 0;
+  let closeIdx = -1;
+  for (let i = openIdx; i < libRs.length; i++) {
+    if (libRs[i] === '[') depth++;
+    else if (libRs[i] === ']') {
+      depth--;
+      if (depth === 0) { closeIdx = i; break; }
+    }
+  }
+  if (closeIdx !== -1) {
+    const body = libRs.slice(openIdx + 1, closeIdx);
+    for (const raw of body.split(',')) {
+      // 去掉行内 // 注释与 #[cfg(...)] 属性，避免干扰命令名提取
+      const entry = raw.replace(/\/\/.*$/, '').replace(/#\[[^\]]*\]/g, '').trim();
+      if (!entry) continue;
+      const segs = entry.split('::');
+      const last = segs[segs.length - 1];
+      if (/^[a-z_][a-z0-9_]*$/.test(last)) registeredCmds.add(last);
+    }
+  }
+}
 
 // ---- 解析前端所有 invoke 首参 ----
 // 先建「变量 → 字面量三元」映射（支持 invoke(cmd) 这种经变量中转的调用），
