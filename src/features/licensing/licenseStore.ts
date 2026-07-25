@@ -61,8 +61,22 @@ export const useLicenseStore = create<LicenseState>((set, get) => ({
         set({ status: applyPreview(status), loading: false });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        console.warn('[license] refresh failed:', message);
-        set({ loading: false });
+        console.warn('[license] refresh failed (fail-open → Pro):', message);
+        // Fail-open：invoke 失败时回退到 Pro，避免锁死全部功能。
+        // 后端是本进程内的 Rust 命令，不可达说明二进制未重编译或命令未注册，
+        // 此时锁死用户体验极差；macOS/Linux 后端本就无条件返回 Pro。
+        const fallback: LicenseStatus = {
+          tier: 'pro',
+          isPro: true,
+          isTrial: false,
+          isExpired: false,
+          trialDaysRemaining: 0,
+          trialStartedAt: null,
+          trialExpiresAt: null,
+          subscriptionExpiresAt: null,
+          reason: 'Backend unreachable — fail-open Pro',
+        };
+        set({ status: applyPreview(fallback), loading: false });
       } finally {
         refreshAttempted = true;
       }
@@ -131,8 +145,9 @@ export const useLicenseStore = create<LicenseState>((set, get) => ({
   canUse: (feature: ProFeature) => {
     void feature;
     const status = get().status;
-    // 启动初期 status 还在加载（异步从后端拉取），乐观放行避免闪烁。
-    if (!status) return !refreshAttempted;
+    // Fail-open：status 为 null（后端尚未响应或不可达）时放行，
+    // 避免异步时序或 invoke 失败导致用户被锁。
+    if (!status) return true;
     if (status.isPro) return true;
     if (status.isTrial) return true;
     return false;
