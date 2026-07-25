@@ -126,8 +126,11 @@ foreach ($asset in $storeAssets) {
 # ── 生成 AppxManifest.xml（替换版本号） ──
 $manifestTemplate = Get-Content (Join-Path $storeDir "AppxManifest.xml") -Raw
 # 用 -creplace（区分大小写）：只替换 Identity 的大写 Version，
-# 不动 XML 声明的小写 version（否则 makeappx 报 "Incorrect xml declaration syntax"）
-$manifest = $manifestTemplate -creplace 'Version="[^"]*"', "Version=`"$Version`""
+# 不动 XML 声明的小写 version（否则 makeappx 报 "Incorrect xml declaration syntax"）。
+# 注意负向后顾 (?<!Min)：必须排除 MinVersion，否则 'Version="[^"]*"' 会
+# 把 MinVersion="10.0.19041.0" 也匹配并覆盖成包版本号(如 0.1.0.0)，
+# 导致 MSIX MinVersion 变成 0.1.0.0 < 商店门槛 17134，上传被拒。
+$manifest = $manifestTemplate -creplace '(?<!Min)Version="[^"]*"', "Version=`"$Version`""
 $manifestPath = Join-Path $stageDir "AppxManifest.xml"
 # 必须写无 BOM 的 UTF-8，否则 makeappx 同样报 XML 解析错误
 [System.IO.File]::WriteAllText($manifestPath, $manifest, [System.Text.UTF8Encoding]::new($false))
