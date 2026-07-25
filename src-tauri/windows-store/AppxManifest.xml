@@ -7,13 +7,13 @@
   IgnorableNamespaces="uap desktop rescap">
 
   <Identity
-    Name="BURRS.SnapCraft"
+    Name="BURRS.AI-SnapScribe"
     Publisher="CN=6BF20FE5-8F53-448E-9DD3-67F8E30B4B9E"
     Version="0.1.0.0"
     ProcessorArchitecture="x64" />
 
   <Properties>
-    <DisplayName>SnapCraft</DisplayName>
+    <DisplayName>AI-SnapScribe</DisplayName>
     <PublisherDisplayName>BURRS</PublisherDisplayName>
     <Logo>Assets\StoreLogo.png</Logo>
   </Properties>
@@ -30,7 +30,7 @@
   <Applications>
     <Application Id="SnapCraft" Executable="snap-craft.exe" EntryPoint="Windows.FullTrustApplication">
       <uap:VisualElements
-        DisplayName="SnapCraft"
+        DisplayName="AI-SnapScribe"
         Description="AI-first cross-platform screenshot tool with editor, OCR, and document generation"
         BackgroundColor="transparent"
         Square150x150Logo="Assets\Square150x150Logo.png"
