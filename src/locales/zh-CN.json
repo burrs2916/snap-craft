@@ -2,6 +2,10 @@
   "app": {
     "subtitle": "智能截屏工具"
   },
+  "settings": {
+    "title": "设置",
+    "close": "关闭"
+  },
   "capture": {
     "screen": {
       "label": "全屏截图",

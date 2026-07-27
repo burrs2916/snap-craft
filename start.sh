@@ -200,6 +200,19 @@ start_dev() {
     log_info "SnapCraft 开发模式（.app 包，可授权屏幕录制）启动脚本"
     echo "========================================"
 
+    # 🔒 防止 SNAP_FORCE_TIER 污染：开发模式下 macOS 本应默认全功能(pro)，
+    #    但若该变量在启动终端里被 export 成 free/trial，会经 `open` 继承进 dev
+    #    进程、把 Mac 误锁成免费版（项目记忆铁律坑，已多次踩）。
+    #    这里强制 unset，确保 dev 永远 pro。档位预览请改用前端
+    #    localStorage: snapcraft_license_preview（Rust 侧 SNAP_FORCE_TIER 不再经 dev 脚本生效）。
+    if [ -n "$SNAP_FORCE_TIER" ] || [ -n "$(launchctl getenv SNAP_FORCE_TIER 2>/dev/null)" ]; then
+        log_warn "🔓 检测到 SNAP_FORCE_TIER，dev 模式强制忽略（Mac 默认全功能 pro）；档位预览请用前端 localStorage: snapcraft_license_preview"
+        unset SNAP_FORCE_TIER
+        # 变量可能由 `launchctl setenv` 全局注入（dev.app 经 open 启动继承
+        # launchd 全局 env，shell 内 unset 无效），一并清除全局注入。
+        launchctl unsetenv SNAP_FORCE_TIER 2>/dev/null
+    fi
+
     # 前置检查
     pre_check
 

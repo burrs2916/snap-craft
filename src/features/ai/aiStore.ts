@@ -33,7 +33,7 @@ import { loadMemories, saveMemories, selectMemories, MAX_LIVE_ENTRIES, COMPACT_E
 // 提取的子模块
 import { loadConfig, saveConfig, loadTemplates, saveTemplates, loadConversation, saveConversation } from './lib/persistence';
 import { recordConvMeta, listConvMeta, getConvByHash, deleteConv, forkConversation, type AiConvMeta } from './lib/conversationIndex';
-import { makeStreamSink, aiErrorI18nKey, refineSystem, buildMemoryNote, buildCompactSystem, parseImportance, genId, genMemId } from './lib/streamHelpers';
+import { makeStreamSink, aiErrorI18nKey, refineSystem, buildMemoryNote, buildCompactSystem, langOutputDirective, parseImportance, genId, genMemId } from './lib/streamHelpers';
 
 // 重新导出供外部使用（保持向后兼容）
 export { type AiConvMeta } from './lib/conversationIndex';
@@ -287,7 +287,7 @@ export const useAiStore = create<AiState>((set, get) => ({
     ).slice(0, -1);
     const messages: AiMessage[] = [
       ...(memoryNote ? [{ role: 'system' as const, content: memoryNote }] : []),
-      { role: 'system', content: ctx.preset.system },
+      { role: 'system', content: langOutputDirective() + ctx.preset.system },
       ...historyMsgs,
       userMsg,
     ];

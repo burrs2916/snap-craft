@@ -140,6 +140,9 @@ export const EnhancedScreenshotApp = () => {
   // 多屏选择器状态（提升到组件级以打破 useCapture ↔ useScrollCapture 循环依赖）
   const [showDisplayPicker, setShowDisplayPicker] = useState(false);
 
+  // 截图隐藏自身窗口：行为已固化为「永远隐藏 SnapCraft 自身窗口」（不截到自己），
+  // 不再暴露开关。后端 hide_self_in_capture 默认 true 提供硬保证（见 src-tauri store）。
+
   // 标注 store（需在 onHistoryDeleted 之前初始化，因其依赖 currentScreenshot）
   const canvasRef = useRef<AnnotationCanvasHandle>(null);
   const {

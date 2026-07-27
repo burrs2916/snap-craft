@@ -1,7 +1,8 @@
 use crate::store;
+use std::sync::{Arc, RwLock};
 #[cfg(target_os = "macos")]
 use std::process::Command;
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 
 /// 区域截图时前端传来的矩形（设备像素，相对主显示器左上角）
 #[derive(serde::Deserialize)]
@@ -73,6 +74,46 @@ fn is_png_near_black(path: &std::path::Path) -> bool {
         }
     }
     checked > 0 && (non_black as f64 / checked as f64) < 0.01
+}
+
+/// macOS 截屏前隐藏全部 SnapCraft 窗口的 RAII 守卫：创建时隐藏所有【可见】的
+/// webview 窗口（主窗 + AI 面板 + 设置窗等），睡眠 400ms 等窗口合成器刷掉，
+/// Drop 时按记录恢复显示。受设置 `should_hide_self` 门控（false 时不创建 → 不隐藏）。
+///
+/// 注：主窗已由前端 safeHideForCapture 处理了原生全屏→最小化避免崩溃的逻辑，
+/// 此处再隐藏时主窗 `is_visible()` 已为 false，不会重复 hide；本守卫主要补上
+/// 其余独立 webview 窗口（AI 面板等），确保「隐藏本软件」开关能隐藏全部窗口。
+#[cfg(target_os = "macos")]
+struct MacWindowHider<'a> {
+    app: &'a AppHandle,
+    hidden: Vec<String>,
+}
+#[cfg(target_os = "macos")]
+impl<'a> MacWindowHider<'a> {
+    fn new(app: &'a AppHandle) -> Self {
+        let mut hidden = Vec::new();
+        for w in app.webview_windows().values() {
+            if let Ok(v) = w.is_visible() {
+                if v {
+                    let _ = w.hide();
+                    hidden.push(w.label().to_string());
+                }
+            }
+        }
+        // 给窗口合成器时间完成隐藏重绘（避免截到窗口消失的过渡帧）
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        Self { app, hidden }
+    }
+}
+#[cfg(target_os = "macos")]
+impl<'a> Drop for MacWindowHider<'a> {
+    fn drop(&mut self) {
+        for label in &self.hidden {
+            if let Some(w) = self.app.get_webview_window(label) {
+                let _ = w.show();
+            }
+        }
+    }
 }
 
 /// macOS 原生截图（全屏/区域/窗口），返回 PNG 的 data URL
@@ -237,8 +278,15 @@ pub async fn capture_screen(
     }
     #[cfg(target_os = "macos")]
     {
-        // 等待窗口隐藏完成，避免截到自身窗口 / 截到未重绘的黑屏（macOS 隐藏+重绘需时间）
-        std::thread::sleep(std::time::Duration::from_millis(400));
+        // 截图前按设置隐藏 SnapCraft 全部窗口（默认隐藏）。MacWindowHider 内部已
+        // sleep 400ms 等窗口合成器刷掉，故此处不再重复 sleep。false 时不创建→不隐藏。
+        let hide_self = crate::store::should_hide_self(&_app);
+        clog!("capture", "[hideSelf] 全屏截图前是否隐藏本软件窗口: {}", hide_self);
+        let _hider = if hide_self {
+            Some(MacWindowHider::new(&_app))
+        } else {
+            None
+        };
 
         // App Store 沙箱路径：禁止 spawn 外部 screencapture，改用 ScreenCaptureKit（纯框架调用）。
         // 开发者 ID 构建不进此分支（is_sandboxed=false），仍走下方原生 screencapture。
@@ -366,6 +414,15 @@ pub async fn capture_region(_app: AppHandle, rect: Option<CaptureRect>) -> Resul
     }
     #[cfg(target_os = "macos")]
     {
+        // 截图前按设置隐藏 SnapCraft 全部窗口（默认隐藏）。
+        let hide_self = crate::store::should_hide_self(&_app);
+        clog!("capture", "[hideSelf] 区域截图前是否隐藏本软件窗口: {}", hide_self);
+        let _hider = if hide_self {
+            Some(MacWindowHider::new(&_app))
+        } else {
+            None
+        };
+
         // App Store 沙箱：区域截图需前端选区覆盖层传入 rect，走 ScreenCaptureKit；
         // 无 rect（纯交互 -i）在沙箱下不可用，明确报错避免静默失效。
         if crate::commands::screen_capture_kit::is_sandboxed() {
@@ -442,8 +499,15 @@ pub async fn capture_window(_app: AppHandle) -> Result<String, String> {
     clog!("capture", "命令=capture_window");
     #[cfg(target_os = "macos")]
     {
-        // 等待覆盖层窗口完全隐藏（与 capture_screen 一致），避免截到正在消失的覆盖层
-        std::thread::sleep(std::time::Duration::from_millis(200));
+        // 截图前按设置隐藏 SnapCraft 全部窗口（默认隐藏）。MacWindowHider 内部已
+        // sleep 400ms，覆盖层隐藏等待也一并覆盖，此处不再重复 sleep。
+        let hide_self = crate::store::should_hide_self(&_app);
+        clog!("capture", "[hideSelf] 窗口截图前是否隐藏本软件窗口: {}", hide_self);
+        let _hider = if hide_self {
+            Some(MacWindowHider::new(&_app))
+        } else {
+            None
+        };
 
         // App Store 沙箱：无交互取窗 UI（-w 不可用），自动抓最前台窗口
         if crate::commands::screen_capture_kit::is_sandboxed() {
@@ -483,7 +547,7 @@ pub async fn capture_window(_app: AppHandle) -> Result<String, String> {
     #[cfg(not(target_os = "macos"))]
     {
         // 兜底：无覆盖层点选时抓前台窗口。正常流程走 list_windows + capture_window_by_id。
-        xcap_capture::capture_xcap_window()
+        xcap_capture::capture_xcap_window(&_app)
     }
 }
 
@@ -520,7 +584,7 @@ pub async fn capture_window_by_id(_app: AppHandle, window_id: u32) -> Result<Str
     }
     #[cfg(not(target_os = "macos"))]
     {
-        xcap_capture::capture_xcap_window_by_id(window_id)
+        xcap_capture::capture_xcap_window_by_id(&_app, window_id)
     }
 }
 
@@ -635,7 +699,12 @@ mod xcap_capture {
 
     /// 截取主显示器全图（无 display_id 时）
     pub fn capture_xcap_screen(app: &AppHandle) -> Result<String, String> {
-        let _hider = WindowHider::new(app);
+        // 按设置隐藏 SnapCraft 全部窗口（默认隐藏）。false 时不隐藏（允许 self-capture）。
+        let _hider = if crate::store::should_hide_self(app) {
+            Some(WindowHider::new(app))
+        } else {
+            None
+        };
         // ⚠️ 主屏选择策略（跨平台对等强化 R26）：
         // 优先用系统权威的「主屏标志」`is_primary()` 取主显示器——比
         // `Monitor::from_point(0, 0)` 更稳。Windows 多屏且主屏被设为非虚拟桌面原点
@@ -659,7 +728,11 @@ mod xcap_capture {
 
     /// 截取指定 display_id 的整屏；找不到则退回主屏
     pub fn capture_xcap_display(app: &AppHandle, display_id: u32) -> Result<String, String> {
-        let _hider = WindowHider::new(app);
+        let _hider = if crate::store::should_hide_self(app) {
+            Some(WindowHider::new(app))
+        } else {
+            None
+        };
         let monitors = Monitor::all().map_err(|e| format!("枚举显示器失败: {}", e))?;
         let monitor = monitors
             .into_iter()
@@ -674,7 +747,11 @@ mod xcap_capture {
     /// 区域截图：rect 为全局物理像素坐标（覆盖层输出）。用矩形中心定位所属显示器，
     /// 再换算成该显示器的局部坐标做 capture_region。
     pub fn capture_xcap_region(app: &AppHandle, rect: Option<CaptureRect>) -> Result<String, String> {
-        let _hider = WindowHider::new(app);
+        let _hider = if crate::store::should_hide_self(app) {
+            Some(WindowHider::new(app))
+        } else {
+            None
+        };
         let rect = rect.ok_or("区域截屏需要先选择区域")?;
         if rect.width < 1 || rect.height < 1 {
             return Err("选区太小".into());
@@ -749,7 +826,13 @@ mod xcap_capture {
     }
 
     /// 按窗口 id 截取指定窗口（覆盖层点选后调用）。
-    pub fn capture_xcap_window_by_id(window_id: u32) -> Result<String, String> {
+    pub fn capture_xcap_window_by_id(app: &AppHandle, window_id: u32) -> Result<String, String> {
+        // 按设置隐藏 SnapCraft 全部窗口（默认隐藏），避免把自身窗口截进去。
+        let _hider = if crate::store::should_hide_self(app) {
+            Some(WindowHider::new(app))
+        } else {
+            None
+        };
         let windows = Window::all().map_err(|e| format!("枚举窗口失败: {}", e))?;
         let window = windows
             .into_iter()
@@ -769,7 +852,13 @@ mod xcap_capture {
 
     /// 窗口截图：优先截取当前前台窗口（z-order 最靠前的可见、非最小化窗口）。
     /// 仅作为无覆盖层点选时的兜底（前端正常会走 list_windows + capture_window_by_id）。
-    pub fn capture_xcap_window() -> Result<String, String> {
+    pub fn capture_xcap_window(app: &AppHandle) -> Result<String, String> {
+        // 按设置隐藏 SnapCraft 全部窗口（默认隐藏），避免把自身窗口截进去。
+        let _hider = if crate::store::should_hide_self(app) {
+            Some(WindowHider::new(app))
+        } else {
+            None
+        };
         let windows = Window::all().map_err(|e| format!("枚举窗口失败: {}", e))?;
         // Window::all 通常按 z-order 返回，取第一个可见、非最小化、有尺寸的窗口
         let window = windows
@@ -939,4 +1028,22 @@ pub fn open_screen_recording_settings() -> Result<(), String> {
     {
         Err("仅 macOS 需要此操作".into())
     }
+}
+
+// ===== 应用设置命令（截图隐藏自身窗口开关）=====
+/// 读取当前应用设置（含 hide_self_in_capture）。
+#[tauri::command]
+pub fn get_app_settings(app: AppHandle) -> crate::store::AppSettings {
+    // 惰性初始化进程级缓存（首次访问从 settings.json 载入）
+    let slot =
+        crate::store::APP_SETTINGS.get_or_init(|| Arc::new(RwLock::new(crate::store::load_app_settings(&app))));
+    slot.read().unwrap().clone()
+}
+
+/// 写入「截图隐藏本软件窗口」开关。
+#[tauri::command]
+pub fn set_app_settings(app: AppHandle, hide_self_in_capture: bool) -> Result<(), String> {
+    let mut cur = crate::store::load_app_settings(&app);
+    cur.hide_self_in_capture = hide_self_in_capture;
+    crate::store::save_app_settings(&app, &cur)
 }

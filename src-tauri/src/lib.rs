@@ -126,11 +126,24 @@ pub fn run() {
                 cfg!(debug_assertions)
             );
             #[cfg(target_os = "macos")]
-            clog!(
-                "boot",
-                "屏幕录制权限(启动预检)={}",
-                commands::capture::check_screen_capture_access()
-            );
+            {
+                let pre = commands::capture::check_screen_capture_access();
+                clog!("boot", "屏幕录制权限(启动预检)={}", pre);
+                // 主动请求一次屏幕录制授权：让 App 进入系统「屏幕录制」TCC 列表
+                // （即便用户暂不点允许，列表里也会出现本 App，可直接在系统设置开开关赋权）。
+                // 授权后 macOS 会提示「退出并重新打开才能使用屏幕录制」，符合常规桌面软件行为。
+                if !pre {
+                    let granted = commands::capture::request_screen_capture_access();
+                    if granted {
+                        clog!("boot", "屏幕录制已授权（启动即请求通过），请重启软件生效");
+                    } else {
+                        clog!(
+                            "boot",
+                            "屏幕录制未授权：App 已在系统「屏幕录制」列表中，可在系统设置直接开开关；授权后请重启软件"
+                        );
+                    }
+                }
+            }
 
             // 注册全局快捷键：macOS 用 ⌘，Windows/Linux 用 Ctrl
             let mut failed: Vec<String> = Vec::new();
@@ -285,6 +298,8 @@ pub fn run() {
             commands::capture::check_screen_capture_access,
             commands::capture::request_screen_capture_access,
             commands::capture::open_screen_recording_settings,
+            commands::capture::get_app_settings,
+            commands::capture::set_app_settings,
             commands::open::open_external,
             commands::open::reveal_in_folder,
             diag_log,
@@ -326,37 +341,42 @@ pub fn run() {
                     );
 
                     if is_fs {
-                        // ⚠️ macOS 26 崩溃修复（EXC_BAD_ACCESS in WebPageProxy::dispatchSetObscuredContentInsets）：
-                        // 原方案 set_fullscreen(false) + 固定延迟 + hide() 在 macOS 26 上会 crash——
-                        // 全屏 Space 拆除期间 WebPageProxy 被释放，hide() 触发的 insets 派发解引用 null 指针。
-                        // 修复：全屏态下改用 set_minimized(true) 代替 hide()。
-                        //   minimize 是原子操作（NSWindow performMiniaturize:），macOS 内部处理全屏退出，
-                        //   不走 orderOut → 不触发 dispatchSetObscuredContentInsets → 不 crash。
-                        //   minimize 后窗口完全不在屏幕上（dock 缩略图不算），满足"隐藏到托盘"需求。
-                        //   后台延迟再 hide() 彻底从 dock 移除（此时 Space 已完全拆除，hide 安全）。
-                        clog!("window", "全屏态 → set_minimized (避免 hide() 触发 insets crash)");
-                        let _ = window.minimize();
+                        // 修复「最大化/全屏后关闭黑屏」：此前用 minimize() 退出全屏 Space，但
+                        // minimize 仍保留全屏态 → 下次打开仍是全屏，且退出时黑场明显（用户复现）。
+                        // 改为 setFullscreen(false) 把全屏窗**彻底降级为普通窗口**（丢掉全屏态），
+                        // 等 Space 完全拆除（足够时长，规避 macOS 26 的 hide() insets crash）后再
+                        // unmaximize() 回到默认窗口尺寸，最后 hide() 到托盘。时序与前端 useCapture
+                        // 全屏降级一致（已在用户环境验证 crash-safe）。
+                        clog!("window", "全屏态 → setFullscreen(false) 降级为普通窗口（规避关闭黑屏）");
+                        let _ = window.set_fullscreen(false);
                         let w = window.clone();
                         std::thread::spawn(move || {
-                            // 等 minimize + 全屏 Space 拆除彻底完成（macOS 26 需要更长）
-                            std::thread::sleep(std::time::Duration::from_millis(1500));
-                            // 此时窗口已最小化且不在全屏 Space 中，hide() 安全
-                            let wc = w.clone();
+                            // 等全屏 Space 彻底拆除（避免 teardown 中 hide() 触发 insets crash）
+                            std::thread::sleep(std::time::Duration::from_millis(1000));
+                            let w2 = w.clone();
                             let _ = w.run_on_main_thread(move || {
-                                let _ = wc.hide();
-                                clog!("window", "minimize 后延迟 hide 完成");
+                                // 取消最大化 → 回到默认窗口尺寸
+                                let _ = w2.unmaximize();
+                            });
+                            // 等 resize 过渡结束
+                            std::thread::sleep(std::time::Duration::from_millis(450));
+                            let w3 = w.clone();
+                            let _ = w.run_on_main_thread(move || {
+                                let _ = w3.hide();
+                                clog!("window", "退出全屏并恢复默认尺寸后隐藏完成");
                             });
                         });
                     } else if is_max {
-                        // 最大化不涉及独立 Space，取消最大化后短暂延迟隐藏更稳
+                        // 最大化（非全屏 Space）无黑场，取消最大化回到默认尺寸后隐藏即可。
+                        clog!("window", "最大化态 → unmaximize 恢复默认尺寸后隐藏");
                         let _ = window.unmaximize();
                         let w = window.clone();
                         std::thread::spawn(move || {
-                            std::thread::sleep(std::time::Duration::from_millis(150));
+                            std::thread::sleep(std::time::Duration::from_millis(400));
                             let wc = w.clone();
                             let _ = w.run_on_main_thread(move || {
                                 let _ = wc.hide();
-                                clog!("window", "延迟隐藏完成（取消最大化后）");
+                                clog!("window", "取消最大化后延迟隐藏完成");
                             });
                         });
                     } else {

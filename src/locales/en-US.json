@@ -2,6 +2,10 @@
   "app": {
     "subtitle": "Smart Screenshot Tool"
   },
+  "settings": {
+    "title": "Settings",
+    "close": "Close"
+  },
   "capture": {
     "screen": {
       "label": "Full Screen",

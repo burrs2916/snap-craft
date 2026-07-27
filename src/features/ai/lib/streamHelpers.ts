@@ -98,6 +98,22 @@ export function refineSystem(): string {
       '5. Output only the revised full document in Markdown, with no commentary or preamble.';
 }
 
+// ── 文档生成语言指令 ──
+// 修复：截图→文档预设（doc/copy/report/...）的 system 提示词写死中文，且含
+// 「输出语言与截图中文字的语言保持一致」规则，导致 UI 设为英文时文档仍输出中文。
+// 这里在英文 UI 下前置一条最高优先级英文指令，强制全篇英文并覆盖「跟随截图语言」规则。
+// 中文 UI 返回空串，保持原中文行为（与截图文字语言一致）。
+export function langOutputDirective(): string {
+  const zh = getLang() === 'zh-CN';
+  if (zh) return '';
+  return (
+    'CRITICAL LANGUAGE INSTRUCTION: The user\'s app interface language is set to English. ' +
+    'You MUST write the ENTIRE response — all headings, prose, notes and the document body — in English. ' +
+    'Ignore any rule in the instructions below that says to match the language of the text shown in the screenshot. ' +
+    'All structural, formatting and quality requirements below still apply exactly; only the output language changes to English.\n\n'
+  );
+}
+
 // ── 长期记忆注入 ──
 
 /** 把长期记忆拼成注入 system 消息的提示文本 */

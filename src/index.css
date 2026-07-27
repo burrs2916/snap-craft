@@ -5469,3 +5469,55 @@ body {
   background: var(--surface);
   font-weight: 700;
 }
+
+/* ===== 设置弹窗（截图隐藏本软件窗口开关）===== */
+.settings-btn {
+  margin-left: 4px;
+  font-size: 18px;
+  line-height: 1;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 6px 9px;
+  cursor: pointer;
+  color: var(--text);
+  transition: background 0.15s ease, border-color 0.15s ease, transform 0.15s ease;
+}
+.settings-btn:hover {
+  background: var(--surface-strong);
+  border-color: var(--accent);
+  transform: translateY(-1px);
+}
+.settings-modal {
+  width: 420px;
+  max-width: calc(100vw - 32px);
+}
+.settings-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 4px 0;
+}
+.settings-row-text { flex: 1; min-width: 0; }
+.settings-row-label {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+.settings-row-desc {
+  margin-top: 4px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-muted, #8a8f98);
+}
+.settings-state {
+  margin-top: 10px;
+  font-size: 12px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  display: inline-block;
+}
+.settings-state.on { background: rgba(52, 199, 89, 0.15); color: #34c759; }
+.settings-state.off { background: rgba(255, 159, 10, 0.15); color: #ff9f0a; }
+

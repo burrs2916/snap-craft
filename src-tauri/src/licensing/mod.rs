@@ -91,13 +91,29 @@ pub struct LicensingService {
 }
 
 /// `SNAP_FORCE_TIER` override — read once, leaked to `'static` for cheap reuse.
-/// Lets local builds (incl. macOS) preview the gated UI without a Store build.
+/// Lets local (non-macOS) builds preview the gated UI without a Store build.
+/// On macOS this always returns None by design (see body) — macOS is always
+/// full-featured (pro), and a globally-injected SNAP_FORCE_TIER (launchctl
+/// setenv) must never downgrade it.
 fn forced_tier() -> Option<&'static str> {
-    static FORCED: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    let v = FORCED.get_or_init(|| std::env::var("SNAP_FORCE_TIER").ok());
-    match v.as_deref() {
-        Some("pro") | Some("trial") | Some("free") => v.as_deref(),
-        _ => None,
+    // macOS is always full-featured (pro). A globally-injected SNAP_FORCE_TIER
+    // (e.g. `launchctl setenv`) must never downgrade it — dev.app inherits
+    // launchd's global env via `open`, so a shell-level `unset` can't help.
+    // Preview other tiers on macOS via the frontend localStorage:
+    // snapcraft_license_preview.
+    #[cfg(target_os = "macos")]
+    {
+        None
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        static FORCED: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+        let v = FORCED.get_or_init(|| std::env::var("SNAP_FORCE_TIER").ok());
+        match v.as_deref() {
+            Some("pro") | Some("trial") | Some("free") => v.as_deref(),
+            _ => None,
+        }
     }
 }
 
@@ -237,6 +253,9 @@ impl LicensingService {
 
     fn compute_status(state: &LicenseState) -> LicenseStatus {
         // Debug / local preview override — works on every platform.
+        // On macOS, forced_tier() returns None by design (see its impl), so a
+        // globally-injected SNAP_FORCE_TIER (launchctl setenv) can never
+        // downgrade macOS — it's always full-featured (pro).
         if let Some(tier) = forced_tier() {
             return match tier {
                 "pro" => LicenseStatus {
