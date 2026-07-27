@@ -434,6 +434,13 @@ build_dev_app_bundle() {
     <key>CFBundleVersion</key><string>1</string>
     <key>LSMinimumSystemVersion</key><string>10.13</string>
     <key>NSHighResolutionCapable</key><true/>
+    # ⚠️ 关键：macOS 要求 App 在 Info.plist 声明屏幕录制用途描述，否则调用
+    #    CGRequestScreenCaptureAccess() 时系统不弹授权框、直接返回 false（TCC 授权永远拿不到）。
+    #    这是 dev .app 曾经「拖进列表+开开关仍无效、预检恒为 false」的根因。补齐后：
+    #    点截图 → 系统弹窗 → 允许 → TCC 条目创建成功且跨重编保留（配合自签名证书）。
+    <key>NSScreenCaptureUsageDescription</key><string>SnapCraft 需要「屏幕录制」权限来截取屏幕画面，以便你进行标注、文字识别与保存截图。</string>
+    <key>NSMicrophoneUsageDescription</key><string>SnapCraft 在录音或语音相关功能时需要麦克风权限。</string>
+    <key>NSAccessibilityUsageDescription</key><string>SnapCraft 当前版本不需要辅助功能权限，该项预留给未来版本的全局快捷键功能。</string>
 </dict>
 </plist>
 PLIST
