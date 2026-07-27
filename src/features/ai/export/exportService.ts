@@ -260,6 +260,12 @@ export async function exportZip(
   files: ZipEntry[],
   hint: string,
 ): Promise<string | null> {
+  // 付费门禁：打包导出 AI 生成的文档属于 Pro 功能，试用结束后需订阅。
+  // 与 exportAs 同策略（fail-closed），无权限时弹出升级弹窗并返回 null。
+  if (!useLicenseStore.getState().canUse('export_doc')) {
+    useUpgradeDialogStore.getState().openDialog('export_doc');
+    return null;
+  }
   const bytes = buildZip(files);
 
   const path = await pickExportPath({

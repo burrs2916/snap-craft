@@ -25,7 +25,7 @@ export function LicenseProvider({ children }: { children: ReactNode }) {
 
     if (!isTauri()) return;
 
-    let unlisten: (() => void) | null = null;
+    const unlisteners: Array<(() => void)> = [];
     let cancelled = false;
 
     // Refresh when the window regains focus (Store purchase popup returns).
@@ -40,7 +40,7 @@ export function LicenseProvider({ children }: { children: ReactNode }) {
           }
         });
         if (cancelled) handler();
-        else unlisten = handler;
+        else unlisteners.push(handler);
       } catch {
         /* non-Tauri environment */
       }
@@ -55,7 +55,7 @@ export function LicenseProvider({ children }: { children: ReactNode }) {
           });
         });
         if (cancelled) handler();
-        else unlisten = handler;
+        else unlisteners.push(handler);
       } catch {
         /* non-Tauri environment */
       }
@@ -63,7 +63,7 @@ export function LicenseProvider({ children }: { children: ReactNode }) {
 
     return () => {
       cancelled = true;
-      if (unlisten) unlisten();
+      unlisteners.forEach((u) => u());
     };
   }, []);
 

@@ -5,6 +5,8 @@ import { useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { save } from '@tauri-apps/plugin-dialog';
 import { cleanOcrText, chatOnce, markdownToDocx, useAiStore } from '../../ai';
+import { useLicenseStore } from '../../licensing/licenseStore';
+import { useUpgradeDialogStore } from '../../licensing/upgradeDialogStore';
 import type { OcrResult } from '../types';
 
 // ── 类型 ──
@@ -94,6 +96,12 @@ export function useBatchOperations(deps: UseBatchOperationsDeps) {
   // 批量 AI
   const handleBatchAi = async () => {
     if (selIds.length === 0) return;
+    // 付费门禁：批量 AI 属于 Pro 的「AI 全部」功能，试用结束后需订阅。
+    // 此前直接调 chatOnce 绕过 chat() 的集中守卫 → 免费用户可无限量批量跑 AI。
+    if (!useLicenseStore.getState().canUse('ai')) {
+      useUpgradeDialogStore.getState().openDialog('ai');
+      return;
+    }
     const prompt = aiPrompt.trim();
     if (!prompt) { flash(t('ocr.batchAiPromptNeeded'), 'error'); return; }
     const cfg = useAiStore.getState().config;
@@ -164,6 +172,11 @@ export function useBatchOperations(deps: UseBatchOperationsDeps) {
   };
 
   const exportAiBatchMd = async () => {
+    // 付费门禁：批量 AI 产物导出属于 Pro 的「Office/PDF 导出」功能。
+    if (!useLicenseStore.getState().canUse('export_doc')) {
+      useUpgradeDialogStore.getState().openDialog('export_doc');
+      return;
+    }
     const path = await save({ defaultPath: `ai-batch-${Date.now()}.md`, filters: [{ name: 'Markdown', extensions: ['md'] }] });
     if (!path) return;
     try {
@@ -176,6 +189,11 @@ export function useBatchOperations(deps: UseBatchOperationsDeps) {
   };
 
   const exportAiBatchDocx = async () => {
+    // 付费门禁：批量 AI 产物导出属于 Pro 的「Office/PDF 导出」功能。
+    if (!useLicenseStore.getState().canUse('export_doc')) {
+      useUpgradeDialogStore.getState().openDialog('export_doc');
+      return;
+    }
     const path = await save({ defaultPath: `ai-batch-${Date.now()}.docx`, filters: [{ name: 'Word', extensions: ['docx'] }] });
     if (!path) return;
     try {

@@ -113,14 +113,20 @@ $storeAssets = @(
     "Square310x310Logo.png",
     "StoreLogo.png"
 )
+$missingAssets = @()
 foreach ($asset in $storeAssets) {
     $src = Join-Path $iconsDir $asset
     if (Test-Path $src) {
         Copy-Item $src (Join-Path $assetsDir $asset)
         Write-Host "  Asset: $asset"
     } else {
-        Write-Warning "  Missing asset: $asset (Store may reject)"
+        Write-Error "  Missing required store asset: $asset (MSIX would be rejected by the Store)"
+        $missingAssets += $asset
     }
+}
+if ($missingAssets.Count -gt 0) {
+    Write-Error "Aborting MSIX build: $($missingAssets.Count) required store asset(s) missing -> $($missingAssets -join ', ')"
+    exit 1
 }
 
 # ── 生成 AppxManifest.xml（替换版本号） ──

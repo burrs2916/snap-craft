@@ -26,6 +26,8 @@ import {
   type OcrEntity,
 } from '../utils/ocrUtils';
 import { genAnnoId } from '../utils/helpers';
+import { useLicenseStore } from '../../licensing/licenseStore';
+import { useUpgradeDialogStore } from '../../licensing/upgradeDialogStore';
 
 // ── 外部依赖接口 ──
 export interface OcrPanelDeps {
@@ -554,6 +556,12 @@ export function useOcrPanel(deps: OcrPanelDeps): OcrPanelState {
 
   // 选区→打码
   const redactOcrSel = () => {
+    // 付费门禁：打码/马赛克属于 Pro 功能。OCR 本身是免费功能，但「选区→打码」
+    // 产出的是 Pro 专属的 mosaic 标注，试用结束后需订阅。无权限时弹出升级弹窗并提前返回。
+    if (!useLicenseStore.getState().canUse('redact')) {
+      useUpgradeDialogStore.getState().openDialog('redact');
+      return;
+    }
     if (!ocrResult || !current) return;
     const sel = ocrSelectedBlocks();
     if (!sel.length) { flash(t('ocr.selNeeded'), 'error'); return; }

@@ -57,7 +57,22 @@ export function UpgradeDialog() {
       lower.includes('not running as a microsoft store package') ||
       lower.includes('no_package_identity') ||
       lower.includes('0x80073d54') ||
-      lower.includes('only available on the windows microsoft store build')
+      lower.includes('only available on the windows microsoft store build') ||
+      // 订阅加载项尚未在商店发布（通常仍在认证中）：GetStoreProductsAsync
+      // 返回 ProductNotFound。此时应用内购买不可行，走与侧载相同的兜底
+      // UI（隐藏应用内购买按钮 + 展示商店链接），但用更贴切的提示文案。
+      lower.includes('not found in the microsoft store') ||
+      lower.includes('in certification')
+    );
+  }, [error]);
+
+  /// 订阅加载项本身尚未上架（区别于「侧载 / 非商店包」）：用于展示专属提示文案。
+  const isAddonUnavailable = useMemo(() => {
+    if (!error) return false;
+    const lower = error.toLowerCase();
+    return (
+      lower.includes('not found in the microsoft store') ||
+      lower.includes('in certification')
     );
   }, [error]);
 
@@ -132,12 +147,17 @@ export function UpgradeDialog() {
             ))}
           </div>
 
-          {error && !isStoreUnavailableError && (
+          {error && !isStoreUnavailableError && !isAddonUnavailable && (
             <div className="license-dialog-error">{error}</div>
           )}
-          {isStoreUnavailableError && (
+          {isStoreUnavailableError && !isAddonUnavailable && (
             <div className="license-dialog-hint">
               {t('license.upgrade.sideloadHint')}
+            </div>
+          )}
+          {isAddonUnavailable && (
+            <div className="license-dialog-hint">
+              {t('license.upgrade.addonUnavailable')}
             </div>
           )}
 

@@ -742,6 +742,7 @@
       "restore": "Restore purchase",
       "viewOnStore": "View on Microsoft Store",
       "sideloadHint": "In-app purchase is only available in the Microsoft Store build. Please buy the subscription on Microsoft Store; installing the Store build will unlock automatically.",
+      "addonUnavailable": "The subscription add-on is not yet available in the Microsoft Store (it may still be in certification). Once published you can subscribe in-app, or open the Microsoft Store to learn more.",
       "disclaimer": "Your subscription is tied to your Microsoft account and restores on reinstall."
     },
     "feature": {

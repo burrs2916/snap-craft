@@ -229,6 +229,13 @@ export const useAiStore = create<AiState>((set, get) => ({
   },
 
   chat: async (input, ctx) => {
+    // 付费门禁（集中设防）：chat() 是 generate/runAgent/refine/多轮追问(handleFollow)
+    // 等所有 AI 入口的最终执行者。在此统一校验，保证任何直接调用 chat 的路径
+    // （含此前遗漏的「多轮追问」按钮）都无法绕过订阅授权（fail-closed）。
+    if (!useLicenseStore.getState().canUse('ai')) {
+      useUpgradeDialogStore.getState().openDialog('ai');
+      return;
+    }
     let sink: ReturnType<typeof makeStreamSink> | null = null;
     const { config, attachImage, attachOcr, conversation, convKey } = get();
     if (!config.apiKey.trim()) {
@@ -347,6 +354,15 @@ export const useAiStore = create<AiState>((set, get) => ({
 
   // ── 长期记忆 ──
   compactMemory: async () => {
+    // 付费门禁（集中设防）：compactMemory 内部直接调 chatOnce 压缩对话，属于
+    // AI 用量。除 chat/runAgent 结束后自动触发（彼时已通过 ai 门禁）外，UI 的
+    // 「压缩记忆」按钮(AIPanel)也可直接进入此处 → 若不加守卫，免费/到期用户
+    // 可借试用期内保存的旧长对话点按钮白嫖 AI。共享执行体自身设防（fail-closed
+    // + 升级弹窗），与 chat() 的集中守卫策略一致。
+    if (!useLicenseStore.getState().canUse('ai')) {
+      useUpgradeDialogStore.getState().openDialog('ai');
+      return;
+    }
     if (isCompacting()) return;
     setCompacting(true);
     try {

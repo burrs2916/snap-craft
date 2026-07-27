@@ -29,6 +29,8 @@ import { AiHistoryOverlay } from './AiHistoryOverlay';
 import { loadSelection, saveSelection } from './lib/persistence';
 import { useExportActions } from './hooks/useExportActions';
 import type { ExportContext } from './export/exportService';
+import { useLicenseStore } from '../licensing/licenseStore';
+import { useUpgradeDialogStore } from '../licensing/upgradeDialogStore';
 
 
 // 多截图章节顺序持久化：委托 lib/persistence（消除与 AIPanel 的重复实现）
@@ -542,6 +544,11 @@ export default function AIPanel({
   };
 
   const handleTest = async () => {
+    // 付费门禁：连通性测试仍消耗 AI 请求，属 AI 功能，须受订阅控制（一致性 fail-closed）。
+    if (!useLicenseStore.getState().canUse('ai')) {
+      useUpgradeDialogStore.getState().openDialog('ai');
+      return;
+    }
     setTesting(true);
     setTestMsg(null);
     try {

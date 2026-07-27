@@ -742,6 +742,7 @@
       "restore": "恢复购买",
       "viewOnStore": "在 Microsoft Store 查看",
       "sideloadHint": "应用内购买仅限从 Microsoft Store 安装的版本。请前往 Microsoft Store 购买订阅，安装商店版后订阅会自动解锁。",
+      "addonUnavailable": "订阅加载项暂未在 Microsoft Store 上架（可能正在认证中）。上架后即可在应用内订阅，也可前往 Microsoft Store 查看。",
       "disclaimer": "订阅与你的 Microsoft 账户绑定，同一账户重装自动恢复。"
     },
     "feature": {

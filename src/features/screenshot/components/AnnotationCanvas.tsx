@@ -5,6 +5,8 @@ import { invoke } from '@tauri-apps/api/core';
 import { useScreenshotStore } from '../store/screenshotStore';
 import { t } from '../../../i18n';
 import type { AnnotationObject, AnnotationGeometry, Point } from '../types';
+import { useLicenseStore } from '../../licensing/licenseStore';
+import { useUpgradeDialogStore } from '../../licensing/upgradeDialogStore';
 
 // 诊断日志：把编辑器渲染的详细信息写入 logs/dev.log（tag=diag，前缀 [canvas]）。
 // best-effort，绝不阻断渲染。用于精确定位"点击编辑后弹出框渲染"是否正确。
@@ -364,8 +366,16 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, AnnotationCanvasProp
       }
       // 数字键切换工具
       if (TOOL_KEYS[e.key]) {
+        const toolId = TOOL_KEYS[e.key];
+        // 付费门禁：马赛克属 Pro 功能，锁定态下通过快捷键('9')激活也必须拦截，
+        // 否则免费/到期用户按 '9' 即可绕过工具栏按钮的门禁去打码。
+        if (toolId === 'mosaic' && !useLicenseStore.getState().canUse('redact')) {
+          useUpgradeDialogStore.getState().openDialog('redact');
+          e.preventDefault();
+          return;
+        }
         e.preventDefault();
-        setActiveTool(TOOL_KEYS[e.key]);
+        setActiveTool(toolId);
         return;
       }
       // [ / ] 调节线宽（选中标注时同步更新其线宽）

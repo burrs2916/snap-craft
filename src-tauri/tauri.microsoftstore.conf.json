@@ -12,7 +12,7 @@
       "digestAlgorithm": "sha256",
       "timestampUrl": "",
       "webviewInstallMode": {
-        "type": "emulation"
+        "type": "skip"
       }
     },
     "createWithMakeAppx": true
