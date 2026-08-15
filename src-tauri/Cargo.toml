@@ -1,6 +1,6 @@
 [package]
 name = "snap-craft"
-version = "0.2.0"
+version = "0.2.1"
 description = "SnapCraft - A premium cross-platform screenshot tool"
 authors = ["you"]
 edition = "2021"

@@ -9,7 +9,7 @@
   <Identity
     Name="BURRS.AI-SnapScribe"
     Publisher="CN=6BF20FE5-8F53-448E-9DD3-67F8E30B4B9E"
-    Version="0.2.0.0"
+    Version="0.2.1.0"
     ProcessorArchitecture="x64" />
 
   <Properties>
