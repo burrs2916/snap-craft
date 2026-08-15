@@ -30,6 +30,8 @@ fn shortcut_to_event(key: Code, mods: Modifiers) -> Option<&'static str> {
         Code::Digit2 => Some("capture-region"),
         Code::Digit3 => Some("capture-window"),
         Code::Digit4 => Some("capture-scroll-frame"),
+        Code::KeyO => Some("import-image"),
+        Code::KeyV => Some("clip-ocr"),
         _ => None,
     }
 }
@@ -155,6 +157,7 @@ pub fn run() {
                     (Code::Digit2, "⌘/Ctrl+Shift+2"),
                     (Code::Digit3, "⌘/Ctrl+Shift+3"),
                     (Code::Digit4, "⌘/Ctrl+Shift+4"),
+                    (Code::KeyO, "⌘/Ctrl+Shift+O"),
                 ];
                 for (code, label) in keys {
                     if app.global_shortcut()
@@ -163,6 +166,17 @@ pub fn run() {
                     {
                         failed.push(label.to_string());
                     }
+                }
+            }
+            // 静默取字：⌘⌥V（macOS）/ Ctrl+Alt+V（Win/Linux）。
+            // 用 ALT 修饰而非 SHIFT，避免覆盖系统 ⌘⇧V（粘贴并匹配样式）。
+            for modifiers in [Modifiers::SUPER, Modifiers::CONTROL] {
+                let alt = modifiers | Modifiers::ALT;
+                if app.global_shortcut()
+                    .register(Shortcut::new(Some(alt), Code::KeyV))
+                    .is_err()
+                {
+                    failed.push("⌘/Ctrl+Alt+V".to_string());
                 }
             }
             if !failed.is_empty() {
@@ -187,6 +201,8 @@ pub fn run() {
                 MenuItem::with_id(app, "cap_region", "区域截图", true, Some(acc_region))?;
             let mi_window =
                 MenuItem::with_id(app, "cap_window", "窗口截图", true, Some(acc_window))?;
+            let mi_open =
+                MenuItem::with_id(app, "open_image", "打开图片…", true, None::<&str>)?;
             let mi_show = MenuItem::with_id(app, "show_main", "打开 SnapCraft", true, None::<&str>)?;
             let mi_quit = MenuItem::with_id(app, "quit", "退出", true, Some(acc_quit))?;
             let sep1 = PredefinedMenuItem::separator(app)?;
@@ -197,6 +213,7 @@ pub fn run() {
                     &mi_screen,
                     &mi_region,
                     &mi_window,
+                    &mi_open,
                     &sep1,
                     &mi_show,
                     &sep2,
@@ -223,6 +240,9 @@ pub fn run() {
                         }
                         "cap_window" => {
                             let _ = handle.emit("capture-window", ());
+                        }
+                        "open_image" => {
+                            let _ = handle.emit("import-image", ());
                         }
                         "show_main" => {
                             if let Some(w) = handle.get_webview_window("main") {
@@ -288,6 +308,7 @@ pub fn run() {
             commands::history::update_screenshot_image,
             commands::history::set_screenshot_ocr,
             commands::history::set_screenshot_ocr_full,
+            commands::history::import_images,
             get_platform,
             #[cfg(target_os = "macos")]
             is_sandboxed,

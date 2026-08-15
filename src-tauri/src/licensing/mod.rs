@@ -49,10 +49,13 @@ pub const TRIAL_DAYS: i64 = 14;
 pub const SUBSCRIPTION_PRODUCT_ID: &str = "9NWLSNN7N609";
 
 /// How long a verified subscription is trusted locally before the next Store
-/// reconciliation (used to stamp `subscription_expires_at`). Kept long because
-/// the real expiry is re-confirmed by `sync_with_store` on every launch.
+/// reconciliation (used to stamp `subscription_expires_at`). `sync_with_store`
+/// runs on every launch and is now bidirectional — it both unlocks (Store has
+/// an active entitlement) and REVOKES (Store reports none) — so this window
+/// only needs to cover offline gaps between launches. 45 days covers a monthly
+/// billing period plus margin; an online launch always re-confirms reality.
 #[allow(dead_code)]
-const SUBSCRIPTION_LOCAL_TRUST_DAYS: i64 = 365;
+const SUBSCRIPTION_LOCAL_TRUST_DAYS: i64 = 45;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -157,11 +160,17 @@ impl LicensingService {
         }
     }
 
-    /// Reconcile the subscription entitlement with Microsoft Store (Windows
-    /// only). Strategy: add, never subtract. If Store reports an active
-    /// subscription but local state has none, mark Pro and emit `license-changed`
-    /// so the UI refreshes immediately. If Store reports nothing or is
-    /// unreachable, keep the local state untouched.
+    /// Reconcile the subscription entitlement with the Microsoft Store (Windows
+    /// only). Bidirectional strategy:
+    /// - Store has an active subscription but local state lacks it -> auto-unlock
+    ///   (add) and emit `license-changed` so the UI refreshes immediately.
+    /// - Store confirms an active subscription that local state already has ->
+    ///   refresh the local trust window so an offline gap between launches never
+    ///   silently drops Pro.
+    /// - Store reports NO active subscription but local state still thinks Pro
+    ///   (user cancelled / refunded / lapsed) -> REVOKE the local entitlement and
+    ///   emit `license-changed` (this is the "subtract" half that was missing).
+    /// - Store unreachable -> keep local state untouched.
     #[allow(dead_code)]
     pub async fn sync_with_store(&self, app_handle: &AppHandle) {
         #[cfg(not(target_os = "windows"))]
@@ -190,30 +199,69 @@ impl LicensingService {
                 .map(|dt| dt.with_timezone(&Utc) > Utc::now())
                 .unwrap_or(false);
 
-            if owned && !local_pro {
+            if owned {
+                if !local_pro {
+                    // Store reports an active subscription but local state lacks it →
+                    // auto-unlock (add). Persist before mutating in-memory state.
+                    let mut new_state = state.clone();
+                    new_state.subscription_expires_at = Some(
+                        (Utc::now() + chrono::Duration::days(SUBSCRIPTION_LOCAL_TRUST_DAYS))
+                            .to_rfc3339(),
+                    );
+                    new_state.store_order_id = Some(format!(
+                        "store-sync:{}:{}",
+                        SUBSCRIPTION_PRODUCT_ID,
+                        Utc::now().to_rfc3339()
+                    ));
+                    if let Err(e) = Self::save_state(&self.state_path, &new_state) {
+                        clog!("licensing", "failed to persist store sync: {}", e);
+                        return;
+                    }
+                    let new_status = Self::compute_status(&new_state);
+                    *state = new_state;
+                    drop(state);
+                    clog!("licensing", "store sync: Pro auto-unlocked from Store entitlement");
+                    if let Err(e) = app_handle.emit("license-changed", &new_status) {
+                        clog!("licensing", "failed to emit license-changed event: {}", e);
+                    }
+                } else {
+                    // Store confirms still subscribed → refresh the local trust window so an
+                    // offline gap between launches never silently drops Pro.
+                    let mut new_state = state.clone();
+                    new_state.subscription_expires_at = Some(
+                        (Utc::now() + chrono::Duration::days(SUBSCRIPTION_LOCAL_TRUST_DAYS))
+                            .to_rfc3339(),
+                    );
+                    if let Err(e) = Self::save_state(&self.state_path, &new_state) {
+                        clog!("licensing", "failed to persist store sync refresh: {}", e);
+                        return;
+                    }
+                    *state = new_state;
+                    drop(state);
+                    clog!("licensing", "store sync: subscription trust window refreshed");
+                }
+            } else if local_pro {
+                // Store reports NO active subscription but local state still thinks Pro
+                // (e.g. user cancelled / refunded / subscription lapsed). Revoke the local
+                // entitlement so gating reflects reality — this is the "subtract" half of
+                // the reconcile that was previously missing.
                 let mut new_state = state.clone();
-                new_state.subscription_expires_at =
-                    Some((Utc::now() + chrono::Duration::days(SUBSCRIPTION_LOCAL_TRUST_DAYS)).to_rfc3339());
-                new_state.store_order_id = Some(format!(
-                    "store-sync:{}:{}",
-                    SUBSCRIPTION_PRODUCT_ID,
-                    Utc::now().to_rfc3339()
-                ));
+                new_state.subscription_expires_at = None;
                 if let Err(e) = Self::save_state(&self.state_path, &new_state) {
-                    clog!("licensing", "failed to persist store sync: {}", e);
+                    clog!("licensing", "failed to persist store revoke: {}", e);
                     return;
                 }
                 let new_status = Self::compute_status(&new_state);
                 *state = new_state;
                 drop(state);
-                clog!("licensing", "store sync: Pro auto-unlocked from Store entitlement");
+                clog!("licensing", "store sync: subscription revoked (Store reports no entitlement)");
                 if let Err(e) = app_handle.emit("license-changed", &new_status) {
                     clog!("licensing", "failed to emit license-changed event: {}", e);
                 }
             } else {
                 clog!(
                     "licensing",
-                    "store sync: no auto-unlock needed (owned={}, local_pro={})",
+                    "store sync: nothing to reconcile (owned={}, local_pro={})",
                     owned,
                     local_pro
                 );

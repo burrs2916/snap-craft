@@ -13,6 +13,7 @@
 //    （保留最近若干轮与全部 system），避免超长会话触发 API 400/413。
 
 import type { AiConfig, AiMessage, StreamOpts, AiUsage, AiToolDef, AiToolCall, AiToolResult, AiAgentStep } from './aiTypes';
+import { invoke } from '@tauri-apps/api/core';
 import {
   parseShapedToolCalls,
   stripShapedToolCalls as stripShapedToolCallsText,
@@ -29,6 +30,21 @@ function parseDataUrl(dataUrl: string): ParsedDataUrl {
   const m = /^data:([^;]+);base64,(.*)$/.exec(dataUrl);
   if (m) return { mediaType: m[1], base64: m[2] };
   return { mediaType: 'image/png', base64: '' };
+}
+
+/** AI 客户端诊断：把请求级错误（尤其 4xx/5xx 的真实响应体）同时打到浏览器
+ *  console 与 Rust 侧 debug.log（via diag_log 命令，tag=diag）。便于无面板时
+ *  从日志定位根因（如 400 的真实原因：max_tokens 过大 / 模型不存在 / key 失效）。
+ *  invoke 为 fire-and-forget：即便命令被拒也不阻塞原错误抛出。 */
+export function diagLogAi(msg: string, level: 'info' | 'warn' | 'error' = 'error'): void {
+  const fn = level === 'error' ? console.error : level === 'warn' ? console.warn : console.info;
+  fn('[ai-client]', msg);
+  void invoke('diag_log', { msg }).catch(() => {});
+}
+
+/** 估算一组消息的总字符数（用于诊断日志，粗略反映请求体量） */
+function totalChars(msgs: AiMessage[]): number {
+  return msgs.reduce((s, m) => s + (m.content?.length ?? 0), 0);
 }
 
 /** 收集一条消息内全部图片 data URL（主图 + 多图），并去空 */
@@ -157,7 +173,14 @@ function buildHeaders(config: AiConfig): Record<string, string> {
   return headers;
 }
 
-function buildBody(config: AiConfig, messages: AiMessage[], stream: boolean, tools?: AiToolDef[]) {
+function buildBody(
+  config: AiConfig,
+  messages: AiMessage[],
+  stream: boolean,
+  tools?: AiToolDef[],
+  maxTokens = 16_384,
+  toolChoice?: string,
+) {
   if (config.apiType === 'anthropic') {
     const { system, rest } = toAnthropicMessages(messages);
     // 提示缓存（对齐 openclaw anthropic-payload-policy.ts）：把稳定的 system 打上
@@ -182,9 +205,9 @@ function buildBody(config: AiConfig, messages: AiMessage[], stream: boolean, too
       model: config.model,
       system: systemBlocks,
       messages: cachedRest,
-      // 输出上限：8192 在 PRD / 竞品分析 / 多截图图文报告等长文档场景下会被截断。
-      // 提升至 16384 覆盖 GPT-4o / Claude 3.5 的常用上限；不支持的模型会按 API 报错回退。
-      max_tokens: 16384,
+      // 输出上限：由调用方按模型真实 maxTokens 透传（resolveModelLimits），
+      // 保证 input + max_tokens ≤ 模型上下文窗口，避免叠加后触发 400。
+      max_tokens: maxTokens,
       temperature: config.temperature,
       stream,
     };
@@ -195,6 +218,9 @@ function buildBody(config: AiConfig, messages: AiMessage[], stream: boolean, too
         description: t.description,
         input_schema: t.inputSchema,
       }));
+      // 强制工具：哨兵等「必须真正执行工具」的场景——模型本轮只能触发该工具，
+      // 杜绝只产出文字报告而不打码（典型「识别了却没打码」退化）。
+      if (toolChoice) body.tool_choice = { type: 'tool', name: toolChoice };
     }
     return body;
   }
@@ -202,7 +228,7 @@ function buildBody(config: AiConfig, messages: AiMessage[], stream: boolean, too
     model: config.model,
     messages: toOpenAiMessages(messages),
     temperature: config.temperature,
-    max_tokens: 16384,
+    max_tokens: maxTokens,
     stream,
     // 请求服务端在末帧回传 usage（prompt/completion tokens），用于成本透明（OpenAI 兼容）
     ...(stream ? { stream_options: { include_usage: true } } : {}),
@@ -213,7 +239,11 @@ function buildBody(config: AiConfig, messages: AiMessage[], stream: boolean, too
       type: 'function',
       function: { name: t.name, description: t.description, parameters: t.inputSchema },
     }));
-    body.tool_choice = 'auto';
+    // 强制工具：传入 toolChoice 时锁定该工具（模型必须调用，不能只写文本）；
+    // 否则保持 'auto'（模型自行决定是否调用）。
+    body.tool_choice = toolChoice
+      ? { type: 'function', function: { name: toolChoice } }
+      : 'auto';
   }
   return body;
 }
@@ -492,13 +522,13 @@ function readAbortable(
 /** 单次流式请求（含 SSE 帧解析，不含重试）；HTTP/内嵌错误带 .status 供重试判定。
  *  返回正文文本 + 本次请求产出的原始工具调用（供 streamChatWithTools 驱动工具循环）。 */
 async function streamOnce(opts: StreamOpts): Promise<{ text: string; toolCalls: RawToolCall[] }> {
-  const { config, messages, onChunk, signal, onUsage, tools, onThinking } = opts;
+  const { config, messages, onChunk, signal, onUsage, tools, onThinking, toolChoice } = opts;
   const usage: AiUsage = { input: 0, output: 0 };
   const url = buildUrl(config);
   const resp = await fetch(url, {
     method: 'POST',
     headers: buildHeaders(config),
-    body: JSON.stringify(buildBody(config, messages, true, tools)),
+    body: JSON.stringify(buildBody(config, messages, true, tools, opts.maxTokens, toolChoice)),
     signal,
   });
   if (!resp.ok) {
@@ -513,6 +543,9 @@ async function streamOnce(opts: StreamOpts): Promise<{ text: string; toolCalls: 
     const err: any = new Error(`HTTP ${resp.status}: ${detail}`);
     err.status = resp.status;
     err.retryAfter = parseRetryAfter(resp.headers);
+    diagLogAi(
+      `HTTP ${resp.status} [${config.apiType}] model=${config.model} base=${config.baseUrl} msgs=${messages.length} chars≈${totalChars(messages)} :: ${detail}`,
+    );
     throw err;
   }
   if (!resp.body) throw new Error('no response body');
@@ -684,6 +717,9 @@ export interface StreamWithToolsOpts extends StreamOpts {
   tools: AiToolDef[];
   executor: (name: string, args: Record<string, any>) => Promise<{ content: string; isError?: boolean }>;
   maxToolTurns?: number;
+  /** 可选：强制模型每轮调用指定工具（如隐私哨兵锁定 redact_area）。
+   *  传入后模型无法退化成纯文字报告，必须真正执行工具；循环靠「连续重复工具调用」检测终止。 */
+  forceToolName?: string;
   onToolCall?: (step: AiAgentStep) => void;
   onToolResult?: (callId: string, result: string, isError: boolean) => void;
 }
@@ -705,7 +741,7 @@ const MAX_REPEAT_TOOL = 3;
 export async function streamChatWithTools(
   opts: StreamWithToolsOpts,
 ): Promise<{ text: string; toolCalls: AiToolCall[] }> {
-  const { tools, executor, maxToolTurns = 8, onToolCall, onToolResult, onChunk, signal, config } = opts;
+  const { tools, executor, maxToolTurns = 8, forceToolName, onToolCall, onToolResult, onChunk, signal, config } = opts;
   // 退化路径：未给工具时等同于普通流式
   if (!tools?.length) {
     const text = await streamChat({ config, messages: opts.messages, onChunk, onUsage: opts.onUsage, signal });
@@ -720,6 +756,9 @@ export async function streamChatWithTools(
   // 让模型「看到」最后一批工具结果并给出总结，避免用户只见到工具输出而无结论。
   let exhausted = false;
   let totalToolCalls: AiToolCall[] = [];
+  // 推理模型兜底：若供应商因「thinking mode 不支持强制 tool_choice」拒绝（HTTP 400），
+  // 置位后本工具循环后续轮次改用 tool_choice:'auto' 重试，避免哨兵打码整体失败。
+  let forceBlocked = false;
   // 失控循环检测状态：记录上一轮工具指纹与连续重复计数
   let lastTurnKey = '';
   let repeatCount = 0;
@@ -734,20 +773,36 @@ export async function streamChatWithTools(
   ): Promise<{ text: string; toolCalls: RawToolCall[] }> => {
     for (let attempt = 0; ; attempt++) {
       try {
-        const r = await streamOnce({
-          config,
-          messages,
-          onChunk,
-          onUsage: opts.onUsage,
-          onThinking: opts.onThinking,
-          signal,
-          tools: withTools ? tools : undefined,
-        });
+      const r = await streamOnce({
+        config,
+        messages,
+        onChunk,
+        onUsage: opts.onUsage,
+        onThinking: opts.onThinking,
+        signal,
+        tools: withTools ? tools : undefined,
+        maxTokens: opts.maxTokens,
+        // 强制工具：哨兵模式每轮都必须调用 redact_area，杜绝只出报告不打码。
+        // 推理模型 thinking mode 下供应商拒绝 required/object 形式 → 经下方 catch 置 forceBlocked
+        // 后改用 'auto'（工具已收窄为仅 redact_area，仍会调用）。
+        toolChoice: withTools ? (forceBlocked ? undefined : forceToolName) : undefined,
+      });
         exhausted = false;
         return r;
       } catch (e: any) {
         // 用户取消（或超时）绝不重试
         if (e?.name === 'AbortError') throw e;
+        // 推理模型兜底：供应商因 thinking mode 拒绝强制 tool_choice（HTTP 400，
+        // "tool_choice ... does not support being set to required or object in thinking mode"）。
+        // 置 forceBlocked 后用 'auto' 重试本轮，哨兵打码仍可经收窄的单一 redact_area 工具完成。
+        const errMsg = `${e?.message ?? ''} ${e?.body ?? ''} ${e?.error?.message ?? ''}`;
+        if (forceToolName && /tool_choice/i.test(errMsg) && /thinking mode/i.test(errMsg)) {
+          forceBlocked = true;
+          opts.onRetry?.(fullText);
+          await sleep(0, signal);
+          if (signal?.aborted) throw makeAbortError();
+          continue;
+        }
         const status = e?.status;
         const isLast = attempt >= MAX_RETRIES - 1;
         const canRetry = status ? RETRYABLE_STATUS(status) : !e?.streamError;
@@ -909,6 +964,9 @@ export async function chatOnce(opts: {
       } catch {
         /* ignore */
       }
+      diagLogAi(
+        `HTTP ${resp.status} [${config.apiType}] model=${config.model} base=${config.baseUrl} msgs=${messages.length} chars≈${totalChars(messages)} :: ${detail}`,
+      );
       throw new Error(`HTTP ${resp.status}: ${detail}`);
     }
     const json = await resp.json();

@@ -15,13 +15,13 @@ import type { DocxImage, DocThemeId } from '../aiTypes';
 import { mdToHtml } from './markdownHtml';
 import { markdownToDocx } from './markdownDocx';
 import { markdownToPptx } from './markdownPptx';
-import { markdownToXlsx } from './markdownXlsx';
 import { buildZip, type ZipEntry } from './zipStore';
 import { pickExportPath, deriveFileHint } from './exportPath';
 import { pushExportHistory } from './exportHistory';
-import { firstHeading, mdToPlainText, printHtmlViaIframe, frontImageBlockHtml } from '../aiUtils';
+import { firstHeading, mdToPlainText, frontImageBlockHtml } from '../aiUtils';
+import { jsPDF } from 'jspdf';
+import html2canvas from 'html2canvas';
 import { stripSnapMarkers, hasSnapMarkers } from '../aiPresets';
-import { t } from '../../../i18n';
 import { useLicenseStore } from '../../licensing/licenseStore';
 import { useUpgradeDialogStore } from '../../licensing/upgradeDialogStore';
 
@@ -189,36 +189,7 @@ export async function exportPptx(ctx: ExportContext): Promise<string | null> {
   return path;
 }
 
-/**
- * 导出为 XLSX (Excel)。
- */
-export async function exportXlsx(
-  ctx: ExportContext,
-  sheetName?: string,
-): Promise<string | null> {
-  const resolved = resolveContext(ctx);
-  const md = stripSnapMarkers(resolved.markdown);
-
-  const bytes = markdownToXlsx(md, sheetName || resolved.title);
-
-  const path = await pickExportPath({
-    ext: 'xlsx',
-    hint: resolved.fileHint || deriveFileHint(resolved.title),
-    filters: [{ name: 'Excel', extensions: ['xlsx'] }],
-  });
-  if (!path) return null;
-
-  await invoke('save_binary_file', { bytes: Array.from(bytes), filePath: path });
-  pushExportHistory({
-    path,
-    format: 'xlsx',
-    title: firstHeading(resolved.markdown) || resolved.title,
-    time: Date.now(),
-  });
-  return path;
-}
-
-// ── PDF（打印） ──
+// ── PDF（生成文件） ──
 
 /**
  * 导出为 PDF（通过系统打印对话框）。
@@ -244,11 +215,100 @@ export async function exportPdf(ctx: ExportContext): Promise<string | null> {
     ? htmlBody.replace('<main class="doc-main">', `<main class="doc-main">${imgBlock}`)
     : htmlBody;
 
-  const err = await printHtmlViaIframe(html);
-  if (err) {
-    throw new Error(t('export.pdfPrintFailed', { msg: err }));
+  const path = await pickExportPath({
+    ext: 'pdf',
+    hint: resolved.fileHint || deriveFileHint(resolved.title),
+    filters: [{ name: 'PDF', extensions: ['pdf'] }],
+  });
+  if (!path) return null;
+
+  // 在屏幕外渲染完整文档，再用 html2canvas 截图生成 PDF（中文由浏览器排版栅格化，无需嵌入字体）
+  const canvas = await renderHtmlToCanvas(html);
+  const pdf = new jsPDF({ unit: 'pt', format: 'a4', compress: true });
+  const pageW = pdf.internal.pageSize.getWidth();
+  const pageH = pdf.internal.pageSize.getHeight();
+  const imgW = pageW;
+  const imgH = (canvas.height * imgW) / canvas.width;
+
+  const imgData = canvas.toDataURL('image/jpeg', 0.92);
+  let heightLeft = imgH;
+  let position = 0;
+  pdf.addImage(imgData, 'JPEG', 0, position, imgW, imgH);
+  heightLeft -= pageH;
+  while (heightLeft > 0) {
+    position -= pageH;
+    pdf.addPage();
+    pdf.addImage(imgData, 'JPEG', 0, position, imgW, imgH);
+    heightLeft -= pageH;
   }
-  return null;
+
+  const ab = pdf.output('arraybuffer');
+  await invoke('save_binary_file', {
+    bytes: Array.from(new Uint8Array(ab)),
+    filePath: path,
+  });
+  pushExportHistory({
+    path,
+    format: 'pdf',
+    title: firstHeading(resolved.markdown) || resolved.title,
+    time: Date.now(),
+  });
+  return path;
+}
+
+/**
+ * 把完整文档 HTML 渲染进屏幕外容器并截图成 canvas。
+ * 仅捕获 .doc-page 卡片（去掉外边距/阴影/圆角，铺满 A4 宽度），中文由浏览器排版栅格化。
+ */
+async function renderHtmlToCanvas(html: string): Promise<HTMLCanvasElement> {
+  const styleMatch = html.match(/<style[^>]*>([\s\S]*?)<\/style>/i);
+  const bodyMatch = html.match(/<body[^>]*>([\s\S]*?)<\/body>/i);
+  const body = bodyMatch ? bodyMatch[1] : html;
+
+  const host = document.createElement('div');
+  host.setAttribute('data-pdf-render', '1');
+  host.style.cssText =
+    'position:fixed;left:-10000px;top:0;width:794px;background:#fff;';
+  if (styleMatch) {
+    const style = document.createElement('style');
+    style.textContent =
+      // 捕获时让卡片铺满容器宽度，去掉屏幕态的外边距/阴影/圆角
+      '.doc-page{max-width:none!important;margin:0!important;border-radius:0!important;box-shadow:none!important;}' +
+      styleMatch[1];
+    host.appendChild(style);
+  }
+  host.insertAdjacentHTML('beforeend', body);
+  document.body.appendChild(host);
+
+  try {
+    const imgs = Array.from(host.querySelectorAll('img'));
+    await Promise.all(
+      imgs.map(
+        (img) =>
+          new Promise<void>((resolve) => {
+            if (img.complete && img.naturalWidth > 0) return resolve();
+            img.onload = () => resolve();
+            img.onerror = () => resolve();
+            setTimeout(resolve, 1500);
+          }),
+      ),
+    );
+    // 等字体/布局稳定
+    await new Promise((r) => setTimeout(r, 120));
+
+    const card = host.querySelector('.doc-page') as HTMLElement | null;
+    const target = card ?? host;
+    const canvas = await html2canvas(target, {
+      scale: 2,
+      backgroundColor: '#ffffff',
+      useCORS: true,
+      logging: false,
+      windowWidth: 794,
+    });
+    return canvas;
+  } finally {
+    if (host.parentNode) host.parentNode.removeChild(host);
+  }
 }
 
 // ── ZIP 归档 ──
@@ -333,18 +393,18 @@ export function buildPreviewHtml(ctx: ExportContext): string {
 
 // ── 统一导出入口（按格式分发） ──
 
-export type ExportFormat = 'md' | 'txt' | 'html' | 'docx' | 'pptx' | 'xlsx' | 'pdf';
+export type ExportFormat = 'md' | 'txt' | 'html' | 'docx' | 'pptx' | 'pdf';
 
 /**
  * 统一导出入口：按格式分发到对应导出函数。
- * @returns 保存路径（null = 用户取消），PDF 返回错误码或 null
+ * @returns 保存路径（null = 用户取消）
  */
 export async function exportAs(
   ctx: ExportContext,
   fmt: ExportFormat,
   sheetName?: string,
 ): Promise<string | null> {
-  // 付费门禁：AI 生成的文档（含 MD/TXT/HTML/DOCX/PPTX/XLSX/PDF）试用结束后需订阅。
+  // 付费门禁：AI 生成的文档（含 MD/TXT/HTML/DOCX/PPTX/PDF）试用结束后需订阅。
   // 无权限时弹出升级弹窗，并返回 null（等同用户取消，不触发错误提示）。
   if (!useLicenseStore.getState().canUse('export_doc')) {
     useUpgradeDialogStore.getState().openDialog('export_doc');
@@ -359,8 +419,6 @@ export async function exportAs(
       return exportDocx(ctx);
     case 'pptx':
       return exportPptx(ctx);
-    case 'xlsx':
-      return exportXlsx(ctx, sheetName);
     case 'pdf':
       return exportPdf(ctx);
   }

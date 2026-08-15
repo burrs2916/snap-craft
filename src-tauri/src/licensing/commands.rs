@@ -21,7 +21,7 @@ pub async fn check_license_status(
     Ok(status)
 }
 
-/// 触发 Microsoft Store 订阅购买流程（仅 Windows 商店版本可用）。
+/// Triggers the Microsoft Store subscription purchase flow (only available in the Windows Store build).
 #[tauri::command]
 pub async fn purchase_subscription(
     service: State<'_, Arc<LicensingService>>,
@@ -33,7 +33,13 @@ pub async fn purchase_subscription(
         let order_id = windows_store::request_purchase_subscription(&app_handle)
             .await
             .map_err(String::from)?;
-        service.unlock_subscription(Some(order_id)).await
+        // Optimistically unlock on a confirmed purchase, then reconcile against
+        // the Store entitlement so a lying/misleading purchase status can't
+        // wrongly grant Pro (hazard 3). The refresh branch preserves the
+        // purchase order_id; only a genuine "no entitlement" revokes.
+        service.unlock_subscription(Some(order_id)).await?;
+        service.sync_with_store(&app_handle).await;
+        service.status().await
     }
     #[cfg(not(target_os = "windows"))]
     {

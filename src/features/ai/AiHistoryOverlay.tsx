@@ -7,7 +7,7 @@ import { useState } from 'react';
 import { useAiStore, type AiConvMeta } from './aiStore';
 import { stripSnapMarkers } from './aiPresets';
 import { AiMarkdown } from './aiMarkdown';
-import { exportAs, exportZip, type ExportContext, type ExportFormat } from './export/exportService';
+import { exportAs, exportZip, buildPreviewHtml, type ExportContext, type ExportFormat } from './export/exportService';
 import { dataUrlToBytes } from './export/zipStore';
 import { revealInFolder, deriveFileHint, baseNameOf } from './export/exportPath';
 import type { AiChatTurn } from './aiTypes';
@@ -18,12 +18,14 @@ export interface AiHistoryOverlayProps {
   onClose: () => void;
   onHide: () => void;
   onLoadConv: (hash: string) => void;
+  /** 以已构建的 HTML 打开预览层（复用 AIPanel 的 PreviewModal） */
+  onPreviewHtml?: (html: string) => void;
   windowChrome: boolean;
   openExported: (path: string) => void;
   setLastExportedPath: (path: string) => void;
 }
 
-export function AiHistoryOverlay({ onClose, onHide, onLoadConv, windowChrome, openExported, setLastExportedPath }: AiHistoryOverlayProps) {
+export function AiHistoryOverlay({ onClose, onHide, onLoadConv, onPreviewHtml, windowChrome, openExported, setLastExportedPath }: AiHistoryOverlayProps) {
   const { listConvMeta, getConvByHash, deleteConv, forkConversation } = useAiStore();
 
   const [historyList, setHistoryList] = useState<AiConvMeta[]>(() => listConvMeta());
@@ -34,6 +36,29 @@ export function AiHistoryOverlay({ onClose, onHide, onLoadConv, windowChrome, op
 
   const openConvReader = (meta: AiConvMeta) => {
     setActiveConv({ meta, conv: getConvByHash(meta.hash) });
+  };
+  // 预览：把该线程最后一次 AI 成稿渲染为正式排版 HTML，交给 AIPanel 预览层展示
+  const previewConv = (meta: AiConvMeta) => {
+    if (!onPreviewHtml) return;
+    const conv = getConvByHash(meta.hash);
+    let doc = '';
+    for (let i = conv.length - 1; i >= 0; i--) {
+      if (conv[i].role === 'assistant') {
+        doc = conv[i].content;
+        break;
+      }
+    }
+    if (!doc) {
+      setHistoryMsg(t('ai.historyNoPreview'));
+      return;
+    }
+    const html = buildPreviewHtml({
+      markdown: doc,
+      title: firstHeading(stripSnapMarkers(doc)) || meta.presetName,
+      subtitle: meta.firstGoal,
+      theme: 'modern',
+    });
+    onPreviewHtml(html);
   };
   const loadConvIntoPanel = (hash: string) => {
     onLoadConv(hash);
@@ -61,7 +86,7 @@ export function AiHistoryOverlay({ onClose, onHide, onLoadConv, windowChrome, op
     const md = activeDoc;
     const thumb = activeConv.meta.thumb;
     const coverImages =
-      thumb && (fmt === 'docx' || fmt === 'pdf' || fmt === 'html' || fmt === 'pptx')
+      thumb && (fmt === 'docx' || fmt === 'pdf' || fmt === 'html')
         ? [{ dataUrl: thumb, caption: activeConv.meta.firstGoal || undefined }]
         : undefined;
 
@@ -197,17 +222,10 @@ export function AiHistoryOverlay({ onClose, onHide, onLoadConv, windowChrome, op
           </button>
           <button
             className="ai-btn ai-btn-sm"
-            onClick={() => handleHistoryExport('pptx')}
-            title={t('ai.exportPptxTitle')}
+            onClick={() => previewConv(activeConv.meta)}
+            title={t('ai.previewTitle')}
           >
-            .pptx
-          </button>
-          <button
-            className="ai-btn ai-btn-sm ai-btn-primary"
-            onClick={() => handleHistoryExport('xlsx')}
-            title={t('ai.exportXlsxTitle')}
-          >
-            .xlsx
+            👁 {t('ai.preview')}
           </button>
           <button
             className="ai-btn ai-btn-sm"
@@ -303,6 +321,9 @@ export function AiHistoryOverlay({ onClose, onHide, onLoadConv, windowChrome, op
                 <div className="ai-hist-actions">
                   <button className="ai-link" onClick={() => openConvReader(meta)}>
                     {t('ai.historyRead')}
+                  </button>
+                  <button className="ai-link" onClick={() => previewConv(meta)} title={t('ai.previewTitle')}>
+                    👁 {t('ai.preview')}
                   </button>
                   <button className="ai-link" onClick={() => loadConvIntoPanel(meta.hash)}>
                     {t('ai.historyLoad')}

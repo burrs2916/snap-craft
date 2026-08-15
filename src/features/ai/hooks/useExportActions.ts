@@ -44,6 +44,8 @@ export interface ExportActionsApi extends ExportActionsState {
   doExportZip: (files: ZipEntry[], hint: string) => Promise<void>;
   /** 预览文档（Tauri 内 iframe / 浏览器新标签） */
   doPreview: (ctx: ExportContext) => void;
+  /** 直接以已构建的 HTML 打开预览（历史库等外部场景复用预览层） */
+  openPreview: (html: string) => void;
   /** 复制为富文本到剪贴板 */
   doCopyRich: (ctx: ExportContext, plainText: string) => Promise<boolean>;
   /** 在 Finder/Explorer 中显示上次导出文件 */
@@ -96,14 +98,7 @@ export function useExportActions(): ExportActionsApi {
     setExportMsg(null);
     try {
       const path = await exportAs(ctx, fmt, sheetName);
-      if (!path) {
-        // 用户取消或 PDF 打印式导出
-        if (fmt === 'pdf') {
-          setExportMsg(t('ai.exportPdfHint'));
-          setExportErr(false);
-        }
-        return;
-      }
+      if (!path) return; // 用户取消
       const name = baseNameOf(path);
       setExportMsg(t('ai.exportOk', { path: name }));
       setExportErr(false);
@@ -202,6 +197,11 @@ export function useExportActions(): ExportActionsApi {
   }, []);
 
   const closePreview = useCallback(() => setPreviewHtml(null), []);
+
+  // 历史库等外部场景：直接以已构建的 HTML 打开预览层（复用 previewHtml 状态）
+  const openPreview = useCallback((html: string) => {
+    setPreviewHtml(html);
+  }, []);
   const clearMsg = useCallback(() => { setExportMsg(null); setExportErr(false); }, []);
   const getExportHistory = useCallback(() => listExportHistory(), []);
   const doClearExportHistory = useCallback(() => clearExportHistory(), []);
@@ -215,6 +215,7 @@ export function useExportActions(): ExportActionsApi {
     doExport,
     doExportZip,
     doPreview,
+    openPreview,
     doCopyRich,
     revealExported,
     openExported,

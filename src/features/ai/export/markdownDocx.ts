@@ -490,7 +490,7 @@ export async function markdownToDocx(
         5: HeadingLevel.HEADING_5,
         6: HeadingLevel.HEADING_6,
       };
-      const headingSizes: Record<number, number> = { 1: 40, 2: 32, 3: 26, 4: 22, 5: 20, 6: 20 };
+      const headingSizes: Record<number, number> = { 1: 44, 2: 34, 3: 28, 4: 24, 5: 22, 6: 20 };
       const headBorder: any = {};
       if (level === 1 || level === 2) {
         headBorder.left = { style: BorderStyle.SINGLE, size: 18, color: accent, space: 8 };
@@ -501,10 +501,10 @@ export async function markdownToDocx(
       children.push(
         new Paragraph({
           heading: map[level],
-          spacing: { before: level <= 2 ? 200 : 120, after: 80 },
+          spacing: { before: level <= 2 ? 220 : 140, after: 90 },
           border: headBorder,
           children: [
-            new TextRun({ text, color: accent, bold: level <= 2, size: headingSizes[level] }),
+            new TextRun({ text, color: accent, bold: level <= 3, size: headingSizes[level] }),
           ],
         }),
       );

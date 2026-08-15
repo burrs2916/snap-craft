@@ -4,8 +4,9 @@
 //
 // 设计取舍（MVP）：
 // - 按 Markdown 的 # / ## 标题断页（每张标题 slide 一张），标题下正文渲染为文本框。
-// - 支持：段落、无序列表(•)、有序列表(数字前缀)、引用(缩进灰斜体)、代码块(等宽)、表格行(降级等宽文本)。
-// - 截图/图片首版不内嵌（OOXML media 关系复杂，留作后续增量）。AI 输出的文字要点/列表直接成演示稿。
+// - 支持：段落、行内格式(**粗体**/*斜体*/`代码`/[链接](url))、无序/有序列表、任务清单、
+//        引用、代码块、###/#### 子标题、GFM 表格(真实 graphicFrame)、截图内嵌。
+// - 主题色统一使用 themeConstants（确保 HTML/DOCX/PPTX 一致）。
 
 // 类型枢纽已移至 aiTypes.ts（消除循环类型依赖）
 import type { DocxImage, DocThemeId } from '../aiTypes';
@@ -37,6 +38,20 @@ export interface MarkdownToPptxOptions {
   // 无标记时的兜底：把全部截图作为前置内嵌，放在第一张内容幻灯片（标题/正文之前）。
   images?: DocxImage[];
 }
+
+// ---------- 幻灯片几何常量（EMU）----------
+const SLIDE_W = 9144000;
+const SLIDE_H = 6858000;
+const MARGIN_X = 600000;
+const BODY_X = 600000;
+const CONTENT_W = 7944000;
+const TITLE_TOP = 470000; // 标题文字区顶部
+const ACCENT_BAR = { x: MARGIN_X, y: 360000, cx: 1100000, cy: 76000 };
+const TITLE_H = 980000;
+const TITLE_BOTTOM = 1600000; // 标题/装饰条下方：正文或图片起点
+const FOOTER_Y = SLIDE_H - 360000;
+const PIC_TOP = 1620000;
+const PIC_BOTTOM = 6280000; // 页脚上方安全线
 
 // ---------- 图片内嵌辅助（PPTX media 部件）----------
 // base64ToBytes 已复用 zipStore.ts 的 dataUrlToBytes（消除重复实现）
@@ -82,6 +97,79 @@ function dataUrlDims(dataUrl: string): { w: number; h: number } {
 import { escXml as esc, splitRow, isTableSep } from '../../../shared/markdownParse';
 function encStr(s: string): Uint8Array {
   return new TextEncoder().encode(s);
+}
+
+// ---------- 行内 Markdown → OOXML runs ----------
+interface RunOpts {
+  sz?: number;
+  bold?: boolean;
+  italic?: boolean;
+  code?: boolean;
+  color?: string;
+  linkRId?: string;
+}
+
+/** 生成单个 <a:r> 文本 run。hlinkClick 必须位于 <a:rPr> 内部（OOXML 规范）。 */
+function runXml(text: string, o: RunOpts): string {
+  const sz = o.sz ?? 2000;
+  const colorTag = o.color ? `<a:solidFill><a:srgbClr val="${o.color}"/></a:solidFill>` : '';
+  const attrs = `lang="zh-CN" sz="${sz}"${o.bold ? ' b="1"' : ''}${o.italic ? ' i="1"' : ''}`;
+  let inner = colorTag;
+  if (o.code) inner += `<a:latin typeface="Consolas"/><a:cs typeface="Consolas"/>`;
+  if (o.linkRId) inner += `<a:hlinkClick r:id="${o.linkRId}"/>`;
+  const rPr = `<a:rPr ${attrs}>${inner}</a:rPr>`;
+  return `<a:r>${rPr}<a:t>${esc(text)}</a:t></a:r>`;
+}
+
+/** 把一段行内文本解析为多个 run：粗体 / 斜体 / 行内代码 / 链接。
+ *  linkRIdFor: 把 URL 解析为当前幻灯片的关系 Id；返回空串表示不渲染为超链接（仅蓝色文本）。 */
+function renderInline(text: string, sz: number, color: string | undefined, linkRIdFor: (u: string) => string): string {
+  const runs: string[] = [];
+  const re = /(`[^`]+`)|(\*\*[^*]+\*\*)|(\*[^*]+\*)|(_[^_]+_)|(\[[^\]]+\]\([^)]+\))/g;
+  let last = 0;
+  let m: RegExpExecArray | null;
+  const pushPlain = (s: string) => {
+    if (s) runs.push(runXml(s, { sz, color }));
+  };
+  while ((m = re.exec(text)) !== null) {
+    if (m.index > last) pushPlain(text.slice(last, m.index));
+    const tok = m[0];
+    if (m[1]) {
+      runs.push(runXml(m[1].slice(1, -1), { sz, code: true, color }));
+    } else if (m[2]) {
+      runs.push(runXml(m[2].slice(2, -2), { sz, bold: true, color }));
+    } else if (m[3]) {
+      runs.push(runXml(m[3].slice(1, -1), { sz, italic: true, color }));
+    } else if (m[4]) {
+      runs.push(runXml(m[4].slice(1, -1), { sz, italic: true, color }));
+    } else if (m[5]) {
+      const mm = /^\[([^\]]+)\]\(([^)]+)\)$/.exec(tok);
+      if (mm) {
+        const rid = linkRIdFor(mm[2]);
+        runs.push(runXml(mm[1], { sz, color: '0563C1', linkRId: rid || undefined }));
+      } else {
+        pushPlain(tok);
+      }
+    }
+    last = re.lastIndex;
+  }
+  if (last < text.length) pushPlain(text.slice(last));
+  if (runs.length === 0) runs.push(runXml('', { sz, color }));
+  return runs.join('');
+}
+
+// 收集一个幻灯片所有文本块中的链接 URL（去重），用于生成超链接关系。
+function collectBlockLinks(blocks: BodyBlock[]): string[] {
+  const out = new Set<string>();
+  const re = /\[[^\]]+\]\(([^)]+)\)/g;
+  for (const b of blocks) {
+    const lines = b.type === 'text' ? b.lines : [b.header.join('|'), ...b.rows.map((r) => r.join('|'))];
+    for (const l of lines) {
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(l)) !== null) out.add(m[1]);
+    }
+  }
+  return [...out];
 }
 
 // ---------- Markdown → slides ----------
@@ -132,7 +220,7 @@ function parseSlides(md: string): SlideSpec[] {
   return slides;
 }
 
-function renderBody(body: string[]): string {
+function renderBody(body: string[], accent: string, linkRIdFor: (u: string) => string): string {
   const paras: string[] = [];
   let inCode = false;
   let codeBuf: string[] = [];
@@ -140,9 +228,7 @@ function renderBody(body: string[]): string {
     const text = codeBuf.join('\n');
     codeBuf = [];
     inCode = false;
-    paras.push(
-      `<a:p><a:pPr marL="0" indent="0"/><a:r><a:rPr lang="zh-CN" sz="1800"><a:latin typeface="Consolas"/></a:rPr><a:t>${esc(text)}</a:t></a:r></a:p>`,
-    );
+    paras.push(`<a:p><a:pPr><a:lnSpc><a:spcPct val="100000"/></a:lnSpc></a:pPr>${runXml(text, { sz: 1600, code: true })}</a:p>`);
   };
   for (const raw of body) {
     const line = raw.replace(/\s+$/, '');
@@ -159,7 +245,22 @@ function renderBody(body: string[]): string {
       continue;
     }
     if (line.trim() === '') {
-      paras.push('<a:p><a:pPr><a:spcBef><a:spcPts val="1200"/></a:spcBef></a:pPr></a:p>');
+      paras.push('<a:p><a:pPr><a:spcBef><a:spcPts val="600"/></a:spcBef></a:pPr></a:p>');
+      continue;
+    }
+    // ### / #### 子标题：保留层级，渲染为带强调的副标题（更大字号 + 加粗 + 主题色）
+    const h3 = /^###\s+(.*)$/.exec(line);
+    if (h3) {
+      paras.push(
+        `<a:p><a:pPr marL="0" indent="0"><a:buNone/></a:pPr><a:r><a:rPr lang="zh-CN" sz="2800" b="1"><a:solidFill><a:srgbClr val="${accent}"/></a:solidFill></a:rPr><a:t>${esc(h3[1])}</a:t></a:r></a:p>`,
+      );
+      continue;
+    }
+    const h4 = /^####\s+(.*)$/.exec(line);
+    if (h4) {
+      paras.push(
+        `<a:p><a:pPr marL="0" indent="0"><a:buNone/></a:pPr><a:r><a:rPr lang="zh-CN" sz="2400" b="1"><a:solidFill><a:srgbClr val="${accent}"/></a:solidFill></a:rPr><a:t>${esc(h4[1])}</a:t></a:r></a:p>`,
+      );
       continue;
     }
     const quote = /^>\s?(.*)$/.exec(line);
@@ -176,11 +277,11 @@ function renderBody(body: string[]): string {
       if (tm) {
         const mark = tm[1].toLowerCase() === 'x' ? '☑ ' : '☐ ';
         paras.push(
-          `<a:p><a:pPr marL="365760" indent="-365760" algn="l"><a:buNone/></a:pPr><a:r><a:rPr lang="zh-CN" sz="2400"/><a:t>${esc(mark + tm[2])}</a:t></a:r></a:p>`,
+          `<a:p><a:pPr marL="365760" indent="-365760" algn="l"><a:buNone/></a:pPr><a:r><a:rPr lang="zh-CN" sz="2000"/><a:t>${esc(mark)}</a:t></a:r>${renderInline(tm[2], 2000, undefined, linkRIdFor)}</a:p>`,
         );
       } else {
         paras.push(
-          `<a:p><a:pPr marL="365760" indent="-365760" algn="l"><a:buFont typeface="Arial"/><a:buChar char="•"/></a:pPr><a:r><a:rPr lang="zh-CN" sz="2400"/><a:t>${esc(ul[1])}</a:t></a:r></a:p>`,
+          `<a:p><a:pPr marL="365760" indent="-365760" algn="l"><a:buFont typeface="Arial"/><a:buChar char="•"/></a:pPr><a:r><a:rPr lang="zh-CN" sz="2000"/><a:t>${esc(ul[1])}</a:t></a:r></a:p>`,
         );
       }
       continue;
@@ -188,18 +289,19 @@ function renderBody(body: string[]): string {
     const ol = /^\s*\d+[.)]\s+(.*)$/.exec(line);
     if (ol) {
       paras.push(
-        `<a:p><a:pPr marL="365760" indent="-365760" algn="l"><a:buNone/></a:pPr><a:r><a:rPr lang="zh-CN" sz="2400"/><a:t>${esc(line.trim())}</a:t></a:r></a:p>`,
+        `<a:p><a:pPr marL="365760" indent="-365760" algn="l"><a:buNone/></a:pPr><a:r><a:rPr lang="zh-CN" sz="2000"/><a:t>${esc(line.trim())}</a:t></a:r></a:p>`,
       );
       continue;
     }
     if (line.includes('|')) {
+      // 散落的正文管道符行（非表格块）：等宽呈现，避免被误读
       paras.push(
         `<a:p><a:pPr marL="91440" indent="0"/><a:r><a:rPr lang="zh-CN" sz="1800"><a:latin typeface="Consolas"/></a:rPr><a:t>${esc(line.trim())}</a:t></a:r></a:p>`,
       );
       continue;
     }
     paras.push(
-      `<a:p><a:pPr algn="l"/><a:r><a:rPr lang="zh-CN" sz="2400"/><a:t>${esc(line)}</a:t></a:r></a:p>`,
+      `<a:p><a:pPr algn="l"/>${renderInline(line, 2000, undefined, linkRIdFor)}</a:p>`,
     );
   }
   if (inCode) flushCode();
@@ -217,9 +319,9 @@ type BodyBlock =
 
 // alignOf 保留本地实现：PPTX OOXML 需要短码 'l'/'r'/'ctr'，与共享 parseAlign 的 'left'/'center'/'right' 不同
 function alignOf(cell: string): 'l' | 'r' | 'ctr' | '' {
-  const t = cell.trim();
-  const left = t.startsWith(':');
-  const right = t.endsWith(':');
+  const tt = cell.trim();
+  const left = tt.startsWith(':');
+  const right = tt.endsWith(':');
   if (left && right) return 'ctr';
   if (right) return 'r';
   if (left) return 'l';
@@ -264,6 +366,7 @@ function parseBodyBlocks(body: string[]): BodyBlock[] {
 function renderTableBlock(
   blk: Extract<BodyBlock, { type: 'table' }>,
   accent: string,
+  linkRIdFor: (u: string) => string,
 ): { xml: string; h: number; w: number } {
   const colCount = Math.max(blk.header.length, ...blk.rows.map((r) => r.length), 1);
   const norm = (cells: string[]): string[] => {
@@ -276,7 +379,7 @@ function renderTableBlock(
   while (aligns.length < colCount) aligns.push('');
   const rows = blk.rows.map(norm);
 
-  const totalW = 7944000;
+  const totalW = CONTENT_W;
   const colW = Math.floor(totalW / colCount);
   const cellXml = (text: string, align: string, head: boolean): string => {
     const algn = align === 'l' ? 'l' : align === 'r' ? 'r' : align === 'ctr' ? 'ctr' : 'l';
@@ -285,7 +388,7 @@ function renderTableBlock(
     return (
       `<a:tc><a:txBody><a:bodyPr/><a:lstStyle/>` +
       `<a:p><a:pPr algn="${algn}"/>` +
-      `<a:r><a:rPr lang="zh-CN" sz="1400">${txColor}</a:rPr><a:t>${esc(text)}</a:t></a:r>` +
+      `<a:r><a:rPr lang="zh-CN" sz="1400">${txColor}</a:rPr><a:t>${renderInline(text, 1400, head ? undefined : undefined, linkRIdFor)}</a:t></a:r>` +
       `</a:p></a:txBody>` +
       `<a:tcPr marL="45720" marR="45720" marT="22860" marB="22860">${fill}` +
       `<a:lnL w="6350" cap="flat"><a:solidFill><a:srgbClr val="D0D0D0"/></a:solidFill></a:lnL>` +
@@ -298,54 +401,52 @@ function renderTableBlock(
   const rowXml = (cells: string[], head: boolean): string =>
     `<a:tr h="360000">` + cells.map((c, ci) => cellXml(c, aligns[ci] ?? '', head)).join('') + `</a:tr>`;
   const grid = Array.from({ length: colCount }, () => `<a:gridCol w="${colW}"/>`).join('');
+  // 使用内置真实表格样式（Medium Style 2 - Accent 1），确保主题联动与边框正确渲染
   const tbl =
-    `<p:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/table">` +
-    `<a:tbl><a:tblPr firstRow="1"><a:tableStyleId>{5C22544A-E7B7-4C9A-B9C9-1A7C8C3D4E5F}</a:tableStyleId></a:tblPr>` +
+    `<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/table">` +
+    `<a:tbl><a:tblPr firstRow="1"><a:tableStyleId>{5C22544A-7EE6-4342-B048-85BDC9FD1C3A}</a:tableStyleId></a:tblPr>` +
     `<a:tblGrid>${grid}</a:tblGrid>` +
     rowXml(header, true) +
     rows.map((r) => rowXml(r, false)).join('') +
-    `</a:tbl></a:graphicData></p:graphic>`;
+    `</a:tbl></a:graphicData></a:graphic>`;
   const h = (rows.length + 1) * 360000 + 40000;
   return { xml: tbl, h, w: totalW };
 }
 
 // 计算单张幻灯片内所有图片的排布（按真实宽高比 + 可用区域按比例缩放，避免拉伸/重叠）。
-// 返回每个 pic 的 { x, y, cx, cy }（EMU）以及本页 body 文本框应收缩到的底部 y 上限。
+// 返回每个 pic 的 { x, y, cx, cy }（EMU）以及本页正文文本框应起始的 y（图片区正下方）。
 function layoutPics(
   pics: PptxPic[],
   dataUrlOf: (p: PptxPic) => string,
-): { boxes: { x: number; y: number; cx: number; cy: number }[]; bodyBottom: number } {
-  const SLIDE_W = 9144000;
-  const MARGIN_X = 600000;
-  const TOP = 400000;
-  const TITLE_BOTTOM = 1550000; // 标题区底部
-  const BOTTOM = 6680000; // 页脚安全线
-  const GAP = 120000;
-  const availW = SLIDE_W - MARGIN_X * 2;
+): { boxes: { x: number; y: number; cx: number; cy: number }[]; bodyTop: number } {
+  const TOP = PIC_TOP;
+  const BOTTOM = PIC_BOTTOM;
+  const GAP = 140000;
+  const availW = CONTENT_W;
 
-  if (pics.length === 0) return { boxes: [], bodyBottom: BOTTOM };
+  if (pics.length === 0) return { boxes: [], bodyTop: TITLE_BOTTOM };
 
   const naturals = pics.map((p) => dataUrlDims(dataUrlOf(p)));
   let boxes = naturals.map(({ w, h }) => {
     const cx = availW;
     const cy = Math.round((cx * h) / w);
-    return { x: MARGIN_X, y: 0, cx, cy };
+    return { x: BODY_X, y: 0, cx, cy };
   });
   // 若总高超出可用区，整体等比缩放
-  const availH = BOTTOM - TITLE_BOTTOM;
+  const availH = BOTTOM - TOP;
   const totalH = boxes.reduce((s, b) => s + b.cy, 0) + GAP * (pics.length - 1);
   if (totalH > availH) {
     const k = availH / totalH;
     boxes = boxes.map((b) => ({ ...b, cx: Math.round(b.cx * k), cy: Math.round(b.cy * k) }));
   }
-  // 顺序堆叠：标题下方起始，逐张下移
-  let y = TITLE_BOTTOM;
+  // 顺序堆叠：标题下方起始，逐张下移；末尾记录正文起点（图片区正下方）
+  let y = TOP;
   boxes = boxes.map((b) => {
     const box = { ...b, y };
     y += b.cy + GAP;
     return box;
   });
-  return { boxes, bodyBottom: TITLE_BOTTOM };
+  return { boxes, bodyTop: y };
 }
 
 function buildPicXml(pic: PptxPic, box: { x: number; y: number; cx: number; cy: number }, id: number): string {
@@ -367,18 +468,44 @@ function buildPicXml(pic: PptxPic, box: { x: number; y: number; cx: number; cy: 
     </p:pic>${captionXml}`;
 }
 
+// 装饰：左上角主题色短条（视觉锚点）
+function accentBarXml(accent: string): string {
+  return `<p:sp>
+    <p:nvSpPr><p:cNvPr id="3" name="AccentBar"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>
+    <p:spPr><a:xfrm><a:off x="${ACCENT_BAR.x}" y="${ACCENT_BAR.y}"/><a:ext cx="${ACCENT_BAR.cx}" cy="${ACCENT_BAR.cy}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:solidFill><a:srgbClr val="${accent}"/></a:solidFill></p:spPr>
+    <p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:pPr/></a:p></p:txBody>
+  </p:sp>`;
+}
+
+// 页脚：品牌 + 页码
+function footerXml(idx: number, total: number): string {
+  const text = `SnapCraft  ·  ${idx + 1} / ${total}`;
+  return `<p:sp>
+    <p:nvSpPr><p:cNvPr id="4" name="Footer"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>
+    <p:spPr><a:xfrm><a:off x="${BODY_X}" y="${FOOTER_Y}"/><a:ext cx="${CONTENT_W}" cy="300000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr>
+    <p:txBody>
+      <a:bodyPr wrap="square" lIns="91440" tIns="22860" rIns="91440" bIns="22860" anchor="t"/>
+      <a:lstStyle/>
+      <a:p><a:pPr algn="r"/><a:r><a:rPr lang="zh-CN" sz="1200"><a:solidFill><a:srgbClr val="9CA3AF"/></a:solidFill></a:rPr><a:t>${esc(text)}</a:t></a:r></a:p>
+    </p:txBody>
+  </p:sp>`;
+}
+
 function buildSlideXml(
   slide: SlideSpec,
   accent: string,
   dataUrlOf: (p: PptxPic) => string,
+  idx: number,
+  total: number,
+  linkRIdFor: (u: string) => string,
 ): string {
   const titleXml = slide.title
-    ? `<a:p><a:pPr algn="l"/><a:r><a:rPr lang="zh-CN" sz="4400" b="1"><a:solidFill><a:srgbClr val="${accent}"/></a:solidFill></a:rPr><a:t>${esc(slide.title)}</a:t></a:r></a:p>`
+    ? `<a:p><a:pPr algn="l"/><a:r><a:rPr lang="zh-CN" sz="4000" b="1"><a:solidFill><a:srgbClr val="${accent}"/></a:solidFill></a:rPr><a:t>${esc(slide.title)}</a:t></a:r></a:p>`
     : '';
   const titleShape = slide.title
     ? `<p:sp>
         <p:nvSpPr><p:cNvPr id="2" name="Title"/><p:cNvSpPr><a:spLocks noGrp="1"/></p:cNvSpPr><p:nvPr><p:ph type="title"/></p:nvPr></p:nvSpPr>
-        <p:spPr><a:xfrm><a:off x="600000" y="400000"/><a:ext cx="7944000" cy="1100000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr>
+        <p:spPr><a:xfrm><a:off x="${BODY_X}" y="${TITLE_TOP}"/><a:ext cx="${CONTENT_W}" cy="${TITLE_H}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr>
         <p:txBody>
           <a:bodyPr wrap="square" lIns="91440" tIns="45720" rIns="91440" bIns="45720" anchor="t"/>
           <a:lstStyle/>
@@ -387,33 +514,33 @@ function buildSlideXml(
       </p:sp>`
     : '';
   // 有图时把内容起点下移到图片区下方；无图时沿用原整页正文区
-  const { boxes, bodyBottom } = layoutPics(slide.pics, dataUrlOf);
-  const startY = slide.pics.length ? Math.min(bodyBottom + 140000, 6100000) : 1700000;
+  const { boxes, bodyTop } = layoutPics(slide.pics, dataUrlOf);
+  const startY = slide.pics.length ? bodyTop : TITLE_BOTTOM;
   // 把正文拆成「文本块 / 表格块」，分别渲染为 <p:sp> 与 <p:graphicFrame>，自上而下堆叠
   const blocks = parseBodyBlocks(slide.body);
   let y = startY;
-  let shapeId = 100; // 与 title(2) / pic(10+) 错开，避免 id 冲突
+  let shapeId = 100; // 与 title(2) / 装饰(3,4) / pic(10+) 错开，避免 id 冲突
   const bodyShapes: string[] = [];
   for (const blk of blocks) {
     if (blk.type === 'text') {
       const nonEmpty = blk.lines.filter((l) => l.trim() !== '').length;
-      const h = Math.max(300000, nonEmpty * 360000 + 120000);
+      const h = Math.max(300000, nonEmpty * 340000 + 120000);
       bodyShapes.push(`<p:sp>
         <p:nvSpPr><p:cNvPr id="${shapeId}" name="Body${shapeId}"/><p:cNvSpPr><a:spLocks noGrp="1"/></p:cNvSpPr><p:nvPr/></p:nvSpPr>
-        <p:spPr><a:xfrm><a:off x="600000" y="${y}"/><a:ext cx="7944000" cy="${h}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr>
+        <p:spPr><a:xfrm><a:off x="${BODY_X}" y="${y}"/><a:ext cx="${CONTENT_W}" cy="${h}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr>
         <p:txBody>
           <a:bodyPr wrap="square" lIns="91440" tIns="45720" rIns="91440" bIns="45720" anchor="t"/>
           <a:lstStyle/>
-          ${renderBody(blk.lines)}
+          ${renderBody(blk.lines, accent, linkRIdFor)}
         </p:txBody>
       </p:sp>`);
       y += h + 140000;
       shapeId++;
     } else {
-      const { xml, h, w } = renderTableBlock(blk, accent);
+      const { xml, h, w } = renderTableBlock(blk, accent, linkRIdFor);
       bodyShapes.push(`<p:graphicFrame>
         <p:nvGraphicFramePr><p:cNvPr id="${shapeId}" name="Table${shapeId}"/><p:cNvGraphicFramePr><a:graphicFrameLocks noGrp="1"/></p:cNvGraphicFramePr><p:nvPr/></p:nvGraphicFramePr>
-        <p:xfrm><a:off x="600000" y="${y}"/><a:ext cx="${w}" cy="${h}"/></p:xfrm>
+        <p:xfrm><a:off x="${BODY_X}" y="${y}"/><a:ext cx="${w}" cy="${h}"/></p:xfrm>
         ${xml}
       </p:graphicFrame>`);
       y += h + 180000;
@@ -431,6 +558,8 @@ function buildSlideXml(
       <p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>
       <p:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/><a:chOff x="0" y="0"/><a:chExt cx="0" cy="0"/></a:xfrm></p:grpSpPr>
       ${titleShape}
+      ${accentBarXml(accent)}
+      ${footerXml(idx, total)}
       ${bodyShape}
       ${picXml}
     </p:spTree>
@@ -457,8 +586,8 @@ const THEME_TEMPLATE = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
       <a:folHlink><a:srgbClr val="954F72"/></a:folHlink>
     </a:clrScheme>
     <a:fontScheme name="Office">
-      <a:majorFont><a:latin typeface="Calibri Light"/><a:ea typeface=""/><a:cs typeface=""/></a:majorFont>
-      <a:minorFont><a:latin typeface="Calibri"/><a:ea typeface=""/><a:cs typeface=""/></a:minorFont>
+      <a:majorFont><a:latin typeface="Calibri Light"/><a:ea typeface="Microsoft YaHei"/><a:cs typeface=""/></a:majorFont>
+      <a:minorFont><a:latin typeface="Calibri"/><a:ea typeface="Microsoft YaHei"/><a:cs typeface=""/></a:minorFont>
     </a:fontScheme>
     <a:fmtScheme name="Office">
       <a:fillStyleLst>
@@ -635,18 +764,15 @@ export function markdownToPptx(markdown: string, opts: MarkdownToPptxOptions = {
   for (const slide of slides) {
     const pics: PptxPic[] = [];
     // 默认保留原正文；仅在有 SNAP 标记时剥离标记行，或在有兜底截图时前置内嵌。
-    // 此前 newBody 初始为 []，当「无标记且无非报告截图」时既不清标记也不加图，
-    // 却仍执行 slide.body = newBody，导致纯文档（无图）导出 PPT 正文被整体清空——典型空实现。
     let newBody: string[];
     if (useMarkers) {
       newBody = [];
       for (const line of slide.body) {
-          const m = SNAP_RE.exec(line.trim());
-          if (m) {
-            // 与 docx 渲染器一致：SNAP 标记 k 为 1 基序号（aiPresets 约定「从 1 开始」），
-            // 但 sectionImages 是 0 基数组，必须 -1 对齐，否则会错图（且首图永远用不到）。
-            const idx = parseInt(m[1], 10) - 1;
-            const img = sectionImages[idx];
+        const m = SNAP_RE.exec(line.trim());
+        if (m) {
+          // 与 docx 渲染器一致：SNAP 标记 k 为 1 基序号，sectionImages 是 0 基数组，必须 -1 对齐。
+          const idx = parseInt(m[1], 10) - 1;
+          const img = sectionImages[idx];
           if (img) {
             let mediaName = mediaNameOfIdx.get(idx);
             if (!mediaName) {
@@ -681,15 +807,26 @@ export function markdownToPptx(markdown: string, opts: MarkdownToPptxOptions = {
 
   for (let i = 0; i < n; i++) {
     const slide = slides[i];
+    // 预扫描本页链接，分配关系 Id（不与图片 rId 冲突）
+    const blocks = parseBodyBlocks(slide.body);
+    const linkUrls = collectBlockLinks(blocks);
+    const linkMap = new Map<string, string>();
+    linkUrls.forEach((u, j) => linkMap.set(u, `rId${2 + slide.pics.length + j}`));
+    const linkRIdFor = (u: string) => linkMap.get(u) ?? '';
+
     let rels = `<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout1.xml"/>`;
     slide.pics.forEach((p, k) => {
       const relId = `rId${k + 2}`;
       p.relId = relId;
       rels += `<Relationship Id="${relId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/${p.mediaName}"/>`;
     });
+    linkUrls.forEach((u, j) => {
+      const relId = `rId${2 + slide.pics.length + j}`;
+      rels += `<Relationship Id="${relId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="${esc(u)}" TargetMode="External"/>`;
+    });
     const slideRels = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${rels}</Relationships>`;
-    files.push({ name: `ppt/slides/slide${i + 1}.xml`, data: encStr(buildSlideXml(slide, accent, (p) => p.dataUrl ?? '')) });
+    files.push({ name: `ppt/slides/slide${i + 1}.xml`, data: encStr(buildSlideXml(slide, accent, (p) => p.dataUrl ?? '', i, n, linkRIdFor)) });
     files.push({ name: `ppt/slides/_rels/slide${i + 1}.xml.rels`, data: encStr(slideRels) });
   }
 

@@ -1,10 +1,11 @@
 import { Stage, Layer, Image as KonvaImage, Line, Arrow, Rect, Ellipse, Text, Group, Circle } from 'react-konva';
-import { useEffect, useRef, useState, forwardRef, useImperativeHandle } from 'react';
+import { useEffect, useRef, useState, forwardRef, useImperativeHandle, Fragment } from 'react';
 import Konva from 'konva';
 import { invoke } from '@tauri-apps/api/core';
 import { useScreenshotStore } from '../store/screenshotStore';
 import { t } from '../../../i18n';
 import type { AnnotationObject, AnnotationGeometry, Point } from '../types';
+import { FONTS } from './AnnotationToolbar';
 import { useLicenseStore } from '../../licensing/licenseStore';
 import { useUpgradeDialogStore } from '../../licensing/upgradeDialogStore';
 
@@ -25,6 +26,10 @@ interface AnnotationCanvasProps {
   ocrRegionMode?: boolean;
   /** OCR 选区结果回调：传入框选区域的 PNG dataURL（自然像素） */
   onRegionOcr?: (dataUrl: string) => void;
+  /** 取色工具点击复制时回调（传入 HEX，父组件负责写剪贴板+吐司） */
+  onPickColor?: (hex: string) => void;
+  /** 测量工具「复制尺寸」回调（传入 w/h，父组件负责写剪贴板+吐司） */
+  onMeasureCopy?: (w: number, h: number) => void;
 }
 
 export interface AnnotationCanvasHandle {
@@ -104,6 +109,12 @@ function bgFill(bgColor: string, opacity: number): string {
   return `rgba(${r}, ${g}, ${b}, ${a})`;
 }
 
+// {r,g,b} → #RRGGBB（大写），取色工具复制用
+function rgbToHex(r: number, g: number, b: number): string {
+  const h = (v: number) => Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, '0');
+  return `#${h(r)}${h(g)}${h(b)}`.toUpperCase();
+}
+
 // 文字描边色：按文字填充色亮度自动选对比色，保证在亮底/暗底截图上都清晰可读
 function contrastStroke(fill: string): string {
   const { r, g, b } = hexToRgb(fill);
@@ -135,11 +146,25 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, AnnotationCanvasProp
   onCropped,
   ocrRegionMode = false,
   onRegionOcr,
+  onPickColor,
+  onMeasureCopy,
 }: AnnotationCanvasProps, ref) => {
   const stageRef = useRef<Konva.Stage | null>(null);
   const layerRef = useRef<Konva.Layer | null>(null);
   // AI 操作可视化层：命令式 add/remove 脉冲高亮节点，与 react 声明式 layer 完全隔离
   const flashLayerRef = useRef<Konva.Layer | null>(null);
+  // 检视工具：离屏采样画布（自然分辨率），取色/放大镜共用，惰性构建
+  const sampleCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  // 检视工具拖拽/读数状态：完全独立于 annotations/undo/导出管线
+  const measuringRef = useRef(false);
+  const [measureDraft, setMeasureDraft] = useState<{ a: Point; b: Point } | null>(null);
+  const [measureLocked, setMeasureLocked] = useState<{ a: Point; b: Point } | null>(null);
+  const [pickColor, setPickColor] = useState<{ hex: string; rgb: string; x: number; y: number } | null>(null);
+  const [loupe, setLoupe] = useState<{ x: number; y: number } | null>(null);
+  // loupeDisp：loupe 圆心在 wrapRef 容器内的屏幕坐标（直接由 DOM 事件 clientX/Y 计算，
+  // 绕开 Konva 变换链路，保证 loupe 圆心与真实光标像素级对齐）。
+  const [loupeDisp, setLoupeDisp] = useState<{ x: number; y: number } | null>(null);
+  const loupeRef = useRef<HTMLCanvasElement | null>(null);
   const shapeRefs = useRef<Record<string, Konva.Node | null>>({});
   const wrapRef = useRef<HTMLDivElement>(null);
   const committedRef = useRef(false);
@@ -286,9 +311,37 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, AnnotationCanvasProp
     return out;
   };
 
-  // 图片变化时清空打码底图缓存
+  // 检视工具：惰性构建/复用一张「自然分辨率」离屏画布，绘制原图供取色与放大镜采样。
+  // 仅在尺寸变化时重建（与打码底图缓存同思路，避免每帧重绘）。
+  const getSampleCanvas = (): HTMLCanvasElement | null => {
+    if (!image) return null;
+    const cur = sampleCanvasRef.current;
+    if (cur && cur.width === image.width && cur.height === image.height) return cur;
+    const c = document.createElement('canvas');
+    c.width = image.width;
+    c.height = image.height;
+    const ctx = c.getContext('2d', { willReadFrequently: true });
+    if (!ctx) return null;
+    ctx.drawImage(image, 0, 0);
+    sampleCanvasRef.current = c;
+    return c;
+  };
+  // 取光标下单个像素的 RGB（自然坐标，越界夹紧）
+  const getPixel = (x: number, y: number): { r: number; g: number; b: number } | null => {
+    const c = getSampleCanvas();
+    if (!c) return null;
+    const cx = Math.max(0, Math.min(c.width - 1, Math.round(x)));
+    const cy = Math.max(0, Math.min(c.height - 1, Math.round(y)));
+    const ctx = c.getContext('2d', { willReadFrequently: true });
+    if (!ctx) return null;
+    const d = ctx.getImageData(cx, cy, 1, 1).data;
+    return { r: d[0], g: d[1], b: d[2] };
+  };
+
+  // 图片变化时清空打码底图缓存 + 采样画布
   useEffect(() => {
     maskCacheRef.current = { src: '', map: new Map() };
+    sampleCanvasRef.current = null;
     setMaskTick((t) => t + 1);
   }, [imageData]);
 
@@ -348,6 +401,9 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, AnnotationCanvasProp
       '0': 'step',
       'c': 'crop',
       'C': 'crop',
+      'm': 'measure',
+      'e': 'pick',
+      'z': 'zoom',
     };
     const onKey = (e: KeyboardEvent) => {
       const tag = (document.activeElement?.tagName || '').toUpperCase();
@@ -400,11 +456,51 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, AnnotationCanvasProp
         }
       } else if (e.key === 'Escape') {
         setSelectedId(null);
+        // 检视工具激活时 Esc 同时清除叠加读数（切换工具时也会由下方 effect 清除）
+        setMeasureLocked(null);
+        setMeasureDraft(null);
+        measuringRef.current = false;
+        setLoupe(null);
+        setLoupeDisp(null);
+        setPickColor(null);
       }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [selectedId, deleteAnnotation, setSelectedId, undo, redo, setActiveTool, updateStyle, currentStrokeWidth, updateAnnotation]);
+
+  // 离开检视工具时清空对应的叠加状态（与裁剪工具的 activeTool 监听同思路，互不污染）
+  useEffect(() => {
+    if (activeTool !== 'measure') {
+      setMeasureLocked(null);
+      setMeasureDraft(null);
+      measuringRef.current = false;
+    }
+    if (activeTool !== 'pick') setPickColor(null);
+    if (activeTool !== 'zoom') { setLoupe(null); setLoupeDisp(null); }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTool]);
+
+  // 放大镜：loupe 变化时把光标邻域以 4× 放大绘制到 loupe 画布（自然像素采样，无平滑保持像素感）
+  useEffect(() => {
+    if (!loupe) return;
+    const canvas = loupeRef.current;
+    const src = getSampleCanvas();
+    if (!canvas || !src) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    const SIZE = canvas.width;
+    const ZOOM = 3;
+    const region = SIZE / ZOOM; // 自然像素采样边长（3× 放大镜，倍数合理不过度）
+    let sx = loupe.x - region / 2;
+    let sy = loupe.y - region / 2;
+    // 越界夹紧：保证采样区域完整落在原图内
+    sx = Math.max(0, Math.min(src.width - region, sx));
+    sy = Math.max(0, Math.min(src.height - region, sy));
+    ctx.imageSmoothingEnabled = false;
+    ctx.clearRect(0, 0, SIZE, SIZE);
+    ctx.drawImage(src, sx, sy, region, region, 0, 0, SIZE, SIZE);
+  }, [loupe]);
 
   // 离开裁剪工具（且非 OCR 选区模式）时清空未确认的裁剪框
   useEffect(() => {
@@ -521,7 +617,36 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, AnnotationCanvasProp
       return;
     }
 
+    // 检视工具：不创建标注、不进撤销/导出，纯检视叠加
+    if (activeTool === 'measure') {
+      measuringRef.current = true;
+      setMeasureDraft({ a: pos, b: pos });
+      return;
+    }
+    if (activeTool === 'pick') {
+      // 点击：复制光标下像素 HEX，父组件负责写剪贴板 + 吐司
+      const px = getPixel(pos.x, pos.y);
+      if (px) {
+        const hex = rgbToHex(px.r, px.g, px.b);
+        try {
+          navigator.clipboard?.writeText(hex).catch(() => {});
+        } catch {
+          /* best-effort */
+        }
+        onPickColor?.(hex);
+      }
+      return;
+    }
+    // 放大镜：仅跟随光标，无按下动作
+
     if (!activeTool) return;
+
+    // 点击落在已有标注上（非空白画布）：不新建任何绘制形状，交给节点自身的
+    // onClick/onTap（文字标注已放开任意工具可选中/拖动，其它类型仅在 select 工具下可选中）。
+    // 检视工具与 select 不在此列，走各自原有逻辑。
+    if (e.target !== stage && activeTool !== 'select' && activeTool !== 'measure' && activeTool !== 'pick' && activeTool !== 'zoom') {
+      return;
+    }
 
     if (activeTool === 'select') {
       if (e.target === stage) setSelectedId(null);
@@ -595,6 +720,26 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, AnnotationCanvasProp
       setCropRect({ x, y, w, h });
       return;
     }
+    // 检视工具：实时读数（不创建标注）
+    if (activeTool === 'measure') {
+      if (measuringRef.current && measureDraft) {
+        setMeasureDraft({ a: measureDraft.a, b: pos });
+      }
+      return;
+    }
+    if (activeTool === 'pick') {
+      const px = getPixel(pos.x, pos.y);
+      if (px) setPickColor({ hex: rgbToHex(px.r, px.g, px.b), rgb: `rgb(${px.r}, ${px.g}, ${px.b})`, x: pos.x, y: pos.y });
+      return;
+    }
+    if (activeTool === 'zoom') {
+      // 采样用自然坐标（pos），显示定位用真实 DOM 光标坐标（相对 wrapRef），
+      // 两者同源（同一光标事件），保证放大中心与光标像素级对齐。
+      const rect = wrapRef.current?.getBoundingClientRect();
+      if (rect) setLoupeDisp({ x: e.evt.clientX - rect.left, y: e.evt.clientY - rect.top });
+      setLoupe(pos);
+      return;
+    }
     if (!draft) return;
     if (draft.type === 'freehand') {
       setDraft({ type: 'freehand', points: [...draft.points, pos] });
@@ -604,6 +749,17 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, AnnotationCanvasProp
   };
 
   const handleMouseUp = () => {
+    // 测量拖拽结束：保留本次测量叠加（会话级，不导出），直到切换工具/Esc 清除
+    if (measuringRef.current) {
+      measuringRef.current = false;
+      if (measureDraft) {
+        const dx = measureDraft.b.x - measureDraft.a.x;
+        const dy = measureDraft.b.y - measureDraft.a.y;
+        if (Math.hypot(dx, dy) >= 2) setMeasureLocked(measureDraft);
+      }
+      setMeasureDraft(null);
+      return;
+    }
     if (cropDraggingRef.current) {
       cropDraggingRef.current = false;
       setCropDragging(false); // 触发 re-render，让确认条条件 !cropDragging 生效
@@ -701,15 +857,23 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, AnnotationCanvasProp
           ref: (el: Konva.Node | null) => {
             shapeRefs.current[ann.id] = el;
           },
-          draggable: activeTool === 'select',
+          draggable: activeTool === 'select' || ann.geometry.type === 'text',
+          // 文字标注：按下即选中（任意工具下），避免 draggable 把点击偶发当成微拖拽而不选中
+          onMouseDown:
+            ann.geometry.type === 'text'
+              ? (ev: Konva.KonvaEventObject<MouseEvent>) => {
+                  ev.cancelBubble = true;
+                  setSelectedId(ann.id);
+                }
+              : undefined,
           onClick: (ev: Konva.KonvaEventObject<MouseEvent>) => {
-            if (activeTool === 'select') {
+            if (activeTool === 'select' || ann.geometry.type === 'text') {
               ev.cancelBubble = true;
               setSelectedId(ann.id);
             }
           },
           onTap: (ev: Konva.KonvaEventObject<Event>) => {
-            if (activeTool === 'select') {
+            if (activeTool === 'select' || ann.geometry.type === 'text') {
               ev.cancelBubble = true;
               setSelectedId(ann.id);
             }
@@ -901,6 +1065,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, AnnotationCanvasProp
                 x={px}
                 y={py}
                 width={m.width}
+                wrap="none"
                 align={align}
                 text={text}
                 fontSize={fs}
@@ -923,6 +1088,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, AnnotationCanvasProp
             x={px}
             y={py}
             width={m2.width}
+            wrap="none"
             align={align}
             text={text}
             fontSize={fs}
@@ -1409,8 +1575,10 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, AnnotationCanvasProp
         const padY = efs * 0.3;
         // 最小宽度：给 8 个中文字宽的初始空间，打字后随内容自适应
         const minW = efs * 8;
-        const tw = Math.max(m.width, minW) * scale;
-        const th = Math.max(m.height, efs * 1.3 + padY * 2) * scale;
+        // 编辑框是 border-box，测量值已含 padding，但边框(1.5*2)会再挤占内容区，
+        // 导致单行文本被挤成两行。这里给宽高补上边框宽度(+2 缓冲)保证内容区>=文本尺寸。
+        const tw = (Math.max(m.width, minW) + 5) * scale;
+        const th = (Math.max(m.height, efs * 1.3 + padY * 2) + 5) * scale;
         return (
           <textarea
             ref={taRef}
@@ -1478,8 +1646,8 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, AnnotationCanvasProp
               outline: 'none',
               overflow: 'hidden',
               resize: 'none',
-              whiteSpace: 'pre-wrap',
-              wordBreak: 'break-word',
+              whiteSpace: 'pre',
+              wordBreak: 'keep-all',
               zIndex: 10,
             }}
           />
@@ -1581,6 +1749,59 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, AnnotationCanvasProp
       ));
     }
 
+    // 文字：四角缩放手柄。拖任意角以对角为锚点等比缩放 fontSize(8–240) 并重定位原点，实时更新几何。
+    if (g.type === 'text') {
+      if (editing) return null;
+      const fs = g.fontSize || 22;
+      const ff = g.fontFamily || currentFontFamily;
+      const m = measureTextBlock(g.text || '', fs, !!g.bold, !!g.italic, ff);
+      const px = g.points[0].x;
+      const py = g.points[0].y;
+      const w = Math.max(1, m.width);
+      const h = Math.max(1, m.height);
+      type Corner = { key: string; x: number; y: number; ax: number; ay: number; left: boolean; top: boolean };
+      const corners: Corner[] = [
+        { key: 'tl', x: px, y: py, ax: px + w, ay: py + h, left: true, top: true },
+        { key: 'tr', x: px + w, y: py, ax: px, ay: py + h, left: false, top: true },
+        { key: 'bl', x: px, y: py + h, ax: px + w, ay: py, left: true, top: false },
+        { key: 'br', x: px + w, y: py + h, ax: px, ay: py, left: false, top: false },
+      ];
+      const applyResize = (nx: number, ny: number, c: Corner) => {
+        const newW = Math.max(4, Math.abs(nx - c.ax));
+        const newH = Math.max(4, Math.abs(ny - c.ay));
+        const scaleF = (newW / w + newH / h) / 2;
+        const newFs = Math.min(240, Math.max(8, Math.round(fs * scaleF)));
+        const newPx = c.left ? nx : px;
+        const newPy = c.top ? ny : py;
+        updateAnnotation(selectedAnn.id, {
+          geometry: { ...g, fontSize: newFs, points: [{ x: newPx, y: newPy }] },
+        });
+      };
+      return corners.map((c) => (
+        <Circle
+          key={c.key}
+          x={c.x}
+          y={c.y}
+          radius={hr}
+          fill="#ffffff"
+          stroke={ACCENT}
+          strokeWidth={1.5 / scale}
+          draggable
+          onMouseDown={(ev) => {
+            ev.cancelBubble = true;
+          }}
+          onDragMove={(ev) => {
+            ev.cancelBubble = true;
+            applyResize(ev.target.x(), ev.target.y(), c);
+          }}
+          onDragEnd={(ev) => {
+            ev.cancelBubble = true;
+            applyResize(ev.target.x(), ev.target.y(), c);
+          }}
+        />
+      ));
+    }
+
     return null;
   })();
 
@@ -1594,7 +1815,10 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, AnnotationCanvasProp
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
-        cursor: activeTool === 'crop' ? 'crosshair' : undefined,
+        cursor:
+          activeTool === 'crop' || activeTool === 'measure' || activeTool === 'pick' || activeTool === 'zoom'
+            ? 'crosshair'
+            : undefined,
       }}
     >
       <Stage
@@ -1605,6 +1829,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, AnnotationCanvasProp
         onMouseDown={handleMouseDown}
         onMouseMove={handleMouseMove}
         onMouseUp={handleMouseUp}
+        onMouseLeave={() => { setLoupe(null); setLoupeDisp(null); }}
         ref={stageRef}
       >
         <Layer>
@@ -1618,7 +1843,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, AnnotationCanvasProp
               resizing && resizing.id === ann.id
                 ? { ...ann, geometry: { ...ann.geometry, points: resizing.points } }
                 : ann;
-            return renderShape(eff, false);
+            return <Fragment key={ann.id}>{renderShape(eff, false)}</Fragment>;
           })}
           {draft && renderShape(draftAnn, true)}
           {selBox && !resizing && (
@@ -1670,8 +1895,123 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, AnnotationCanvasProp
         )}
         {/* AI 操作可视化层：命令式 add/remove 脉冲高亮，常驻空 layer，不影响标注/撤销 */}
         <Layer ref={flashLayerRef} listening={false} />
+        {/* 检视·测量层：拖拽中(draft)或已锁定(locked)时画引导线+端点+尺寸标签。纯视觉，不落标注 */}
+        {activeTool === 'measure' && (measureDraft || measureLocked) && (() => {
+          const m = measureDraft || measureLocked!;
+          const w = Math.abs(m.b.x - m.a.x);
+          const h = Math.abs(m.b.y - m.a.y);
+          const d = Math.hypot(m.b.x - m.a.x, m.b.y - m.a.y);
+          const mx = (m.a.x + m.b.x) / 2;
+          const my = (m.a.y + m.b.y) / 2;
+          return (
+            <Layer listening={false}>
+              <Line points={[m.a.x, m.a.y, m.b.x, m.b.y]} stroke={ACCENT} strokeWidth={1.5 / scale} />
+              <Circle x={m.a.x} y={m.a.y} radius={3 / scale} fill={ACCENT} />
+              <Circle x={m.b.x} y={m.b.y} radius={3 / scale} fill={ACCENT} />
+              <Text
+                x={mx}
+                y={my - (14 / scale)}
+                width={Math.max(w, 10)}
+                offsetX={Math.max(w, 10) / 2}
+                align="center"
+                text={`${Math.round(w)} × ${Math.round(h)}  ·  ${Math.round(d)}px`}
+                fontSize={13 / scale}
+                fontStyle="bold"
+                fill={ACCENT}
+                stroke="rgba(255,255,255,0.85)"
+                strokeWidth={3 / scale}
+                listening={false}
+              />
+            </Layer>
+          );
+        })()}
       </Stage>
       {textEditor}
+      {/* 文字标注浮动格式条：选中文字(非编辑中)时挂在画布上，字体/字号/粗斜/颜色/删除一步到位 */}
+      {(() => {
+        const sel = selectedId ? annotations.find((a) => a.id === selectedId) : undefined;
+        if (!sel || sel.geometry.type !== 'text' || editing) return null;
+        const g = sel.geometry;
+        const fs = g.fontSize || 22;
+        const ff = g.fontFamily || currentFontFamily;
+        const px = g.points[0].x;
+        const py = g.points[0].y;
+        const m = measureTextBlock(g.text || '', fs, !!g.bold, !!g.italic, ff);
+        const offX = (box.w - dispW) / 2;
+        const offY = (box.h - dispH) / 2;
+        const placeAbove = offY + py * scale - 48 > 4;
+        const left = offX + px * scale;
+        const top = placeAbove ? offY + py * scale - 44 : offY + (py + m.height) * scale + 8;
+        return (
+          <div
+            className="text-format-bar"
+            style={{ position: 'absolute', left, top, zIndex: 30 }}
+            onMouseDown={(e) => e.stopPropagation()}
+            onMouseUp={(e) => e.stopPropagation()}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <select
+              className="ctx-select"
+              value={ff}
+              onChange={(e) => updateAnnotation(sel.id, { geometry: { ...g, fontFamily: e.target.value } })}
+              title={t('tool.font')}
+            >
+              {FONTS.map((f) => (
+                <option key={f.id} value={f.value} style={{ fontFamily: f.value }}>
+                  {t(f.labelKey)}
+                </option>
+              ))}
+            </select>
+            <input
+              type="number"
+              className="tf-size"
+              min={8}
+              max={240}
+              value={fs}
+              onChange={(e) => {
+                const v = Number(e.target.value);
+                const safe = Number.isFinite(v) ? v : 8;
+                updateAnnotation(sel.id, { geometry: { ...g, fontSize: Math.min(240, Math.max(8, safe)) } });
+              }}
+              title={t('tool.fontSize')}
+            />
+            <button
+              className={`ctx-toggle${g.bold ? ' active' : ''}`}
+              onClick={() => updateAnnotation(sel.id, { geometry: { ...g, bold: !g.bold } })}
+              title={t('tool.bold')}
+            >
+              <span style={{ fontWeight: 800 }}>B</span>
+            </button>
+            <button
+              className={`ctx-toggle${g.italic ? ' active' : ''}`}
+              onClick={() => updateAnnotation(sel.id, { geometry: { ...g, italic: !g.italic } })}
+              title={t('tool.italic')}
+            >
+              <span style={{ fontStyle: 'italic', fontWeight: 600 }}>I</span>
+            </button>
+            <input
+              type="color"
+              className="tf-color"
+              value={/^#[0-9a-fA-F]{6}$/.test(sel.color) ? sel.color : '#ff3b30'}
+              onChange={(e) => {
+                updateStyle({ currentColor: e.target.value });
+                updateAnnotation(sel.id, { color: e.target.value });
+              }}
+              title={t('tool.color')}
+            />
+            <button
+              className="ctx-toggle tf-del"
+              onClick={() => {
+                deleteAnnotation(sel.id);
+                setSelectedId(null);
+              }}
+              title={t('tool.delete')}
+            >
+              <span style={{ fontWeight: 800 }}>✕</span>
+            </button>
+          </div>
+        );
+      })()}
       {/* 裁剪确认条：拖出裁剪框且有效尺寸且拖拽已结束时显示，浮在裁剪框下方居中 */}
       {cropRect && cropRect.w >= 8 && cropRect.h >= 8 && !cropDragging && !ocrRegionMode && (() => {
         const offX = (box.w - dispW) / 2;
@@ -1705,6 +2045,79 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, AnnotationCanvasProp
             <button className="crop-btn crop-apply" onClick={applyCrop}>
               {t('crop.apply')}
             </button>
+          </div>
+        );
+      })()}
+      {/* 检视·测量读数条：跟随测量中点，显示尺寸 + 复制按钮 */}
+      {activeTool === 'measure' && (measureDraft || measureLocked) && (() => {
+        const m = measureDraft || measureLocked!;
+        const w = Math.round(Math.abs(m.b.x - m.a.x));
+        const h = Math.round(Math.abs(m.b.y - m.a.y));
+        const offX = (box.w - dispW) / 2;
+        const offY = (box.h - dispH) / 2;
+        const left = offX + ((m.a.x + m.b.x) / 2) * scale;
+        const top = offY + ((m.a.y + m.b.y) / 2) * scale + 14;
+        const copySize = () => {
+          onMeasureCopy?.(w, h);
+        };
+        return (
+          <div
+            className="inspector-readout"
+            style={{ position: 'absolute', left, top, transform: 'translateX(-50%)', zIndex: 20 }}
+          >
+            <span className="inspector-readout-val">{w} × {h} px</span>
+            <button className="crop-btn crop-apply" onClick={copySize}>{t('inspector.copy')}</button>
+          </div>
+        );
+      })()}
+      {/* 检视·取色读数：跟随光标，显示色块 + HEX + RGB */}
+      {activeTool === 'pick' && pickColor && (() => {
+        const offX = (box.w - dispW) / 2;
+        const offY = (box.h - dispH) / 2;
+        const left = offX + pickColor.x * scale + 14;
+        const top = offY + pickColor.y * scale + 14;
+        return (
+          <div
+            className="inspector-readout inspector-pick"
+            style={{ position: 'absolute', left, top, zIndex: 20 }}
+          >
+            <span className="inspector-swatch" style={{ background: pickColor.hex }} />
+            <span className="inspector-readout-val">{pickColor.hex}</span>
+            <span className="inspector-readout-sub">{pickColor.rgb}</span>
+            <span className="inspector-readout-hint">{t('inspector.pickHint')}</span>
+          </div>
+        );
+      })()}
+      {/* 检视·放大镜：圆形 loupe 圆心对准真实光标（loupeDisp 由 DOM 事件坐标算得），
+          显示约 3× 邻域放大；loupe 圆心=光标=采样中心，三者一致保证定位准确。 */}
+      {activeTool === 'zoom' && loupe && loupeDisp && (() => {
+        const size = 128;
+        // 直接用真实光标在 wrapRef 内的屏幕坐标定位，绕开 Konva 变换，像素级对齐。
+        let left = loupeDisp.x - size / 2;
+        let top = loupeDisp.y - size / 2;
+        // 贴边夹紧，避免 loupe 被容器裁掉；中心仍尽量贴近光标。
+        left = Math.max(2, Math.min(box.w - size - 2, left));
+        top = Math.max(2, Math.min(box.h - size - 2, top));
+        return (
+          <div
+            className="inspector-loupe"
+            style={{
+              position: 'absolute',
+              left,
+              top,
+              width: size,
+              height: size,
+              zIndex: 20,
+            }}
+          >
+            <canvas
+              ref={loupeRef}
+              width={size}
+              height={size}
+              style={{ width: size, height: size, borderRadius: '50%', display: 'block' }}
+            />
+            <div className="inspector-loupe-ring" />
+            <div className="inspector-loupe-cross" />
           </div>
         );
       })()}

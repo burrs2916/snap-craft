@@ -1,23 +1,24 @@
-// AI 助手状态：配置持久化 + 流式生成状态
-// 配置（接口地址 / Key / 模型）仅持久化到本机浏览器 localStorage，
-// 首版「前端直连」架构下密钥不下发到 Rust 侧（Phase 2 再考虑后端代理）。
+// AI assistant state: config persistence + streaming generation state
+// Config (endpoint / key / model) is persisted only to the local browser localStorage,
+// Under the initial "frontend direct-connect" architecture the key is not handed to the Rust side (backend proxy considered in Phase 2).
 //
 // 2026-07-14 Phase 2b：
-//  - 自定义预设（用户业务模板）持久化到 localStorage `snapcraft-ai-templates`，
-//    与内置预设合并后作为可选的「生成方式」芯片。
-//  - generate 支持「多截图成稿」：传入 images[] 与 ocrTexts[]，与当前图合并为
-//    单条多模态 user 消息（仅当 preset.vision 为真时附带图片）。
+//  - Custom presets (user business templates) are persisted to localStorage `snapcraft-ai-templates`,
+//    merged with built-in presets and offered as selectable "generation mode" chips.
+//  - generate supports "multi-screenshot doc": pass images[] and ocrTexts[] and merge with the current image into
+//    a single multimodal user message (images attached only when preset.vision is true).
 //
-// 2026-07-23 架构解耦重构：
-//  - 持久化层提取至 lib/persistence.ts
-//  - 历史索引管理提取至 lib/conversationIndex.ts
-//  - 流式辅助/错误分类/记忆注入提取至 lib/streamHelpers.ts
-//  - 本文件仅保留 Zustand store 编排逻辑（状态 + action 胶水）
+// 2026-07-23 architecture decoupling refactor:
+//  - Persistence layer extracted to lib/persistence.ts
+//  - History index management extracted to lib/conversationIndex.ts
+//  - Streaming helpers / error classification / memory injection extracted to lib/streamHelpers.ts
+//  - This file keeps only the Zustand store orchestration logic (state + action glue)
 
 import { create } from 'zustand';
 import type { AiConfig, AiMessage, AiChatTurn, AiMemory, AiUsage, AiAgentStep } from './aiTypes';
-import { streamChat, chatOnce, trimHistoryToBudget, streamChatWithTools, estimateTokens } from './aiClient';
+import { streamChat, chatOnce, trimHistoryToBudget, streamChatWithTools, estimateTokens, diagLogAi } from './aiClient';
 import { AI_TOOL_DEFS, createToolExecutor, agentSystem, agentSystemSentinel, type AiToolHost } from './aiTools';
+import { mergeAgents, BUILTIN_AGENTS, type AiAgent } from './aiAgents';
 import {
   AI_PRESETS,
   getPreset,
@@ -30,15 +31,17 @@ import { useLicenseStore } from '../licensing/licenseStore';
 import { useUpgradeDialogStore } from '../licensing/upgradeDialogStore';
 import { loadMemories, saveMemories, selectMemories, MAX_LIVE_ENTRIES, COMPACT_ENTRIES, isCompacting, setCompacting } from './aiMemory';
 
-// 提取的子模块
-import { loadConfig, saveConfig, loadTemplates, saveTemplates, loadConversation, saveConversation } from './lib/persistence';
+// Extracted submodules
+import { loadConfig, saveConfig, loadTemplates, saveTemplates, loadConversation, saveConversation, loadAgents, saveAgents, loadActiveAgent, saveActiveAgent } from './lib/persistence';
+import { resolveConfig, defaultModelId, modelVisionSupport, findModel } from './providerConfig';
+import { resolveModelLimits, fitFirstTurn, type FirstTurnFit } from './contextBudget';
 import { recordConvMeta, listConvMeta, getConvByHash, deleteConv, forkConversation, type AiConvMeta } from './lib/conversationIndex';
 import { makeStreamSink, aiErrorI18nKey, refineSystem, buildMemoryNote, buildCompactSystem, langOutputDirective, parseImportance, genId, genMemId } from './lib/streamHelpers';
 
-// 重新导出供外部使用（保持向后兼容）
+// Re-exported for external use (kept for backward compatibility)
 export { type AiConvMeta } from './lib/conversationIndex';
 
-// 轻量内容哈希：把可能数 MB 的 dataURL 压缩成稳定短键（碰撞概率可忽略）
+// Lightweight content hash: compress a potentially multi-MB dataURL into a stable short key (collision probability negligible)
 export function convHash(s?: string): string {
   if (!s) return 'noimage';
   const sample = s.length > 1024 ? s.slice(0, 1024) : s;
@@ -49,9 +52,9 @@ export function convHash(s?: string): string {
   return 'img-' + (h >>> 0).toString(36) + '-' + s.length.toString(36);
 }
 
-// 模块级 AbortController：同一时刻仅一个生成任务，避免状态纠缠
+// Module-level AbortController: only one generation task at a time, to avoid entangled state
 let abortCtl: AbortController | null = null;
-// 默认激活「生成文档」(doc)——即第一个功能标签 / 头号卖点
+// Activate "generate document" (doc) by default — i.e. the first feature tab / headline selling point
 let activePresetId: string = AI_PRESETS[0]?.id ?? '';
 
 export type AiStatus = 'idle' | 'streaming' | 'done' | 'error';
@@ -64,6 +67,16 @@ interface GenerateInput {
   images?: string[];
   ocrTexts?: string[];
   agentKind?: 'edit' | 'sentinel';
+  /** Part 2: pro Agent custom system prompt (takes priority over the agentKind fixed wording) */
+  agentSystemPrompt?: string;
+  /** Part 2: an Agent can bind a tool subset (AI_TOOL_DEFS.name list); empty = all */
+  agentToolIds?: string[];
+  /** Part 2: the model bound to the Agent (provider model id); empty = follow global endpoint settings */
+  agentModelId?: string;
+  /** Part 2: Agent temperature override (falls back to global config.temperature when unset) */
+  agentTemperature?: number;
+  /** Part 2: fallback model (provider model id); automatically used for one retry when the primary model call fails */
+  agentFallbackModelId?: string;
 }
 
 interface ChatCtx {
@@ -84,6 +97,11 @@ interface AiState {
   attachOcr: boolean;
   activePresetId: string;
   customPresets: UserPreset[];
+  agents: AiAgent[];
+  activeAgentId: string | null;
+  setActiveAgent: (id: string | null) => void;
+  upsertAgent: (a: AiAgent) => void;
+  deleteAgent: (id: string) => void;
   conversation: AiChatTurn[];
   convKey: string;
   setConvKey: (key: string) => void;
@@ -117,7 +135,19 @@ interface AiState {
   setUsage: (u: AiUsage) => void;
   thinking: string;
   agentSteps: AiAgentStep[];
+  // First-turn self-healing context-trim result (plan B), surfaced to the panel as the "auto-trimmed" hint
+  contextTrim?: FirstTurnFit;
   runAgent: (input: GenerateInput & { host: AiToolHost }) => Promise<void>;
+  agentResult: AiAgentResult | null;
+}
+
+/** Agent one-shot task output (privacy sentinel / smart edit / custom analyze), shown independently and not entering the conversation chat stream */
+export interface AiAgentResult {
+  goal: string;
+  content: string;
+  presetId: string;
+  imageDataUrl?: string;
+  createdAt: number;
 }
 
 export const useAiStore = create<AiState>((set, get) => ({
@@ -130,6 +160,8 @@ export const useAiStore = create<AiState>((set, get) => ({
   attachOcr: true,
   activePresetId,
   customPresets: loadTemplates(),
+  agents: mergeAgents(loadAgents()),
+  activeAgentId: loadActiveAgent(),
   conversation: [],
   convKey: '',
   memories: [],
@@ -137,6 +169,7 @@ export const useAiStore = create<AiState>((set, get) => ({
   usage: { input: 0, output: 0 },
   agentSteps: [],
   thinking: '',
+  agentResult: null,
 
   setConfig: (patch) => {
     const next = { ...get().config, ...patch };
@@ -149,6 +182,31 @@ export const useAiStore = create<AiState>((set, get) => ({
   setActivePreset: (id) => {
     activePresetId = id;
     set({ activePresetId: id });
+  },
+
+  setActiveAgent: (id) => {
+    saveActiveAgent(id);
+    set({ activeAgentId: id });
+  },
+  upsertAgent: (a) => {
+    if (a.builtin) return; // built-ins cannot be overwritten
+    const prevCustom = get().agents.filter((x) => !x.builtin);
+    const isNew = !prevCustom.some((x) => x.id === a.id);
+    const cur = prevCustom.map((x) => (x.id === a.id ? a : x));
+    if (isNew) cur.push(a);
+    const list = [...BUILTIN_AGENTS, ...cur];
+    // Persistence must use the "updated custom list", otherwise a newly created / edited assistant (with bound model) won't be saved and is lost on refresh.
+    saveAgents(cur);
+    // A newly created assistant (incl. copies from "edit built-in assistant") is set as the current assistant immediately so the bound model takes effect at once,
+    // sparing the user from manually picking it again in the conversation selector.
+    set({ agents: list, activeAgentId: isNew ? a.id : get().activeAgentId });
+  },
+  deleteAgent: (id) => {
+    const cur = get().agents.filter((x) => !x.builtin && x.id !== id);
+    saveAgents(cur);
+    const nextActive = get().activeAgentId === id ? null : get().activeAgentId;
+    saveActiveAgent(nextActive);
+    set({ agents: [...BUILTIN_AGENTS, ...cur], activeAgentId: nextActive });
   },
 
   addCustomPreset: (p) => {
@@ -177,7 +235,7 @@ export const useAiStore = create<AiState>((set, get) => ({
       .find((p) => p.id === id) ?? getPreset(id),
 
   generate: async (input) => {
-    // 付费门禁：AI 全部功能试用结束后需订阅。无权限时弹出升级弹窗并提前返回。
+    // Paywall: after the AI trial ends a subscription is required. Without entitlement, open the upgrade dialog and return early.
     if (!useLicenseStore.getState().canUse('ai')) {
       useUpgradeDialogStore.getState().openDialog('ai');
       return;
@@ -229,15 +287,15 @@ export const useAiStore = create<AiState>((set, get) => ({
   },
 
   chat: async (input, ctx) => {
-    // 付费门禁（集中设防）：chat() 是 generate/runAgent/refine/多轮追问(handleFollow)
-    // 等所有 AI 入口的最终执行者。在此统一校验，保证任何直接调用 chat 的路径
-    // （含此前遗漏的「多轮追问」按钮）都无法绕过订阅授权（fail-closed）。
+    // Paywall (centralized enforcement): chat() is the final executor for generate/runAgent/refine/multi-turn follow-up (handleFollow)
+    // and every other AI entry point. Validating here uniformly guarantees that any path calling chat directly
+    // (including the previously missed "multi-turn follow-up" button) cannot bypass the subscription check (fail-closed).
     if (!useLicenseStore.getState().canUse('ai')) {
       useUpgradeDialogStore.getState().openDialog('ai');
       return;
     }
     let sink: ReturnType<typeof makeStreamSink> | null = null;
-    const { config, attachImage, attachOcr, conversation, convKey } = get();
+    const { config, attachImage, attachOcr, conversation, convKey, activeAgentId, agents } = get();
     if (!config.apiKey.trim()) {
       set({ status: 'error', error: t('ai.errorNoKey') });
       return;
@@ -245,23 +303,79 @@ export const useAiStore = create<AiState>((set, get) => ({
     const text = (input ?? '').trim();
     if (!text) return;
 
+    // Part 2: the global "current assistant" selector takes effect — when set it overrides the system prompt / bound model / temperature (falling back to preset defaults).
+    const activeAgent = activeAgentId ? agents.find((a) => a.id === activeAgentId) ?? null : null;
+    const agentSystemPrompt = activeAgent?.systemPrompt?.trim() || null;
+    // Part 2: when following the global setting, use the default model (bound assistant model → global default config.model → first model entity),
+    // to avoid the "model connection" tab configuring a model but leaving model empty (no "set as default" UI) and erroring (fixed 2026-08-13).
+    const agentModelId = activeAgent?.modelId || defaultModelId(config);
+    const agentTemperature = activeAgent?.temperature;
+
+    // Vision handling (adapted to the OCR architecture): the app's standard approach is "text model + OCR text" to understand screenshots,
+    // the model itself needs no vision capability. Hence: non-vision model with OCR text → drop the useless image, let OCR supply content, no error;
+    // non-vision model with neither OCR nor vision → that is a genuine misconfiguration, show a friendly error.
+    const modelSeesImages = modelVisionSupport(config, agentModelId) !== 'no';
+    const hasOcr = attachOcr && !!(ctx.ocrText || (ctx.ocrTexts && ctx.ocrTexts.length));
+    const wouldSendImage =
+      ctx.preset.vision && ((attachImage && ctx.imageDataUrl) || (ctx.images && ctx.images.length));
+    if (wouldSendImage && !modelSeesImages && !hasOcr) {
+      set({ status: 'error', error: t('ai.errorNoVision') });
+      return;
+    }
+
     const conv = conversation.slice();
     const isFirst = conv.length === 0;
 
+    const selectedMem = selectMemories(text, get().memories);
+    const memoryNote = buildMemoryNote(selectedMem);
+    // Budget guardrail (plan A): budget follows the model's real context window instead of a hard-coded 120k.
+    const { contextWindow, maxTokens } = resolveModelLimits(config, agentModelId);
+    const sysPrompt = agentSystemPrompt || ctx.preset.system;
+    const callConfig = { ...resolveConfig(config, agentModelId) };
+    if (agentTemperature != null) callConfig.temperature = agentTemperature;
+    // Plan B: assembly-chain diagnostics — log "global model / assistant-bound modelId / resolved model" together,
+    // so debug.log reveals whether a 400 means "global not filled" or "assistant not bound" (see 2026-08-13 investigation).
+    diagLogAi(
+      `[ai-assemble][chat] rawModel="${config.model}" agentModelId=${agentModelId ?? '∅'} resolved="${callConfig.model}" base=${callConfig.baseUrl}`,
+      'info',
+    );
+        // Plan A (defense): empty model is blocked outright to avoid sending an empty request and triggering server-side 400 noise.
+    if (!callConfig.model?.trim()) {
+      diagLogAi(`[ai-client] ABORT: model empty (rawModel="${config.model}" agentModelId=${agentModelId ?? '∅'})`);
+      set({ status: 'error', error: t('ai.errorNoModel') });
+      return;
+    }
+    const sysReserve =
+      estimateTokens(sysPrompt) + (memoryNote ? estimateTokens(memoryNote) : 0);
+
     let userContent: string;
     let images: string[] | undefined;
+    let contextTrim: FirstTurnFit | undefined;
     if (isFirst) {
-      userContent = ctx.preset.buildUser({
+      // First-turn user-message budget: reserve system prompt + model max output, give the rest to the first turn
+      // (so "requirement + many images + long OCR" itself doesn't exceed context → plan B first-turn self-healing trim).
+      const firstTurnBudget = Math.max(2_000, contextWindow - sysReserve - maxTokens);
+      const rawImages = ctx.preset.vision
+        ? [
+            ...(attachImage && ctx.imageDataUrl && modelSeesImages ? [ctx.imageDataUrl] : []),
+            ...(ctx.images ?? []).filter(() => modelSeesImages),
+          ]
+        : [];
+      const fit = fitFirstTurn({
         goal: text,
         ocrText: attachOcr ? ctx.ocrText : undefined,
         ocrTexts: attachOcr ? ctx.ocrTexts : undefined,
+        images: rawImages,
+        budgetTokens: firstTurnBudget,
+        mainImageCount: 1,
       });
-      images = ctx.preset.vision
-        ? [
-            ...(attachImage && ctx.imageDataUrl ? [ctx.imageDataUrl] : []),
-            ...(ctx.images ?? []),
-          ]
-        : undefined;
+      contextTrim = fit.trimmed ? fit : undefined;
+      userContent = ctx.preset.buildUser({
+        goal: text,
+        ocrText: fit.ocrText,
+        ocrTexts: fit.ocrTexts,
+      });
+      images = fit.images.length ? fit.images : undefined;
     } else {
       userContent = text;
       images = undefined;
@@ -272,22 +386,17 @@ export const useAiStore = create<AiState>((set, get) => ({
       content: userContent,
       ...(images && images.length ? { images } : {}),
     };
-    const selectedMem = selectMemories(text, get().memories);
-    const memoryNote = buildMemoryNote(selectedMem);
-    // 预算护栏：此前仅裁剪历史，userMsg（首轮可能携带超长 OCR + 多张截图）在裁剪后
-    // 才追加，总长仍可能超模型上下文触发 API 400/413。现把当前 userMsg 一并纳入
-    // 裁剪输入（它位于末尾必然保留，再以 slice(0,-1) 从历史中剔除避免重复），
-    // 并预先扣除 system 提示词与长期记忆的 token，保证最终装配总量落在预算内。
-    const sysReserve =
-      estimateTokens(ctx.preset.system) + (memoryNote ? estimateTokens(memoryNote) : 0);
+    // History + first-turn userMsg are both subject to trimming (userMsg at the end is always kept; then slice(0,-1)
+    // removes it from history to avoid duplication), and pre-deduct system, memory, and model max-output tokens, guaranteeing
+    // input + max_tokens <= real context window, eliminating the 400 caused by "hitting window limit + output" stacking.
     const historyMsgs: AiMessage[] = trimHistoryToBudget(
       [...conv.map((m) => ({ role: m.role, content: m.content })), userMsg],
-      Math.max(4_000, 120_000 - sysReserve),
+      Math.max(4_000, contextWindow - sysReserve - maxTokens),
       3,
     ).slice(0, -1);
     const messages: AiMessage[] = [
       ...(memoryNote ? [{ role: 'system' as const, content: memoryNote }] : []),
-      { role: 'system', content: langOutputDirective() + ctx.preset.system },
+      { role: 'system', content: langOutputDirective() + sysPrompt },
       ...historyMsgs,
       userMsg,
     ];
@@ -302,19 +411,21 @@ export const useAiStore = create<AiState>((set, get) => ({
       agentSteps: [],
       conversation: newConv,
       activeMemoryIds: selectedMem.map((m) => m.id ?? '').filter(Boolean),
+      contextTrim,
     });
     const ctl = new AbortController();
     abortCtl = ctl;
     try {
       sink = makeStreamSink(set);
       const full = await streamChat({
-        config,
+        config: callConfig,
         messages,
         onChunk: sink.onChunk,
         onUsage: (u) => set({ usage: u }),
         onThinking: sink.onThinking,
         onRetry: () => sink?.reset(),
         signal: ctl.signal,
+        maxTokens,
       });
       const finalConv: AiChatTurn[] = [...newConv, { role: 'assistant', content: full }];
       sink?.stop();
@@ -330,8 +441,8 @@ export const useAiStore = create<AiState>((set, get) => ({
         set({ status: 'idle' });
       } else {
         const msg = e?.message ? String(e.message) : String(e);
-        // 回滚到请求前快照：用户轮次已先行入队，若失败不回滚会留下悬空 user 轮次，
-        // 下次发送将产生连续 user 消息（Anthropic 要求 user/assistant 交替 → 400）。
+        // Roll back to the pre-request snapshot: the user turn was enqueued first; if it fails without rollback a dangling user turn remains,
+        // and the next send would produce consecutive user messages (Anthropic requires alternating user/assistant → 400).
         set({ status: 'error', error: t(aiErrorI18nKey(e), { msg }), conversation: conv });
       }
     } finally {
@@ -340,10 +451,10 @@ export const useAiStore = create<AiState>((set, get) => ({
   },
 
   clearConversation: () => {
-    set({ conversation: [], memories: [], activeMemoryIds: [], output: '', error: '', status: 'idle', refining: false, thinking: '', agentSteps: [] });
+    set({ conversation: [], memories: [], activeMemoryIds: [], output: '', error: '', status: 'idle', refining: false, thinking: '', agentSteps: [], contextTrim: undefined, agentResult: null });
   },
 
-  // ── 历史库操作（委托给 lib/conversationIndex） ──
+  // -- History library operations (delegated to lib/conversationIndex) --
   recordConvMeta: (hash, conv, preset, imageDataUrl, title) => {
     recordConvMeta(hash, conv, preset, imageDataUrl, title);
   },
@@ -352,13 +463,13 @@ export const useAiStore = create<AiState>((set, get) => ({
   deleteConv: (hash) => deleteConv(hash),
   forkConversation: (sourceHash, uptoIndex) => forkConversation(sourceHash, uptoIndex, get().activePresetId),
 
-  // ── 长期记忆 ──
+  // -- Long-term memory --
   compactMemory: async () => {
-    // 付费门禁（集中设防）：compactMemory 内部直接调 chatOnce 压缩对话，属于
-    // AI 用量。除 chat/runAgent 结束后自动触发（彼时已通过 ai 门禁）外，UI 的
-    // 「压缩记忆」按钮(AIPanel)也可直接进入此处 → 若不加守卫，免费/到期用户
-    // 可借试用期内保存的旧长对话点按钮白嫖 AI。共享执行体自身设防（fail-closed
-    // + 升级弹窗），与 chat() 的集中守卫策略一致。
+    // Paywall (centralized enforcement): compactMemory internally calls chatOnce to compress the conversation, which is
+    // AI usage. Besides the automatic trigger after chat/runAgent finishes (already past the AI gate), the UI's
+    // "compact memory" button (AIPanel) can also enter here directly → without a guard, free / expired users
+    // could use the old long conversation saved during trial to click the button and freeload AI. The shared executor defends itself (fail-closed
+    // + upgrade dialog), consistent with chat()'s centralized guard strategy.
     if (!useLicenseStore.getState().canUse('ai')) {
       useUpgradeDialogStore.getState().openDialog('ai');
       return;
@@ -439,14 +550,20 @@ export const useAiStore = create<AiState>((set, get) => ({
   },
 
   refine: async (instruction: string) => {
-    // 付费门禁：AI 润色属于 Pro 功能。
+    // Paywall: AI polish is a Pro feature.
     if (!useLicenseStore.getState().canUse('ai')) {
       useUpgradeDialogStore.getState().openDialog('ai');
       return;
     }
     let sink: ReturnType<typeof makeStreamSink> | null = null;
-    const { config, output, conversation } = get();
+    const { config, output, conversation, activeAgentId, agents } = get();
     if (!output.trim() || !config.apiKey.trim()) return;
+
+    // Part 2: polish also honors the "current assistant" binding (model / temperature), consistent with chat/runAgent —
+    // once an agent is selected, polish runs on the assistant's dedicated bound model rather than the global default model.
+    const activeAgent = activeAgentId ? agents.find((a) => a.id === activeAgentId) ?? null : null;
+    const refineConfig = { ...resolveConfig(config, activeAgent?.modelId || defaultModelId(config)) };
+    if (activeAgent?.temperature != null) refineConfig.temperature = activeAgent.temperature;
 
     const lastUserMsg = [...conversation].reverse().find((m) => m.role === 'user');
     const zh = getLang() === 'zh-CN';
@@ -468,7 +585,7 @@ export const useAiStore = create<AiState>((set, get) => ({
     try {
       sink = makeStreamSink(set);
       const full = await streamChat({
-        config,
+        config: refineConfig,
         messages,
         onChunk: sink.onChunk,
         onUsage: (u) => set({ usage: u }),
@@ -501,7 +618,7 @@ export const useAiStore = create<AiState>((set, get) => ({
   },
 
   runAgent: async (input) => {
-    // 付费门禁：AI Agent 属于 Pro 功能。
+    // Paywall: AI Agent is a Pro feature.
     if (!useLicenseStore.getState().canUse('ai')) {
       useUpgradeDialogStore.getState().openDialog('ai');
       return;
@@ -513,18 +630,62 @@ export const useAiStore = create<AiState>((set, get) => ({
       return;
     }
     const text = (input.goal ?? '').trim();
-    if (!text) return;
+    // The privacy sentinel allows an empty goal (the system prompt agentSystemSentinel already self-contains "scan and redact everything",
+    // so an empty user message works); smart edit still needs an explicit goal.
+    if (!text && input.agentKind !== 'sentinel') return;
+
+    // Reasoning / thinking models (reasoning:true, e.g. DeepSeek-Reasoner) in thinking mode: the provider rejects
+    // a "forced tool_choice" (required / object form) → immediate 400 ("tool_choice ... does not support
+    // being set to required or object in thinking mode"). Such models switch to tool_choice:'auto',
+    // and since the sentinel has narrowed tools to only redact_area the model has no choice but to call it, avoiding errors.
+    const primaryModelId = input.agentModelId || defaultModelId(config);
+    const primaryModel = findModel(config, primaryModelId);
+    const modelIsReasoning =
+      primaryModel?.reasoning === true ||
+      // Fallback: the user didn't tick reasoning but the model name exposes reasoning traits (deepseek-reasoner / o1 / qwq, etc.)
+      /reasoner|thinking|-r1\b|o1\b|qwq|glm-4\.5|deepseek-reason/i.test(primaryModel?.refKey ?? primaryModelId ?? '');
 
     const conv = conversation.slice();
-    const images = [input.imageDataUrl, ...(input.images ?? [])].filter(
-      (u): u is string => typeof u === 'string' && u.length > 0,
+    const selectedMem = selectMemories(text, get().memories);
+    const memoryNote = buildMemoryNote(selectedMem);
+    // Part 2: a pro Agent prefers a custom system prompt; otherwise it falls back to the original agentKind fixed wording (backward compatible).
+    const sysPrompt =
+      input.agentSystemPrompt?.trim() ||
+      (input.agentKind === 'sentinel' ? agentSystemSentinel() : agentSystem());
+    // Budget guardrail (plan A): follow the model's real context window; the first turn adds plan B self-healing trim.
+    const { contextWindow, maxTokens } = resolveModelLimits(config, input.agentModelId || defaultModelId(config));
+    const sysReserve =
+      estimateTokens(sysPrompt) + (memoryNote ? estimateTokens(memoryNote) : 0);
+
+    // Plan B: the first-turn "requirement + many images + long OCR" may itself exceed the window → trim OCR / drop the oldest attached image first.
+    // Non-vision model: with OCR text, OCR supplies the screenshot content and only the image is dropped (no error); block only when there's neither vision nor OCR.
+    const agentModelSeesImages = modelVisionSupport(config, input.agentModelId || defaultModelId(config)) !== 'no';
+    const hasOcr = attachOcr && !!(input.ocrText || (input.ocrTexts && input.ocrTexts.length));
+    const rawImages = [input.imageDataUrl, ...(input.images ?? [])].filter(
+      (u): u is string => typeof u === 'string' && u.length > 0 && agentModelSeesImages,
     );
+    if (rawImages.length && !agentModelSeesImages && !hasOcr) {
+      set({ status: 'error', error: t('ai.errorNoVision') });
+      return;
+    }
+    const firstTurnBudget = Math.max(2_000, contextWindow - sysReserve - maxTokens);
+    const fit = fitFirstTurn({
+      goal: text,
+      ocrText: attachOcr ? input.ocrText : undefined,
+      ocrTexts: attachOcr ? input.ocrTexts : undefined,
+      images: rawImages,
+      budgetTokens: firstTurnBudget,
+      mainImageCount: 1,
+    });
+    const contextTrim = fit.trimmed ? fit : undefined;
+    const images = fit.images;
+
     let userContent = text;
-    if (attachOcr && (input.ocrText || (input.ocrTexts && input.ocrTexts.length))) {
+    if (attachOcr && (fit.ocrText || (fit.ocrTexts && fit.ocrTexts.length))) {
       const ocrBody =
-        input.ocrTexts && input.ocrTexts.length
-          ? input.ocrTexts.join('\n\n')
-          : (input.ocrText ?? '');
+        fit.ocrTexts && fit.ocrTexts.length
+          ? fit.ocrTexts.join('\n\n')
+          : (fit.ocrText ?? '');
       userContent = `${text}\n\n[截图文字内容 / OCR]\n${ocrBody}`;
     }
     const userMsg: AiMessage = {
@@ -533,15 +694,9 @@ export const useAiStore = create<AiState>((set, get) => ({
       ...(images && images.length ? { images } : {}),
     };
 
-    const selectedMem = selectMemories(text, get().memories);
-    const memoryNote = buildMemoryNote(selectedMem);
-    const sysPrompt = input.agentKind === 'sentinel' ? agentSystemSentinel() : agentSystem();
-    // 与 chat() 同款预算护栏：当前 userMsg（含 OCR 正文与截图）参与裁剪，
-    // 并预扣 system 提示词与长期记忆 token，避免装配后总量超模型上下文。
-    const sysReserve = estimateTokens(sysPrompt) + (memoryNote ? estimateTokens(memoryNote) : 0);
     const historyMsgs: AiMessage[] = trimHistoryToBudget(
       [...conv.map((m) => ({ role: m.role, content: m.content })), userMsg],
-      Math.max(4_000, 120_000 - sysReserve),
+      Math.max(4_000, contextWindow - sysReserve - maxTokens),
       3,
     ).slice(0, -1);
     const messages: AiMessage[] = [
@@ -551,7 +706,6 @@ export const useAiStore = create<AiState>((set, get) => ({
       userMsg,
     ];
 
-    const newConv: AiChatTurn[] = [...conv, { role: 'user', content: userContent }];
     set({
       status: 'streaming',
       output: '',
@@ -559,52 +713,127 @@ export const useAiStore = create<AiState>((set, get) => ({
       usage: { input: 0, output: 0 },
       thinking: '',
       agentSteps: [],
-      conversation: newConv,
       activeMemoryIds: selectedMem.map((m) => m.id ?? '').filter(Boolean),
+      contextTrim,
     });
     const ctl = new AbortController();
     abortCtl = ctl;
     try {
       sink = makeStreamSink(set);
-      const { text: full } = await streamChatWithTools({
-        config,
-        messages,
-        tools: AI_TOOL_DEFS,
-        executor: createToolExecutor(input.host),
-        maxToolTurns: 8,
-        onChunk: sink.onChunk,
-        onUsage: (u) => set({ usage: u }),
-        onThinking: sink.onThinking,
-        // 重试会把本轮部分输出作废：先清空 sink 缓冲与展示，再回退到
-        // 已完成轮次的全文基线（baseline），避免重试后内容重复叠加。
-        onRetry: (baseline) => {
+      // Part 2: an Agent-bound model → look up its provider by model id and resolve apiType/baseUrl/apiKey
+      // (fall back to global when the provider apiKey is empty). Aligns with biosphere's multi-provider multi-model capability.
+      // Shallow-copy one, to avoid resolveConfig returning the store's config reference directly (and polluting it) when there's no modelId.
+      // runStream is extracted into a closure: on primary-model failure it retries once with a fallback model (once only, to prevent infinite loops).
+      const runStream = async (modelId?: string): Promise<string> => {
+        const callConfig = { ...resolveConfig(config, modelId) };
+        if (input.agentTemperature != null) callConfig.temperature = input.agentTemperature;
+        // Plan B: assembly-chain diagnostics (same as chat) — helps confirm the root cause of an empty model from debug.log.
+        diagLogAi(`[ai-assemble][agent] rawModel="${config.model}" agentModelId=${modelId ?? '∅'} resolved="${callConfig.model}" base=${callConfig.baseUrl}`, 'info');
+        // Plan A (defense): empty model is blocked outright to avoid sending an empty request and triggering server-side 400 noise.
+        if (!callConfig.model?.trim()) {
+          diagLogAi(`[ai-client] ABORT: model empty (rawModel="${config.model}" agentModelId=${modelId ?? '∅'})`);
+          set({ status: 'error', error: t('ai.errorNoModel') });
+          throw Object.assign(new Error(t('ai.errorNoModel')), { modelEmpty: true });
+        }
+        // runStream is only called after sink is assigned; assert non-null — TS can't narrow a let inside a closure.
+        const s = sink!;
+        const { text: full } = await streamChatWithTools({
+          config: callConfig,
+          messages,
+          // Part 2: an Agent can bind a tool subset (empty = all); the rest use the original full tool set.
+          // Privacy sentinel: the tool set is narrowed to only redact_area (the prompt also forbids other tools),
+          // and forces redact_area every turn — to stop the model from only emitting an "identified" text report without actually redacting.
+          tools: input.agentKind === 'sentinel'
+            ? AI_TOOL_DEFS.filter((td) => td.name === 'redact_area')
+            : input.agentToolIds && input.agentToolIds.length
+              ? AI_TOOL_DEFS.filter((td) => input.agentToolIds!.includes(td.name))
+              : AI_TOOL_DEFS,
+          executor: createToolExecutor(input.host),
+          // The sentinel redacts region by region: it forces one call per turn, and needs more turns for many regions; 8→16 leaves headroom.
+          // Reasoning models don't support forced tool_choice, so use 'auto' (tools are already narrowed to only redact_area, so the model will call it).
+          maxToolTurns: input.agentKind === 'sentinel' ? 16 : 8,
+          forceToolName: input.agentKind === 'sentinel' && !modelIsReasoning ? 'redact_area' : undefined,
+          maxTokens,
+          onChunk: s.onChunk,
+          onUsage: (u) => set({ usage: u }),
+          onThinking: s.onThinking,
+          // A retry voids this turn's partial output: first clear the sink buffer and display, then roll back to
+          // the full-text baseline of completed turns, to avoid duplicated content after the retry.
+          onRetry: (baseline) => {
+            s.reset();
+            set({ output: baseline ?? '', thinking: '' });
+          },
+          onToolCall: (step) => {
+            // Dedupe the step echo: the sentinel may re-emit the same redact_area; the UI shows it only once
+            if (step.name === 'redact_area') {
+              const a = step.args as Record<string, any>;
+              const key = `${(+a.x).toFixed(3)},${(+a.y).toFixed(3)},${(+a.w).toFixed(3)},${(+a.h).toFixed(3)},${a.mode ?? 'mosaic'}`;
+              if (get().agentSteps.some((st) => st.name === 'redact_area' && `${(+(st.args as any).x).toFixed(3)},${(+(st.args as any).y).toFixed(3)},${(+(st.args as any).w).toFixed(3)},${(+(st.args as any).h).toFixed(3)},${(st.args as any).mode ?? 'mosaic'}` === key)) {
+                return;
+              }
+            }
+            set((s) => ({ agentSteps: [...s.agentSteps, step] }));
+          },
+          onToolResult: (callId, result, isError) =>
+            set((s) => ({
+              agentSteps: s.agentSteps.map((st) => (st.callId === callId ? { ...st, result, isError } : st)),
+            })),
+          signal: ctl.signal,
+        });
+        return full;
+      };
+      let full: string;
+      const fb = input.agentFallbackModelId;
+      const primaryId = primaryModelId;
+      try {
+        full = await runStream(primaryModelId);
+      } catch (e) {
+        if (fb && fb !== primaryId) {
+          // Primary model failed → clear current display, retry once with the fallback model (if the fallback also fails, throw up to the function-level catch)
           sink?.reset();
-          set({ output: baseline ?? '', thinking: '' });
-        },
-        onToolCall: (step) => set((s) => ({ agentSteps: [...s.agentSteps, step] })),
-        onToolResult: (callId, result, isError) =>
-          set((s) => ({
-            agentSteps: s.agentSteps.map((st) => (st.callId === callId ? { ...st, result, isError } : st)),
-          })),
-        signal: ctl.signal,
-      });
-      const finalConv: AiChatTurn[] = [...newConv, { role: 'assistant', content: full }];
-      // 先停止 sink 的 100ms 缓冲刷新定时器，再写入最终输出；
-      // 否则残留缓冲可能在 set 之后再次刷到 output 上，污染已完成的结果（与 chat 保持一致）。
-      sink?.stop();
-      set({ status: 'done', output: full, conversation: finalConv });
-      saveConversation(convKey, finalConv);
-      get().recordConvMeta(convKey, finalConv, input.preset, input.imageDataUrl, text);
-      if (finalConv.length > MAX_LIVE_ENTRIES) {
-        await get().compactMemory();
+          set({ output: '', thinking: '', error: '' });
+          full = await runStream(fb);
+        } else {
+          throw e;
+        }
       }
+      // An Agent task is a one-shot output and is not written into the conversation chat stream (avoids "task result piling at the bottom of the chat").
+      // Instead it becomes an independent agentResult output state, shown by the panel as an MUI card; history still enters conversationIndex for review.
+      sink?.stop();
+      // An auto default prompt (e.g. the privacy sentinel's sentinelDefaultGoal) is a system instruction, not user conversation content;
+      // when saving / displaying, replace it with a neutral label so the whole system prompt isn't shown as a "user message".
+      const isAutoDefault = input.agentKind === 'sentinel' && !input.goal?.trim();
+      const displayGoal = isAutoDefault ? t('ai.sentinelAutoLabel') : text;
+      const resultConv: AiChatTurn[] = [
+        { role: 'user', content: displayGoal },
+        { role: 'assistant', content: full },
+      ];
+      set({
+        status: 'done',
+        output: full,
+        agentResult: {
+          goal: displayGoal,
+          content: full,
+          presetId: input.preset.id,
+          imageDataUrl: input.imageDataUrl,
+          createdAt: Date.now(),
+        },
+      });
+      // History index title: an auto sentinel (empty text) falls back to the default goal, to avoid an empty title.
+      get().recordConvMeta(convKey, resultConv, input.preset, input.imageDataUrl, text || (isAutoDefault ? t('ai.sentinelDefaultGoal') : ''));
+      // Persisted body: runAgent doesn't write to the conversation chat stream; if saveConversation is skipped here,
+      // the disk keeps only the meta index with no message body — reopening / quitting the app then loadConversation reads empty,
+      // leaving the middle column blank, no preview/export, and clicking a history item looks "ineffective".
+      try { saveConversation(convKey, resultConv); } catch { /* fail silently */ }
     } catch (e: any) {
       sink?.stop();
       if (e?.name === 'AbortError') {
         set({ status: 'idle' });
+      } else if (e?.modelEmpty) {
+        // runStream already set a friendly error (ai.errorNoModel), so skip the aiErrorI18nKey override
       } else {
         const msg = e?.message ? String(e.message) : String(e);
-        // 回滚到请求前快照（同 chat）：避免失败后悬空 user 轮次导致下次请求连续 user → Anthropic 400。
+        // Roll back to the pre-request snapshot (same as chat): avoid a dangling user turn after failure causing consecutive user on next request → Anthropic 400.
         set({ status: 'error', error: t(aiErrorI18nKey(e), { msg }), conversation: conv });
       }
     } finally {
@@ -621,14 +850,14 @@ export const useAiStore = create<AiState>((set, get) => ({
       if (last.role === 'user') {
         const next = [...conversation, { role: 'assistant' as const, content: output }];
         set({ status: 'idle', conversation: next });
-        try { saveConversation(convKey, next); } catch { /* 静默失败 */ }
+        try { saveConversation(convKey, next); } catch { /* fail silently */ }
         return;
       }
     }
     set({ status: 'idle' });
   },
 
-  reset: () => set({ status: 'idle', output: '', error: '', refining: false, thinking: '', agentSteps: [] }),
+  reset: () => set({ status: 'idle', output: '', error: '', refining: false, thinking: '', agentSteps: [], contextTrim: undefined, agentResult: null }),
 
   setUsage: (u) => set({ usage: u }),
 }));

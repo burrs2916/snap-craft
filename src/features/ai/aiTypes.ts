@@ -22,15 +22,117 @@ export interface DocxImage {
 
 export type AiApiType = 'openai' | 'anthropic';
 
+/**
+ * 接口协议族（P0+P2，对齐 biosphere 的 ProviderConfig.endpointFamily）。
+ * 用于把「供应商预设」与「请求拼装方式」解耦：同一 apiType 下可能有多种端点
+ * （如 OpenAI 兼容既可能是聊天也可能是图像生成）。段一先落 openai-chat / anthropic，
+ * 图像类（openai-images / openai-images-edit / gemini / stability / comfyui）预留给 P4 图像输出。
+ */
+export type EndpointFamily =
+  | 'openai-chat'
+  | 'anthropic'
+  | 'openai-images'
+  | 'openai-images-edit'
+  | 'gemini'
+  | 'stability'
+  | 'comfyui';
+
+/** 模型能力标签（P2）：从 biosphere 借鉴的 capabilities 概念，驱动 UI 与图像方向功能开关 */
+export type AiCapability = 'text' | 'vision' | 'image-gen' | 'image-edit';
+
+/** 使用模态（P2）：服务于「图片生成图片」愿景——分析 / 艺术化 / 生成 */
+export type AiModality = 'analyze' | 'artistic' | 'generate';
+
+/**
+ * 供应商配置（对齐 biosphere 三层模型的最底层 Provider：只持有「密钥」，
+ * 不再捆绑 apiType/baseUrl/模型列表）。一个供应商下可有多个「接入方式(Endpoint)」，
+ * 每个接入方式下挂多个「模型(Model)」，形成 Provider → Endpoint → Model 三层嵌套。
+ */
+export type EndpointAuthType = 'bearer' | 'x-api-key' | 'custom-header';
+
+export interface AiProviderConfig {
+  id: string;
+  /** 显示名：builtin 供应商存 i18n key（如 'ai.providerOpenAI'），自定义供应商存用户文本 */
+  name: string;
+  /** 该供应商独立密钥；留空则运行时回退到全局 config.apiKey */
+  apiKey: string;
+  /** 来自 PROVIDERS 目录的内置供应商（不可删除） */
+  builtin?: boolean;
+  enabled?: boolean;
+}
+
+/**
+ * 接入方式（Endpoint）：biosphere 的 EndpointDto 在 snap-craft 中承载两层含义——
+ * 「服务族(apiType)」+「怎么接(baseUrl + authType)」，挂在某个供应商下。
+ * 同一供应商可有多条 Endpoint（不同服务 / 不同基地址 / 不同鉴权）。
+ */
+export interface AiEndpointConfig {
+  id: string;
+  /** 外键 → AiProviderConfig.id */
+  providerId: string;
+  /** 展示名（如「聊天」「图像生成」「内网代理」） */
+  name: string;
+  /** 接口协议族（决定 aiClient 的请求拼装与鉴权） */
+  apiType: AiApiType;
+  /** 接口基地址，不含 /chat/completions 后缀 */
+  baseUrl: string;
+  /** 鉴权方式（对齐 biosphere 的 authType） */
+  authType: EndpointAuthType;
+  /** authType=custom-header 时的自定义请求头名（如 'Authorization'） */
+  customAuthHeader?: string;
+  enabled?: boolean;
+}
+
+/**
+ * 模型实体（Model）：biosphere 的 ModelDto。不再是供应商下的字符串 id 列表，
+ * 而是独立实体，带「展示名 name / 真实 API 名 refKey / 能力 / 推理 / 窗口 / tokens」。
+ * 调用时按 model.endpointId → endpoint.providerId → provider.apiKey 两步动态解析，
+ * 绝不在模型上写死 key/baseurl（命中用户「模型→配置绑定动态解析、不写死」铁律）。
+ */
+export interface AiModelConfig {
+  id: string;
+  /** 外键 → AiEndpointConfig.id */
+  endpointId: string;
+  /** 展示名（UI 列表显示；可等于 refKey，也可自取友好名） */
+  name: string;
+  /** 实际请求用的 API 模型名（如 gpt-4o-mini）；发请求用这个，不是 name */
+  refKey: string;
+  /** 输入模态能力：text / image（截图分析主业务依赖 image） */
+  inputTypes: ('text' | 'image')[];
+  /** 是否推理模型（Anthropic thinking / DeepSeek-R1 等） */
+  reasoning?: boolean;
+  /** 上下文窗口（token） */
+  contextWindow?: number;
+  /** 单次最大输出（token） */
+  maxTokens?: number;
+  enabled?: boolean;
+}
+
 export interface AiConfig {
   apiType: AiApiType;
-  /** 接口基地址，不含 /chat/completions 后缀，如 https://api.openai.com/v1 */
+  /** 接口基地址，不含 /chat/completions 后缀，如 https://api.openai.com/v1（全局兜底） */
   baseUrl: string;
   apiKey: string;
+  /** 默认模型：存 AiModelConfig.id（指向具体模型实体）；未命中实体时视为自定义 refKey 兜底 */
   model: string;
   temperature: number;
   /** 导出文档（HTML / PDF）的主题，默认 'modern'，持久化于本机配置 */
   theme?: DocThemeId;
+  /** 接口协议族（P2，可选，旧配置缺省回退 'openai-chat'/'anthropic'） */
+  endpointFamily?: EndpointFamily;
+  /** 模型能力标签（P2，可选）；由供应商预设初值 + 「能力探测」回填 */
+  capabilities?: AiCapability[];
+  /** 使用模态（P2，可选，旧配置缺省 'analyze'） */
+  modality?: AiModality;
+  /** 多供应商列表（仅密钥层） */
+  providers?: AiProviderConfig[];
+  /** 接入方式列表（服务族 + 基地址 + 鉴权），外键 providerId */
+  endpoints?: AiEndpointConfig[];
+  /** 模型实体列表（独立实体，外键 endpointId） */
+  models?: AiModelConfig[];
+  /** 已由「视觉能力探测」实测确认支持读图的模型 id（模型级能力记录，优先级高于目录推断）。
+   *  截图分析是 SnapCraft 主业务，选到非视觉模型等于白配，故按模型而非全局记录。 */
+  visionModels?: string[];
 }
 
 export interface AiMessage {
@@ -109,10 +211,18 @@ export interface StreamOpts {
   onUsage?: (u: AiUsage) => void;
   /** 可选：工具定义（AI Agent 工具循环）；不传则不启用工具 */
   tools?: AiToolDef[];
+  /** 可选：强制模型调用指定工具（OpenAI: {type:'function',function:{name}} /
+   *  Anthropic: {type:'tool',name}）；传入后模型本轮必须调用该工具，不能只写文本。
+   *  用于「隐私哨兵」等必须真正执行工具、否则会退化成纯文字报告的场景。不传则 'auto'。 */
+  toolChoice?: string;
   /** 可选：流式过程中实时回调模型「思考 / 推理」内容（Anthropic thinking_delta、
    *  OpenAI 兼容 reasoning / reasoning_content，如 DeepSeek-R1 / Qwen 推理模型）。
    *  UI 上可作为可折叠的「思考过程」展示，让用户看到 AI 如何拆解截图任务。 */
   onThinking?: (t: string) => void;
+  /** 可选：本次请求的单次最大输出 token。由调用方按模型真实 maxTokens 传入（resolveModelLimits），
+   *  用于同时满足：(1) 请求体 max_tokens 不超过模型上限；(2) history 预算为其预留空间，
+   *  保证 input + max_tokens ≤ contextWindow，杜绝「触顶上下文 + 输出」叠加导致的 400。 */
+  maxTokens?: number;
   /** 可选：每次重试前回调。流式重试会从头重新输出，调用方应借此把已展示内容回退到
    *  baseline（不传则清空）：普通流式清空即可；Agent 工具循环传「已完成轮次的累计文本」，
    *  使重试只覆盖当前轮片段，不丢失此前轮次的输出。 */

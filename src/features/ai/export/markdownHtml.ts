@@ -126,6 +126,15 @@ const COMMON =
   '  .doc-toc { page-break-inside: avoid; }' +
   '  .doc-main h2, .doc-main h3, .doc-main h4 { page-break-after: avoid; }' +
   '  .doc-main p, .doc-main li { orphans: 3; widows: 3; }' +
+  '}' +
+  // 2026-08-14 美化增强：屏幕下整篇文档呈现为居中「纸张卡片」，提升精致感（打印自动压平）
+  'html { background:#eef2f7; }' +
+  '.doc-page { max-width:880px; margin:32px auto; background:#fff; border-radius:18px; box-shadow:0 18px 50px rgba(15,23,42,.14); overflow:hidden; }' +
+  '.doc-main h1, .doc-main h2, .doc-main h3 { scroll-margin-top:84px; }' +
+  '::selection { background:rgba(79,70,229,.18); }' +
+  '@media print {' +
+  '  html { background:#fff; }' +
+  '  .doc-page { margin:0; max-width:none; border-radius:0; box-shadow:none; overflow:visible; }' +
   '}';
 
 const THEME_CSS: Record<DocThemeId, string> = {
@@ -367,12 +376,14 @@ ${css}
 </style>
 </head>
 <body>
+<div class="doc-page">
 ${cover}
 ${toc}
 <main class="doc-main">
 ${body}
 </main>
 <footer class="doc-footer">${t('export.htmlFooter', { date: dateStr })}</footer>
+</div>
 </body>
 </html>`;
 }

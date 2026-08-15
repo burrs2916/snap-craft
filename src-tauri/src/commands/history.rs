@@ -1,5 +1,9 @@
 use crate::store::{self, HistoryItem};
+use serde::Serialize;
+use std::fs;
+use std::io::Cursor;
 use tauri::AppHandle;
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 
 /// 读取截图历史记录
 #[tauri::command]
@@ -120,4 +124,69 @@ pub async fn set_screenshot_ocr_full(
     } else {
         Err(format!("screenshot not found: {}", id))
     }
+}
+
+/// 导入图片的结果：成功入库的条目 + 因格式不支持等被跳过的文件（附原因）。
+#[derive(Serialize)]
+pub struct ImportImagesResult {
+    pub items: Vec<HistoryItem>,
+    pub skipped: Vec<String>,
+}
+
+/// 把单个图片文件读入为 HistoryItem（source='imported'）。
+/// 通过内容嗅探确定真实 MIME 与宽高，避免硬编码 png 前缀导致 jpg/webp 等无法渲染；
+/// image crate 不支持的格式（如 HEIC/AVIF）或无法解析尺寸的文件，返回 Err 交由外层标记 skipped。
+fn import_one_image(path: &std::path::Path) -> Result<HistoryItem, String> {
+    let bytes = fs::read(path).map_err(|e| format!("读取失败: {}", e))?;
+    let fmt = image::guess_format(&bytes).map_err(|e| format!("无法识别图片格式: {}", e))?;
+    let mime = match fmt {
+        image::ImageFormat::Png => "png",
+        image::ImageFormat::Jpeg => "jpeg",
+        image::ImageFormat::WebP => "webp",
+        image::ImageFormat::Gif => "gif",
+        image::ImageFormat::Bmp => "bmp",
+        image::ImageFormat::Tiff => "tiff",
+        _ => return Err("不支持的图片格式".into()),
+    };
+    let dim = image::ImageReader::new(Cursor::new(bytes.clone()))
+        .with_guessed_format()
+        .map_err(|e| e.to_string())?
+        .into_dimensions()
+        .map_err(|e| format!("无法解析图片尺寸: {}", e))?;
+    let data_url = format!("data:image/{};base64,{}", mime, STANDARD.encode(&bytes));
+    Ok(HistoryItem {
+        id: uuid::Uuid::new_v4().to_string(),
+        data_url,
+        created_at: chrono::Utc::now().to_rfc3339(),
+        width: dim.0,
+        height: dim.1,
+        source: "imported".to_string(),
+        annotations: String::new(),
+        ocr_text: String::new(),
+        ocr_blocks_json: String::new(),
+    })
+}
+
+/// 导入本地图片文件进历史库（source='imported'）。前端随后用 openEditorWindow(id) 打开，
+/// 复用现有标注 / OCR / AI 编辑 / 导出 / 批量全部能力——编辑器按 history id 取图，
+/// 完全不感知图来自截屏还是文件。导入即复制进历史库，绝不触碰磁盘上的原文件（非破坏性）。
+#[tauri::command]
+pub async fn import_images(app: AppHandle, paths: Vec<String>) -> Result<ImportImagesResult, String> {
+    let mut new_items: Vec<HistoryItem> = Vec::new();
+    let mut skipped: Vec<String> = Vec::new();
+    for p in paths {
+        let path = std::path::Path::new(&p);
+        match import_one_image(path) {
+            Ok(item) => new_items.push(item),
+            Err(e) => skipped.push(format!("{}: {}", p, e)),
+        }
+    }
+    if !new_items.is_empty() {
+        let items = store::load_history(&app);
+        let mut combined = new_items.clone();
+        combined.extend(items);
+        combined.truncate(100);
+        store::save_history(&app, &combined)?;
+    }
+    Ok(ImportImagesResult { items: new_items, skipped })
 }

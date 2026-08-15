@@ -78,6 +78,26 @@ const ICONS: Record<string, ReactNode> = {
       <path d="M2 6h14a2 2 0 0 1 2 2v14" />
     </>
   ),
+  measure: (
+    <>
+      <path d="M3 9l3-3 2 2 2-2 2 2 2-2 2 2 2-2v10H3z" strokeWidth="1.4" />
+      <path d="M7 9v2M11 9v2M15 9v2M19 9v2" strokeWidth="1.2" />
+    </>
+  ),
+  pick: (
+    <>
+      <path d="M19 3l-7.5 7.5" />
+      <path d="M14 6l3-3 4 4-3 3-2-2-2 2-1.5-1.5L14 6z" />
+      <circle cx="6" cy="18" r="2.4" />
+    </>
+  ),
+  zoom: (
+    <>
+      <circle cx="10.5" cy="10.5" r="6" />
+      <path d="M15 15l5 5" />
+      <path d="M10.5 7.5v6M7.5 10.5h6" strokeWidth="1.3" />
+    </>
+  ),
   highlight: (
     <>
       <path d="M4 20h16" strokeWidth="2.4" opacity="0.5" />
@@ -121,6 +141,13 @@ const TOOLS = [
   { id: 'crop', hint: 'C' },
 ];
 
+// 检视工具组：测量/取色/放大镜。纯检视、不落标注、不进撤销/导出，与绘制工具隔离。
+const INSPECT_TOOLS = [
+  { id: 'measure', hint: 'M' },
+  { id: 'pick', hint: 'E' },
+  { id: 'zoom', hint: 'Z' },
+];
+
 // 主题感知的标注调色板：漂亮常用的系统色（覆盖红/橙/黄/绿/青/蓝/紫/粉/黑白）
 const COLORS = [
   '#ff3b30', // 红
@@ -143,7 +170,7 @@ const WIDTHS = [2, 4, 6, 8];
 // 某字体本机未安装时自动回退到下一款，绝不出现「无字体可渲染」的空白。
 // labelKey 指向 i18n 的 font.* 词条：字体显示名随界面语言切换（中文环境显示
 // 「苹方 / 微软雅黑」，英文环境显示「PingFang / Microsoft YaHei」），value 不变。
-const FONTS: { id: string; labelKey: string; value: string }[] = [
+export const FONTS: { id: string; labelKey: string; value: string }[] = [
   { id: 'system', labelKey: 'font.system', value: "-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif" },
   { id: 'pingfang', labelKey: 'font.pingfang', value: "'PingFang SC', 'Helvetica Neue', 'Microsoft YaHei', sans-serif" },
   { id: 'yahei', labelKey: 'font.yahei', value: "'Microsoft YaHei', 'PingFang SC', 'Heiti SC', sans-serif" },
@@ -412,6 +439,26 @@ export const AnnotationToolbar = () => {
           <div className="tool-divider" />
         </div>
 
+        {/* 检视工具组：测量 / 取色 / 放大镜（纯检视，不创建标注） */}
+        <div className="tool-section">
+          <div className="tool-group" role="group" aria-label={t('tool.groupInspect')}>
+            {INSPECT_TOOLS.map((tool) => (
+              <button
+                key={tool.id}
+                className={`tool-btn${activeTool === tool.id ? ' active' : ''}`}
+                aria-label={`${t('tool.' + tool.id)} (${tool.hint})`}
+                aria-pressed={activeTool === tool.id}
+                onMouseEnter={(e) => showTip(e, t('tool.' + tool.id), tool.hint)}
+                onMouseLeave={hideTip}
+                onClick={() => setActiveTool(tool.id)}
+              >
+                <Icon>{ICONS[tool.id]}</Icon>
+              </button>
+            ))}
+          </div>
+          <div className="tool-divider" />
+        </div>
+
         {/* 颜色 */}
         <div className="tool-section">
           <div className="swatch-group" role="group" aria-label={t('tool.groupColor')}>
@@ -490,9 +537,9 @@ export const AnnotationToolbar = () => {
                 <span className="ctx-label">{t('tool.fontSize')}</span>
                 <input
                   type="range"
-                  min={12}
-                  max={72}
-                  step={2}
+                  min={8}
+                  max={240}
+                  step={1}
                   value={fontSizeVal}
                   onChange={(e) => applyFontSize(Number(e.target.value))}
                   className="ctx-range"

@@ -114,6 +114,7 @@ export interface OcrPanelState {
   handleOcr: () => void;
   handleLangChange: (v: string) => void;
   startOcrFromClipboard: () => Promise<void>;
+  startSilentClipOcr: () => Promise<void>;
   startOcrFromShot: (shot: { id: string; dataUrl: string; width: number; height: number }) => void;
   onRegionOcr: (dataUrl: string) => void;
   applyOcrAsAnnotations: () => void;
@@ -520,6 +521,44 @@ export function useOcrPanel(deps: OcrPanelDeps): OcrPanelState {
     }
   };
 
+  // 静默取字：全局快捷键 ⌘⌥V 触发。不打开编辑窗 / OCR 面板，
+  // 直接读剪贴板图 → OCR → 写回剪贴板 + 轻吐司。剪贴板无图片则提示。
+  // 与 startOcrFromClipboard 的区别：完全不依赖 current/编辑窗，纯后台取字。
+  const startSilentClipOcr = async () => {
+    if (ocrClipBusyRef.current) return;
+    ocrClipBusyRef.current = true;
+    try {
+      let dataUrl: string | null = null;
+      try {
+        dataUrl = await invoke<string>('read_clipboard_image');
+      } catch {
+        /* 剪贴板里没有图片 */
+      }
+      if (!dataUrl || !dataUrl.startsWith('data:image')) {
+        flash(t('ocr.clipOcrNoImage'), 'info');
+        return;
+      }
+      const res = await invoke<OcrResult>('ocr_image', { imageData: dataUrl, lang: null });
+      const text = (res?.text ?? '').trim();
+      if (!text) {
+        flash(t('toast.ocrNone'), 'error');
+        return;
+      }
+      try {
+        await navigator.clipboard.writeText(text);
+        flash(t('ocr.clipOcrDone', { n: text.length }), 'success');
+      } catch {
+        flash(t('ocr.copyFailed'), 'error');
+      }
+    } catch (e) {
+      const msg = String(e);
+      if (/no image|not available|没有图片|未识别/i.test(msg)) flash(t('ocr.clipOcrNoImage'), 'info');
+      else flash(t('ocr.clipFailed', { msg }), 'error');
+    } finally {
+      ocrClipBusyRef.current = false;
+    }
+  };
+
   // 选区 OCR
   const onRegionOcr = (dataUrl: string) => {
     setOcrRegionMode(false);
@@ -703,7 +742,7 @@ export function useOcrPanel(deps: OcrPanelDeps): OcrPanelState {
     setOcrConf, setOcrMerge, setOcrAutoCopy, setOcrHistoryOpen, setOcrLayout,
     setOcrExportFmt, setOcrExtract, setOcrClean, setOcrFontSize, setOcrSel,
     setOcrMatchIdx, setOcrHoverLine, setOcrRegionPick, setOcrDrag, setOcrHistory,
-    runOcr, handleOcr, handleLangChange, startOcrFromClipboard, startOcrFromShot,
+    runOcr, handleOcr, handleLangChange, startOcrFromClipboard, startSilentClipOcr, startOcrFromShot,
     onRegionOcr, applyOcrAsAnnotations, redactOcrSel, highlightOcrSel, arrowOcrSel,
     handleExportOcr, copyOcrAs, selectOcrText, onPreviewDown, onPreviewMove, onPreviewUp,
     ocrVisibleLines, ocrIncludedLines, ocrSelectedBlocks, ocrTextAt,

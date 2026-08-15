@@ -11,8 +11,13 @@ import { useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { useAiStore } from '../features/ai/aiStore';
 import AIPanel from '../features/ai/AIPanel';
+import { ModelConfigPage } from '../features/ai/ModelConfigPage';
+import { AiAgentManager } from '../features/ai/AiAgentManager';
 import { t, useI18n } from '../i18n';
 import { RemoteToolHost } from './RemoteToolHost';
+import { Tabs, Tab } from '@mui/material';
+import { ThemeProvider } from '@mui/material/styles';
+import { useAiTheme } from '../features/ai/aiTheme';
 import {
   setupAiBridge,
   notifyAiClosed,
@@ -30,9 +35,16 @@ export default function AiWindow() {
   // 订阅语言切换：独立 AI 窗口是单独的 React 根，不订阅 useI18n 时主窗口切换
   // 语言不会触发本窗口（含 AIPanel 子树）重渲染，残留旧语言文案。
   useI18n();
+  const theme = useAiTheme();
+  const [tab, setTab] = useState<'doc' | 'settings' | 'agent'>('doc');
+  const { agents, config, upsertAgent, deleteAgent } = useAiStore();
   const [ctx, setCtx] = useState<AiContext | null>(null);
   const [ready, setReady] = useState(false);
   const remoteHostRef = useRef(new RemoteToolHost(null));
+
+  // 教程捕获模式：主窗收集步骤后通过 URL ?tutorialIds= 注入，透传给 AIPanel 受控自动成稿
+  const tutorialIdsParam = new URLSearchParams(window.location.search).get('tutorialIds');
+  const tutorialIds = tutorialIdsParam ? tutorialIdsParam.split(',').filter(Boolean) : undefined;
 
   // 挂载桥接：监听宿主窗口推送的上下文，挂载后主动请求一次最新上下文
   useEffect(() => {
@@ -110,17 +122,49 @@ export default function AiWindow() {
   }
 
   return (
-    <AIPanel
-      imageDataUrl={ctx.dataUrl}
-      ocrText={ctx.ocrText}
-      visionImageUrl={ctx.visionUrl}
-      open
-      onClose={handleClose}
-      onRefreshImage={requestRefresh}
-      onApplyToScreenshot={applyToScreenshot}
-      aiTools={remoteHostRef.current}
-      windowChrome
-      live={ready && !!ctx}
-    />
+    <ThemeProvider theme={theme}>
+      <div className="aiwin-shell">
+        {/* 最左侧竖向标签栏：文档 / 模型接入 / 智能体 */}
+        <aside className="aiwin-rail">
+          <Tabs
+            value={tab}
+            onChange={(_, v) => setTab(v)}
+            orientation="vertical"
+            className="aiwin-tabs"
+          >
+            <Tab value="doc" label={t('ai.tabDoc')} />
+            <Tab value="settings" label={t('ai.tabSettings')} />
+            <Tab value="agent" label={t('ai.tabAgent')} />
+          </Tabs>
+        </aside>
+        <div className="aiwin-content">
+          {tab === 'doc' && (
+            <AIPanel
+              imageDataUrl={ctx.dataUrl}
+              ocrText={ctx.ocrText}
+              visionImageUrl={ctx.visionUrl}
+              open
+              onClose={handleClose}
+              onRefreshImage={requestRefresh}
+              onApplyToScreenshot={applyToScreenshot}
+              aiTools={remoteHostRef.current}
+              windowChrome
+              live={ready && !!ctx}
+              tutorialIds={tutorialIds}
+            />
+          )}
+          {tab === 'settings' && <ModelConfigPage />}
+          {tab === 'agent' && (
+            <AiAgentManager
+              agents={agents}
+              config={config}
+              onClose={() => setTab('doc')}
+              onUpsert={upsertAgent}
+              onDelete={deleteAgent}
+            />
+          )}
+        </div>
+      </div>
+    </ThemeProvider>
   );
 }

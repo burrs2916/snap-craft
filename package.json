@@ -16,10 +16,16 @@
     "tauri:windows:msix": "npx @choochmeque/tauri-windows-bundle@latest build --runner pnpm"
   },
   "dependencies": {
+    "@emotion/react": "^11.14.0",
+    "@emotion/styled": "^11.14.1",
+    "@mui/material": "^6.5.0",
+    "@phosphor-icons/react": "^2.1.10",
     "@tauri-apps/api": "^2.11.0",
     "@tauri-apps/plugin-dialog": "^2.7.0",
     "@tauri-apps/plugin-global-shortcut": "^2",
     "docx": "^9.7.1",
+    "html2canvas": "^1.4.1",
+    "jspdf": "^4.2.1",
     "konva": "^10.3.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",

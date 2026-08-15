@@ -1612,6 +1612,9 @@ export const EditorWindow = () => {
                         checked={!!ocrSel[i]}
                         onChange={(e) => setOcrSel((s) => ({ ...s, [i]: e.target.checked }))}
                       />
+                      {b.confidence > 0 && (
+                        <span className="ocr-line-conf">{Math.round(b.confidence * 100)}%</span>
+                      )}
                       {ocrEditing === i ? (
                         <textarea
                           className="ocr-line-edit"
@@ -1638,6 +1641,21 @@ export const EditorWindow = () => {
                           )}
                         </span>
                       )}
+                      <button
+                        type="button"
+                        className="ocr-line-copy"
+                        title={t('ocr.copyLine')}
+                        onClick={async () => {
+                          try {
+                            await navigator.clipboard.writeText(ocrTextAt(i, b));
+                            flash(t('ocr.copied'), 'success');
+                          } catch {
+                            flash(t('ocr.copyFailed'), 'error');
+                          }
+                        }}
+                      >
+                        {t('ocr.copy')}
+                      </button>
                     </div>
                   ))
                 )}

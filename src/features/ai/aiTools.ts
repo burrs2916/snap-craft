@@ -1,43 +1,43 @@
-// AI Agent 工具契约（Phase 14，对齐 claw-code run_turn / openclaw 工具循环）
+// AI Agent tool contract (Phase 14, aligned with claw-code run_turn / openclaw tool loop)
 //
-// 设计要点：
-//  - 工具定义（AI_TOOL_DEFS）对 OpenAI 兼容 / Anthropic 透明，由 aiClient.buildBody
-//    在发送时转换为各自 provider 的 tools 格式；
-//  - 模型给出的区域坐标一律是 0~1 的「相对整图比例」(左上角 0,0)，由宿主侧（编辑器）
-//    换算为原图像素——与现有标注坐标体系（natural pixel）保持一致；
-//  - 真正的「副作用」（改画布、跑 OCR）全部由宿主侧 AiToolHost 实现，aiClient 的工具
-//    循环只负责「调度 + 回传结果」，保持纯前端、零 Rust、零破坏性。
+// Design notes:
+//  - Tool definitions (AI_TOOL_DEFS) are transparent to OpenAI-compatible / Anthropic, converted by aiClient.buildBody
+//    into each provider's tools format at send time;
+//  - Region coordinates from the model are always 0~1 "relative-to-whole-image ratios" (top-left 0,0), converted by the host (editor)
+//    into original-image pixels — consistent with the existing annotation coordinate system (natural pixel);
+//  - The real "side effects" (edit canvas, run OCR) are all implemented by the host-side AiToolHost; aiClient's tool
+//    loop only handles "dispatch + return results", staying pure-frontend, zero-Rust, non-destructive.
 
 import { getLang } from '../../i18n';
 import type { AiToolDef } from './aiTypes';
 import { clamp01, type NormRect, type NormPoint } from '../../shared/geometry';
 
-// 向后兼容：此前 NormRect / NormPoint 定义在本文件，外部消费者仍可从 aiTools 导入
+// Backward compatibility: NormRect / NormPoint were previously defined here; external consumers can still import them from aiTools
 export type { NormRect, NormPoint } from '../../shared/geometry';
 
 /**
- * 宿主侧（编辑器）实现的工具宿主：AI 工具执行器通过它真实修改截图。
- * 编辑器用既有 useScreenshotStore.addAnnotation 写入标注，与用户手动标注同路，
- * 自动进入撤销历史——不引入新的画布交互层。
+  * The tool host implemented by the host side (editor): the AI tool executor uses it to actually modify screenshots.
+  * The editor writes annotations via the existing useScreenshotStore.addAnnotation, same path as manual user annotations,
+  * and they automatically enter undo history — no new canvas interaction layer is introduced.
  */
 export interface AiToolHost {
-  /** 当前截图原图像素尺寸；取不到时返回 null（工具将拒绝执行） */
+  /** Original-image pixel size of the current screenshot; returns null when unavailable (tool will refuse to run) */
   getImageSize: () => { width: number; height: number } | null;
-  /** 画矩形标注；返回人类可读的坐标描述（用于回传给模型 / UI） */
+  /** Draw a rectangle annotation; returns a human-readable coordinate description (for returning to the model / UI) */
   drawRectangle: (rect: NormRect, opts?: { color?: string; label?: string }) => string;
-  /** 打码：blur=高斯模糊 / mosaic=马赛克 / black=涂黑；返回坐标描述 */
+  /** Redact: blur = Gaussian blur / mosaic = pixelation / black = black-out; returns a coordinate description */
   redactArea: (rect: NormRect, mode: 'blur' | 'mosaic' | 'black', strength?: number) => string;
-  /** 高亮文字/区域（半透明色块）；返回坐标描述 */
+  /** Highlight text / region (semi-transparent block); returns a coordinate description */
   highlightRect: (rect: NormRect, color?: string) => string;
-  /** 画箭头：从 from 指向 to（均为 0~1 归一化点）；可选标签文字画在箭头末端；返回坐标描述 */
+  /** Draw an arrow: from `from` to `to` (both 0~1 normalized points); optional label text drawn at the arrow tip; returns a coordinate description */
   drawArrow: (from: NormPoint, to: NormPoint, opts?: { color?: string; label?: string }) => string;
-  /** 文字标注气泡：anchor 为引线指向的锚点、label 为气泡中心（均为 0~1 归一化点）；可选说明文字与颜色；返回坐标描述 */
+  /** Text callout bubble: anchor is the lead-line anchor point, label is the bubble center (both 0~1 normalized points); optional caption text and color; returns a coordinate description */
   drawCallout: (anchor: NormPoint, label: NormPoint, opts?: { color?: string; text?: string }) => string;
-  /** 识别指定区域文字（裁剪后走 OCR）；返回识别文本 */
+  /** Recognize text in a specified region (cropped then OCR); returns the recognized text */
   summarizeRegion: (rect: NormRect) => Promise<string>;
 }
 
-// 区域四点的共享 JSON Schema 片段
+// Shared JSON Schema fragment for the region's four points
 const RECT_PROPS = {
   x: { type: 'number', description: '区域左上角 X，取值范围 0~1（相对整张图片宽度）' },
   y: { type: 'number', description: '区域左上角 Y，取值范围 0~1（相对整张图片高度）' },
@@ -45,7 +45,7 @@ const RECT_PROPS = {
   h: { type: 'number', description: '区域高度，取值范围 0~1' },
 };
 
-/** 工具契约：AI 可直接调用的四类截图操作（截图工具独有价值） */
+/** Tool contract: the four screenshot operations the AI can call directly (the unique value of screenshot tools) */
 export const AI_TOOL_DEFS: AiToolDef[] = [
   {
     name: 'draw_rectangle',
@@ -143,15 +143,17 @@ export const AI_TOOL_DEFS: AiToolDef[] = [
 ];
 
 /**
- * 把模型给出的工具调用派发到宿主侧执行，封装为「工具循环」可用的 executor。
- * 所有区域参数先钳制到 [0,1] 再交给宿主（防御越界 / 注入破坏画布）。
+  * Dispatches the model's tool calls to the host side for execution, wrapped into an executor usable by the "tool loop".
+  * All region params are clamped to [0,1] before reaching the host (defense against out-of-bounds / injection damaging the canvas).
  */
 export function createToolExecutor(host: AiToolHost) {
+  // In-run dedupe of already-redacted regions (the model may re-cover the same region while forced to call redact_area each turn).
+  const redactedKeys = new Set<string>();
   return async (
     name: string,
     args: Record<string, any>,
   ): Promise<{ content: string; isError?: boolean }> => {
-    // 兼容扁平 {x,y,w,h} 与隐私哨兵 prompt 误用的嵌套 {r:{x,y,w,h}}（防御层，避免打码坐标塌成 0）
+    // Tolerate both flat {x,y,w,h} and the nested {r:{x,y,w,h}} misused by the privacy-sentinel prompt (defense layer to avoid redact coords collapsing to 0)
     const rr = (args && typeof args.r === 'object' && args.r) ? args.r : {};
     const r: NormRect = {
       x: clamp01(args.x ?? rr.x),
@@ -168,6 +170,17 @@ export function createToolExecutor(host: AiToolHost) {
         case 'redact_area': {
           const mode: 'blur' | 'mosaic' | 'black' =
             args.mode === 'blur' || args.mode === 'black' ? args.mode : 'mosaic';
+          // Defense: after clamping the region area is 0 (the model may emit a degenerate/placeholder call once it believes there is no sensitive info)
+          // or it's fully out of bounds — don't create an invisible annotation; return gently to avoid polluting the canvas or misleading the user.
+          if (r.w <= 0 || r.h <= 0 || r.x >= 1 || r.y >= 1) {
+            return { content: `已跳过无效/空打码区域（mode=${mode}）` };
+          }
+          // Dedupe: skip if it exactly overlaps an already-redacted region this run, to avoid duplicate mosaic and duplicate step echo
+          const key = `${r.x.toFixed(3)},${r.y.toFixed(3)},${r.w.toFixed(3)},${r.h.toFixed(3)},${mode}`;
+          if (redactedKeys.has(key)) {
+            return { content: `已跳过重复打码区域（${mode}）：${key}` };
+          }
+          redactedKeys.add(key);
           return { content: `已对区域打码（${mode}）：${host.redactArea(r, mode, args.strength)}` };
         }
         case 'highlight_text':
@@ -195,7 +208,7 @@ export function createToolExecutor(host: AiToolHost) {
   };
 }
 
-/** 工具名 → 友好标签（用于 Agent 步骤 UI；与 i18n key 对齐） */
+/** Tool name → friendly label (used in the Agent step UI; aligned with i18n keys) */
 export function toolLabel(name: string): string {
   const map: Record<string, string> = {
     draw_rectangle: 'ai.agentTool.draw_rectangle',
@@ -208,7 +221,7 @@ export function toolLabel(name: string): string {
   return map[name] ?? name;
 }
 
-/** AI Agent 模式专用系统指令（语言自适应）：告知模型可用工具与坐标约定 */
+/** AI Agent mode-specific system instruction (language-adaptive): tells the model the available tools and coordinate conventions */
 export function agentSystem(): string {
   const zh = getLang() === 'zh-CN';
   return zh
@@ -217,13 +230,13 @@ export function agentSystem(): string {
 }
 
 /**
- * 「隐私哨兵」专用系统提示词：复用同一套工具循环，但目标被约束为
- * 全图敏感信息扫描 + 打码。区别于通用智能编辑：模型必须只调用 redact_area，
- * 不画图框/高亮，最后用中文给出「已打码清单 + 残留风险」报告。
+  * "Privacy Sentinel" dedicated system prompt: reuses the same tool loop, but the goal is constrained to
+  * full-image sensitive-info scanning + redaction. Unlike the general smart editor, the model must call only redact_area,
+  * not draw boxes/highlights, and finally gives a Chinese "redaction list + no residue" conclusion (without residual-risk/disclaimer wording).
  */
 export function agentSystemSentinel(): string {
   const zh = getLang() === 'zh-CN';
   return zh
-    ? '你是 SnapCraft 截图助手的「隐私哨兵」。你的唯一任务：**扫描当前截图中的所有敏感信息，并逐一打码**，防止隐私泄露。\n\n【必须打码的类型】手机号、邮箱、身份证/护照号、银行卡/信用卡号、密码与口令、API Key / Token / Secret、家庭或公司详细地址、真实姓名（除非是公开人物）、金额与账户余额、聊天中的私密内容、证件/合同/发票上的敏感字段。当不确定某信息是否敏感时，**宁打码勿放过**。\n\n【工具】你只能调用 `redact_area` 一个工具（不要使用 draw_rectangle / highlight_text / summarize_region）。参数：\n  - x,y,w,h：敏感区域的 0~1 相对坐标（x,y 为左上角，w,h 为宽高；左上角为 0,0）。务必把整段敏感文字/数字完整框住，留一点边距。\n  - mode：对文字/数字类敏感信息优先用 "mosaic"（马赛克最直观、不可逆）；也支持 "blur" 模糊；"black" 涂黑作为兜底。\n  - strength：9~16 之间，确保无法还原。\n一个屏幕里可能有多个敏感区域，**逐个调用 redact_area**，不要漏。\n\n【工具调用方式】优先用模型原生 tool_calls 字段。若流式接口不支持原生 tool_calls（部分国产 LLM 只输出文本），可改用以下「文本兜底」契约之一：\n  ① JSON 围栏：\\`\\`\\`json\\n{"name":"redact_area","arguments":{"x":0.1,"y":0.2,"w":0.3,"h":0.04,"mode":"mosaic","strength":12}}\\n\\`\\`\\`\n  ② XML：<tool_call name="redact_area">{...}</tool_call>\\n  ③ Bracketed：[redact_area]{...}[/END_TOOL_REQUEST]\\n  ④ ReAct：Action: redact_area\\nAction Input: {...}\n  以上任一形态宿主都会自动识别并执行。\n\n【完成打码后】用中文输出一份简洁报告：\n  1）已打码清单（第几处、大致是什么类型，如「手机号」「邮箱」）；\n  2）残留风险提示（如截图边缘仍有半截文字、或无法判断的区域）；\n  3）如确认全图已无敏感信息，明确写「已无可见敏感信息」。\n不要输出与打码无关的内容，不要替用户写文档。'
-    : 'You are the "Privacy Sentinel" of the SnapCraft screenshot assistant. Your only task: **scan the current screenshot for all sensitive information and redact it one by one** to prevent privacy leaks.\n\n[Types that MUST be redacted] Phone numbers, emails, ID/passport numbers, bank/credit card numbers, passwords, API keys / tokens / secrets, detailed home or company addresses, real names (unless a public figure), amounts and balances, private chat content, sensitive fields on documents/contracts/invoices. When unsure whether something is sensitive, **redact rather than risk it**.\n\n[Tool] You may ONLY call `redact_area` (do NOT use draw_rectangle / highlight_text / summarize_region). Args:\n  - x,y,w,h: 0~1 relative coords of the sensitive region (x,y = top-left; w,h = size; top-left is 0,0). Make sure to fully cover the sensitive text/number with a small margin.\n  - mode: "mosaic" for text/numbers (clearest, irreversible); "blur" to blur; "black" to black out as fallback.\n  - strength: 9~16, ensuring it cannot be recovered.\nA screen may have multiple sensitive regions — call `redact_area` for each, do not miss any.\n\n[Tool calling] Prefer native `tool_calls`. If streaming endpoint does not emit native tool_calls (some domestic LLMs output text only), fall back to one of these text contracts:\n  ① JSON fenced: \\`\\`\\`json\\n{"name":"redact_area","arguments":{"x":0.1,"y":0.2,"w":0.3,"h":0.04,"mode":"mosaic","strength":12}}\\n\\`\\`\\`\n  ② XML: <tool_call name="redact_area">{...}</tool_call>\\n  ③ Bracketed: [redact_area]{...}[/END_TOOL_REQUEST]\\n  ④ ReAct: Action: redact_area\\nAction Input: {...}\n  Any of the above is auto-detected and executed.\n\n[After redacting] Output a concise report in the user\'s language:\n  1) List of redactions (which region, roughly what type, e.g. "phone", "email");\n  2) Residual risk notes (e.g. half-cut text at screen edge, or unjudgeable areas);\n  3) If confident the whole image has no sensitive info left, state "no visible sensitive information remains".\nDo not output anything unrelated to redaction, and do not write documents for the user.';
+    ? '你是 SnapCraft 截图助手的「隐私哨兵」。你的唯一任务：**扫描当前截图中的所有敏感信息，并逐一打码**，防止隐私泄露。\n\n【必须打码的范围——宁可多打、不可漏打】截图里出现的**几乎所有可读文字、编号与标识都应打码**，包括但不限于：手机号、邮箱、身份证/护照号、银行卡/信用卡号、密码与口令、API Key / Token / Secret、家庭或公司详细地址、真实姓名（除非是公开人物）、金额与账户余额、聊天中的私密内容、证件/合同/发票上的敏感字段；**以及**应用窗口标题栏文字（含软件/产品名，如 "WorkBuddy"）、所有 URL 与 IP 地址（含本地回环 127.0.0.1 / localhost）、端口号、技术栈与服务名（如 "Docker PostgreSQL"）、内部项目名/代号、文件路径与日志、以及任何 OCR 识别出的文字片段（含乱码区域）。当不确定某信息是否敏感时，**一律打码，不要放过**；仅纯装饰图形、明显空白区域可跳过。\n\n【工具】你只能调用 `redact_area` 一个工具（不要使用 draw_rectangle / highlight_text / summarize_region）。参数：\n  - x,y,w,h：敏感区域的 0~1 相对坐标（x,y 为左上角，w,h 为宽高；左上角为 0,0）。务必把整段敏感文字/数字完整框住，留一点边距。\n  - mode：对文字/数字类敏感信息优先用 "mosaic"（马赛克最直观、不可逆）；也支持 "blur" 模糊；"black" 涂黑作为兜底。\n  - strength：9~16 之间，确保无法还原。\n一个屏幕里可能有多个敏感区域，**逐个调用 redact_area**，不要漏。\n\n【工具调用方式】优先用模型原生 tool_calls 字段。若流式接口不支持原生 tool_calls（部分国产 LLM 只输出文本），可改用以下「文本兜底」契约之一：\n  ① JSON 围栏：\\`\\`\\`json\\n{"name":"redact_area","arguments":{"x":0.1,"y":0.2,"w":0.3,"h":0.04,"mode":"mosaic","strength":12}}\\n\\`\\`\\`\n  ② XML：<tool_call name="redact_area">{...}</tool_call>\\n  ③ Bracketed：[redact_area]{...}[/END_TOOL_REQUEST]\\n  ④ ReAct：Action: redact_area\\nAction Input: {...}\n  以上任一形态宿主都会自动识别并执行。\n\n【完成打码后】用中文输出一份简洁报告，只含两部分：\n  1）已打码清单（第几处、大致内容类型，如「手机号」「邮箱」「窗口标题」「URL/IP」）；\n  2）一句话结论：若已覆盖全图可见文字与标识，明确写「已无可见敏感信息，无需人工复核」。\n不要输出"残留风险""建议人工复核""未打码"等不确定性或免责提示——凡是不确定的区域你都应已打码，故不存在残留。不要替用户写文档，不要输出与打码无关的内容。'
+    : 'You are the "Privacy Sentinel" of the SnapCraft screenshot assistant. Your only task: **scan the current screenshot for all sensitive information and redact it one by one** to prevent privacy leaks.\n\n[Scope that MUST be redacted — when in doubt, redact more] **Almost every readable text, number, and identifier visible in the screenshot should be redacted**, including: phone numbers, emails, ID/passport numbers, bank/credit card numbers, passwords, API keys / tokens / secrets, detailed home or company addresses, real names (unless a public figure), amounts and balances, private chat content, sensitive fields on documents/contracts/invoices; **and also** application window title-bar text (including software/product names like "WorkBuddy"), all URLs and IP addresses (including loopback 127.0.0.1 / localhost), port numbers, tech-stack and service names (like "Docker PostgreSQL"), internal project names/codenames, file paths and logs, and any OCR-recognized text fragments (including garbled regions). When unsure whether something is sensitive, **always redact, never leave it**; only pure decorative graphics or clearly empty areas may be skipped.\n\n[Tool] You may ONLY call `redact_area` (do NOT use draw_rectangle / highlight_text / summarize_region). Args:\n  - x,y,w,h: 0~1 relative coords of the sensitive region (x,y = top-left; w,h = size; top-left is 0,0). Make sure to fully cover the sensitive text/number with a small margin.\n  - mode: "mosaic" for text/numbers (clearest, irreversible); "blur" to blur; "black" to black out as fallback.\n  - strength: 9~16, ensuring it cannot be recovered.\nA screen may have multiple sensitive regions — call `redact_area` for each, do not miss any.\n\n[Tool calling] Prefer native `tool_calls`. If streaming endpoint does not emit native tool_calls (some domestic LLMs output text only), fall back to one of these text contracts:\n  ① JSON fenced: \\`\\`\\`json\\n{"name":"redact_area","arguments":{"x":0.1,"y":0.2,"w":0.3,"h":0.04,"mode":"mosaic","strength":12}}\\n\\`\\`\\`\n  ② XML: <tool_call name="redact_area">{...}</tool_call>\\n  ③ Bracketed: [redact_area]{...}[/END_TOOL_REQUEST]\\n  ④ ReAct: Action: redact_area\\nAction Input: {...}\n  Any of the above is auto-detected and executed.\n\n[After redacting] Output a concise report in the user\'s language with only two parts:\n  1) List of redactions (which region, roughly what type, e.g. "phone", "email", "window title", "URL/IP");\n  2) One-line conclusion: if all visible text and identifiers on the image are covered, state clearly "No visible sensitive information remains; no manual review needed".\nDo not output "residual risk" / "manual review suggested" / "left un-redacted" or any hedging/disclaimer — any area you were unsure about should already have been redacted, so there is no residual risk. Do not write documents for the user, and do not output anything unrelated to redaction.';
 }

@@ -1,24 +1,24 @@
-//! Microsoft Store In-App Purchase 集成（订阅版）。
+//! Microsoft Store In-App Purchase integration (subscription edition).
 //!
-//! 仅 Windows 平台编译。通过 `windows` crate (0.61) 的
-//! `Windows.Services.Store` 命名空间绑定实现订阅购买与 entitlement 复核。
+//! Compiled for Windows only. Uses the `windows` crate (0.61)
+//! `Windows.Services.Store` namespace bindings to implement subscription purchase and entitlement re-check.
 //!
-//! 与 biosphere（一次性买断）的差异仅在于：本应用销售的是 **Subscription**
-//! 类型 add-on，因此 `GetStoreProductsAsync` 的 kind 传 `"Subscription"`，
-//! 但 entitlement 复核与购买弹窗的调用方式完全一致。
+//! The only difference from biosphere (one-time purchase) is that this app sells a **Subscription**
+//! type add-on, so `GetStoreProductsAsync`'s kind is passed as "Subscription",
+//! but entitlement re-check and the purchase dialog are called exactly the same way.
 //!
-//! ## 必须条件
-//! 1. 应用必须以 MSIX 包形式从 Microsoft Store 安装运行；侧载或开发模式
-//!    会得到 `ERROR_NO_PACKAGE_IDENTITY (0x80073D54)`。
-//! 2. AppxManifest 必须声明 `internetClient` capability（本项目已声明）。
-//! 3. 订阅加载项必须先在 Partner Center 提交并通过认证（替换
-//!    `SUBSCRIPTION_PRODUCT_ID` 占位符）。
+//! ## Prerequisites
+//! 1. The app must be installed and run from the Microsoft Store as an MSIX package; sideload or dev mode
+//!    yields `ERROR_NO_PACKAGE_IDENTITY (0x80073D54)`.
+//! 2. AppxManifest must declare the `internetClient` capability (already declared in this project).
+//! 3. The subscription add-on must first be submitted and certified in Partner Center (replace
+//!    the `SUBSCRIPTION_PRODUCT_ID` placeholder).
 //!
-//! ## UI 线程（为什么需要专用线程）
-//! `StoreContext::GetDefault()` 在 WinRT 里是 **UI-thread bound** 的，必须在
-//! 已用 `RoInitialize(RO_INIT_SINGLETHREADED)` 初始化的线程上调用，否则抛
-//! `0x80070578 (RPC_E_NO_UI_THREAD)`。自建一条专用 UI 线程（CoInitializeEx +
-//! RoInitialize + 消息泵）解决此问题，细节同 biosphere-terminal-app。
+//! ## UI thread (why a dedicated thread is needed)
+//! `StoreContext::GetDefault()` is **UI-thread bound** in WinRT and must be called on
+//! a thread already initialized with `RoInitialize(RO_INIT_SINGLETHREADED)`, otherwise it throws
+//! `0x80070578 (RPC_E_NO_UI_THREAD)`. A self-built dedicated UI thread (CoInitializeEx +
+//! RoInitialize + message pump) solves this, same as biosphere-terminal-app.
 
 use std::collections::HashSet;
 use std::sync::{mpsc, OnceLock};
@@ -39,22 +39,22 @@ use windows_collections::IIterable;
 
 use super::SUBSCRIPTION_PRODUCT_ID;
 
-/// IAP 操作错误，前端会以字符串形式收到。
+/// IAP operation errors; the frontend receives them as strings.
 #[derive(Debug)]
 pub enum StoreIapError {
-    /// 当前进程没有 Package Identity（侧载 / 开发模式）。
+    /// The current process has no Package Identity (sideload / dev mode).
     NoPackageIdentity,
-    /// 找不到指定的 Store 产品（产品 ID 错误或加载项尚未通过认证）。
+    /// The specified Store product was not found (wrong product ID or add-on not yet certified).
     ProductNotFound,
-    /// Store API 调用失败（用户未登录、配置异常等）。
+    /// The Store API call failed (user not signed in, config error, etc.).
     Api(String),
-    /// 用户在 Store 弹窗中取消了购买。
+    /// The user cancelled the purchase in the Store dialog.
     UserCancelled,
-    /// 网络错误。
+    /// Network error.
     NetworkError(String),
-    /// 购买流程返回了未知/异常状态。
+    /// The purchase flow returned an unknown / abnormal status.
     UnexpectedStatus(String),
-    /// 未能把任务投递到 UI 线程。
+    /// Failed to dispatch the task to the UI thread.
     UiThreadDispatch(String),
 }
 
@@ -91,7 +91,7 @@ impl From<StoreIapError> for String {
 }
 
 // ---------------------------------------------------------------------------
-// 专用 UI 线程基础设施
+// Dedicated UI thread infrastructure
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy)]
@@ -121,7 +121,7 @@ fn ui_thread_tx() -> &'static mpsc::SyncSender<UiTask> {
     })
 }
 
-/// 在专用 UI 线程上同步执行 `f`，把 `Result<T, StoreIapError>` 拿回。
+/// Synchronously run `f` on the dedicated UI thread and bring back `Result<T, StoreIapError>`.
 fn run_on_ui_thread<F, T>(
     app: &AppHandle,
     timeout: Option<Duration>,
@@ -257,7 +257,7 @@ fn pump_pending_messages() {
 }
 
 // ---------------------------------------------------------------------------
-// Store API 入口
+// Store API entry point
 // ---------------------------------------------------------------------------
 
 fn hstring_iterable(values: &[&str]) -> IIterable<HSTRING> {
@@ -265,7 +265,7 @@ fn hstring_iterable(values: &[&str]) -> IIterable<HSTRING> {
     IIterable::<HSTRING>::from(vec)
 }
 
-/// 触发 Microsoft Store 订阅购买弹窗。
+/// Triggers the Microsoft Store subscription purchase dialog.
 pub async fn request_purchase_subscription(app: &AppHandle) -> Result<String, StoreIapError> {
     let app_clone = app.clone();
     async_runtime::spawn_blocking(move || {
@@ -275,7 +275,7 @@ pub async fn request_purchase_subscription(app: &AppHandle) -> Result<String, St
             clog!("licensing", "purchase: StoreContext::GetDefault ok");
             associate_with_window(&ctx, hwnd)?;
 
-            // 订阅加载项的 kind 是 "Subscription"（一次性买断才是 "Durable"）。
+            // The subscription add-on's kind is "Subscription" ("Durable" is for one-time purchases).
             let kinds = hstring_iterable(&["Subscription"]);
             let ids = hstring_iterable(&[SUBSCRIPTION_PRODUCT_ID]);
             let query_op = ctx.GetStoreProductsAsync(&kinds, &ids).map_err(classify_error)?;
@@ -314,7 +314,7 @@ pub async fn request_purchase_subscription(app: &AppHandle) -> Result<String, St
     .map_err(|e| StoreIapError::Api(format!("blocking task panicked: {}", e)))?
 }
 
-/// 查询当前用户拥有的 add-on entitlements（用于 Restore / 启动同步）。
+/// Queries the add-on entitlements owned by the current user (used for Restore / launch sync).
 pub async fn get_user_owned_addons(app: &AppHandle) -> Result<HashSet<String>, StoreIapError> {
     let app_clone = app.clone();
     async_runtime::spawn_blocking(move || {
@@ -363,8 +363,13 @@ pub async fn get_user_owned_addons(app: &AppHandle) -> Result<HashSet<String>, S
     .map_err(|e| StoreIapError::Api(format!("blocking task panicked: {}", e)))?
 }
 
-/// 复核当前用户是否拥有订阅 entitlement。
-/// 由于目前只销售单一订阅加载项，任何 `IsActive=true` 的 add-on 都视为有效订阅。
+/// Verify whether the current user owns the subscription entitlement.
+/// Only the exact subscription add-on (`SUBSCRIPTION_PRODUCT_ID`) unlocks Pro.
+/// The previous loose check treated ANY active add-on as a subscription, which
+/// would wrongly grant Pro once other paid add-ons are introduced; this is now
+/// tightened to require a match against the subscription Product ID.
+/// `get_user_owned_addons` inserts the Store ID / offer token / SKU id into the
+/// set, so the exact match here resolves to the subscription add-on.
 pub async fn verify_subscription_entitlement(app: &AppHandle) -> Result<bool, StoreIapError> {
     let owned = get_user_owned_addons(app).await?;
     if owned.is_empty() {
@@ -375,12 +380,11 @@ pub async fn verify_subscription_entitlement(app: &AppHandle) -> Result<bool, St
     }
     clog!(
         "licensing",
-        "active add-on entitlement found but its key did not match \
-        SUBSCRIPTION_PRODUCT_ID; treating user as subscribed because we currently sell \
-        only one add-on. owned keys: {:?}",
+        "no active subscription matching {}; active add-on keys present: {:?}",
+        SUBSCRIPTION_PRODUCT_ID,
         owned
     );
-    Ok(true)
+    Ok(false)
 }
 
 fn associate_with_window(

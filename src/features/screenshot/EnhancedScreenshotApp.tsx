@@ -20,7 +20,9 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { AnnotationToolbar } from './components/AnnotationToolbar';
 import AnnotationCanvas, { AnnotationCanvasHandle } from './components/AnnotationCanvas';
-import { openEditorWindow, openClipboardOcrWindow } from './components/EditorWindow';
+import { openEditorWindow } from './components/EditorWindow';
+import AutomationSettings from './components/AutomationSettings';
+import { TutorialBar } from './components/TutorialBar';
 import { LanguageToggle } from '../../shared/components/LanguageToggle';
 import { useScreenshotStore } from './store/screenshotStore';
 import { useI18n, t } from '../../i18n';
@@ -37,6 +39,8 @@ import { flog } from './utils/helpers';
 import { useTheme } from './hooks/useTheme';
 import { useToast } from './hooks/useToast';
 import { useHistory, type HistoryEntry } from './hooks/useHistory';
+import { useTutorialSession } from './store/tutorialSession';
+import { useAfterCapture, runAfterCapture } from './store/afterCapture';
 import { usePlatform } from './hooks/usePlatform';
 import { useCapture } from './hooks/useCapture';
 import { useFileOperations } from './hooks/useFileOperations';
@@ -55,6 +59,7 @@ const TB_PATHS = {
   pin: '<path d="M9 4h6l-1 5 3 3v2h-5v5l-1 2-1-2v-5H4v-2l3-3-1-5z"/>',
   save: '<path d="M12 3v11"/><path d="M7.5 10.5L12 15l4.5-4.5"/><path d="M5 20h14"/>',
   ocr: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9h6M7 13h10M7 17h4"/>',
+  open: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z"/>',
 } as const;
 
 // 按真实物理位置排序显示器
@@ -139,6 +144,7 @@ export const EnhancedScreenshotApp = () => {
 
   // 多屏选择器状态（提升到组件级以打破 useCapture ↔ useScrollCapture 循环依赖）
   const [showDisplayPicker, setShowDisplayPicker] = useState(false);
+  const [showAutomation, setShowAutomation] = useState(false);
 
   // 截图隐藏自身窗口：行为已固化为「永远隐藏 SnapCraft 自身窗口」（不截到自己），
   // 不再暴露开关。后端 hide_self_in_capture 默认 true 提供硬保证（见 src-tauri store）。
@@ -185,11 +191,18 @@ export const EnhancedScreenshotApp = () => {
       const createdAt = new Date().toISOString();
       const entry: HistoryEntry = { id, dataUrl, createdAt, width, height, source: 'capture' };
       await addEntry(entry);
-      // 自动复制到剪贴板
-      try {
-        await invoke('copy_to_clipboard', { imageData: dataUrl });
-        flash(t('toast.doneCopied'), 'success');
-      } catch { /* 自动复制失败不阻断 */ }
+      // 教程捕获模式：会话激活时自动把新截屏收为一步（第一张仍照常开编辑窗，现有体验不变）
+      useTutorialSession.getState().addStep(id);
+      // 截后自动化：规则启用且匹配触发时机则按链执行；否则保留现有硬编码自动复制（零回归）
+      const ac = useAfterCapture.getState();
+      if (ac.enabled && (ac.trigger === 'capture' || ac.trigger === 'both')) {
+        await runAfterCapture('capture', id, dataUrl, width, height, true, (m, k) => flash(m, k)).catch(() => {});
+      } else {
+        try {
+          await invoke('copy_to_clipboard', { imageData: dataUrl });
+          flash(t('toast.doneCopied'), 'success');
+        } catch { /* 自动复制失败不阻断 */ }
+      }
       // 结果条
       setLastShot({ id, dataUrl, width, height });
       if (resultBarTimerRef.current) clearTimeout(resultBarTimerRef.current);
@@ -246,7 +259,7 @@ export const EnhancedScreenshotApp = () => {
     ocrBusy, ocrResult, ocrResultRef, ocrLang, ocrRegionMode,
     ocrClipBusy, ocrLastImage, ocrSourceKind,
     setOcrResult, setOcrRegionMode, runOcr, handleOcr,
-    startOcrFromClipboard, startOcrFromShot, onRegionOcr,
+    startOcrFromClipboard, startSilentClipOcr, startOcrFromShot, onRegionOcr,
   } = ocr;
 
   // 批量操作
@@ -338,6 +351,90 @@ export const EnhancedScreenshotApp = () => {
     }
   };
 
+  // 取色工具点击复制：写 HEX 到剪贴板 + 吐司提示（best-effort，剪贴板不可用时仍给反馈）
+  const onPickColor = useCallback(
+    async (hex: string) => {
+      try {
+        await navigator.clipboard?.writeText(hex);
+      } catch {
+        /* 剪贴板不可用时忽略，仍提示已取色 */
+      }
+      flash(t('inspector.picked', { hex }), 'success');
+    },
+    [flash, t],
+  );
+
+  // 测量工具「复制尺寸」：写 W×H 到剪贴板 + 吐司提示
+  const onMeasureCopy = useCallback(
+    async (w: number, h: number) => {
+      try {
+        await navigator.clipboard?.writeText(`${w}×${h}`);
+      } catch {
+        /* best-effort */
+      }
+      flash(t('inspector.measureCopied', { w, h }), 'success');
+    },
+    [flash, t],
+  );
+
+  // ===== 导入本地图片（托盘「打开图片…」+ 拖拽文件进主窗口）=====
+  // 复用现有 import_images 命令：后端把图片复制进历史库（source='imported'），
+  // 随后 openEditorWindow(id) 打开——标注/OCR/AI/导出/批量全部复用，零改动编辑器。
+  const handleImportFiles = useCallback(
+    async (paths: string[]) => {
+      if (!paths || paths.length === 0) return;
+      try {
+        const res = await invoke<{
+          items: Array<{ id: string; width: number; height: number }>;
+          skipped: string[];
+        }>('import_images', { paths });
+        // 后端已落库，刷新主窗历史网格
+        const refreshed = await invoke<any[]>('get_history');
+        setHistory(refreshed);
+        const byId = new Map<string, any>(refreshed.map((h) => [h.id, h]));
+        const first = res.items[0];
+        // 截后自动化：规则启用且匹配触发时机则按链执行（批量时 open_editor 仅首张）；
+        // 否则保留现有行为——打开第一张进编辑窗（与单次截屏体验一致；其余留在历史，可单独打开或批量处理）
+        const ac = useAfterCapture.getState();
+        const acApplies = ac.enabled && (ac.trigger === 'import' || ac.trigger === 'both');
+        if (acApplies) {
+          let idx = 0;
+          for (const it of res.items) {
+            const h = byId.get(it.id);
+            if (h) await runAfterCapture('import', it.id, h.data_url, it.width, it.height, idx === 0).catch(() => {});
+            idx++;
+          }
+        } else if (first) {
+          openEditorWindow({ id: first.id, width: first.width, height: first.height });
+        }
+        // 教程捕获模式：导入的图也自动收为步骤（仅当会话激活时生效）
+        const tut = useTutorialSession.getState();
+        res.items.forEach((it) => tut.addStep(it.id));
+        if (res.skipped && res.skipped.length > 0) {
+          flash(t('import.skipped', { n: res.skipped.length }), 'error', 5000);
+        } else if (res.items.length > 0) {
+          flash(t('import.done', { n: res.items.length }), 'success');
+        }
+      } catch (e) {
+        flash(t('import.failed', { msg: String(e) }), 'error', 5000);
+      }
+    },
+    [flash, setHistory, t],
+  );
+
+  const openImportDialog = useCallback(async () => {
+    const { open } = await import('@tauri-apps/plugin-dialog');
+    const selected = await open({
+      multiple: true,
+      filters: [
+        { name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp', 'bmp', 'gif', 'tif', 'tiff'] },
+      ],
+    });
+    if (!selected) return;
+    const paths = Array.isArray(selected) ? selected : [selected];
+    handleImportFiles(paths);
+  }, [handleImportFiles]);
+
   // ===== 全局快捷键监听 =====
   useEffect(() => {
     const un: Promise<UnlistenFn>[] = [
@@ -348,6 +445,25 @@ export const EnhancedScreenshotApp = () => {
     ];
     return () => { un.forEach((p) => p.then((fn) => fn()).catch(() => {})); };
   }, [doCapture, flash]);
+
+  // ===== 导入本地图片：托盘「打开图片…」事件 + 拖拽文件进主窗口 =====
+  const openImportRef = useRef(openImportDialog);
+  useEffect(() => { openImportRef.current = openImportDialog; }, [openImportDialog]);
+  const startSilentClipOcrRef = useRef(startSilentClipOcr);
+  useEffect(() => { startSilentClipOcrRef.current = startSilentClipOcr; }, [startSilentClipOcr]);
+  const importFilesRef = useRef(handleImportFiles);
+  useEffect(() => { importFilesRef.current = handleImportFiles; }, [handleImportFiles]);
+
+  useEffect(() => {
+    const un: Promise<UnlistenFn>[] = [
+      listen('import-image', () => openImportRef.current()),
+      listen('clip-ocr', () => startSilentClipOcrRef.current()),
+      getCurrentWindow().onDragDropEvent((e) => {
+        if (e.payload.type === 'drop') importFilesRef.current(e.payload.paths);
+      }),
+    ];
+    return () => { un.forEach((p) => p.then((fn) => fn()).catch(() => {})); };
+  }, []);
 
   // 滚动长截图：全局快捷键「捕获下一帧」
   const captureScrollFrameRef = useRef(captureScrollFrame);
@@ -422,10 +538,18 @@ export const EnhancedScreenshotApp = () => {
   if (currentView === 'edit' && current) {
     return (
       <div className="editor-view">
+        <TutorialBar historyList={historyList} flash={flash} />
+        <AutomationSettings open={showAutomation} onClose={() => setShowAutomation(false)} />
         <div className="editor-toolbar">
           <div className="toolbar-left">
             <button className="tbar-btn tbar-ghost back-btn" onClick={() => { setCurrent(null); setCurrentView('home'); }}>
               <TBIcon d={TB_PATHS.back} />{t('editor.back')}
+            </button>
+            <button className="tbar-btn tbar-ghost" onClick={() => openImportDialog()} title={t('import.openTitle')}>
+              <TBIcon d={TB_PATHS.open} />{t('import.open')}
+            </button>
+            <button className="tbar-btn tbar-ghost" onClick={() => { useTutorialSession.getState().startTutorial(); flash(t('tutorial.started'), 'info'); }} title={t('tutorial.makeTitle')}>
+              📚 {t('tutorial.make')}
             </button>
             <div className="editor-info">
               <span className="editor-info-dim">{current.width} × {current.height}</span>
@@ -443,7 +567,7 @@ export const EnhancedScreenshotApp = () => {
             <button className={`tbar-btn tbar-ghost${ocrRegionMode ? ' active' : ''}`} onClick={() => setOcrRegionMode((v) => !v)} disabled={ocrBusy} title={t('ocr.regionTitle')}>
               <TBIcon d={TB_PATHS.ocr} />{t('ocr.region')}
             </button>
-            <button className="tbar-btn tbar-ghost" onClick={() => openClipboardOcrWindow()} disabled={ocrBusy} title={t('ocr.clipTitle')}>📋 {t('ocr.clipboard')}</button>
+            <button className="tbar-btn tbar-ghost" onClick={() => startSilentClipOcrRef.current()} disabled={ocrBusy} title={t('ocr.clipTitle')}>📋 {t('ocr.clipboard')}</button>
             <button className={`tbar-btn tbar-ghost${aiOpen ? ' active' : ''}`} onClick={async () => { await openAi(); }} disabled={!current} title={t('ai.openAi')}>✨ AI</button>
             <button className="tbar-btn tbar-ghost" onClick={handleCopy} title={t('editor.copyTitle', { mod: modLabel })}>
               <TBIcon d={TB_PATHS.copy} />{t('editor.copy')}
@@ -462,7 +586,7 @@ export const EnhancedScreenshotApp = () => {
           <div className="editor-canvas">
             <AnnotationCanvas ref={canvasRef} imageData={current.dataUrl} annotations={annotations}
               onAnnotationAdd={addAnnotation} activeTool={activeTool} onCropped={onCropped}
-              ocrRegionMode={ocrRegionMode} onRegionOcr={onRegionOcr} />
+              ocrRegionMode={ocrRegionMode} onRegionOcr={onRegionOcr} onPickColor={onPickColor} onMeasureCopy={onMeasureCopy} />
             {ocrRegionMode && (
               <div className="ocr-region-hint">
                 <span>{t('ocr.regionHint')}</span>
@@ -520,6 +644,8 @@ export const EnhancedScreenshotApp = () => {
       </div>
 
       <div className="home-view">
+        <TutorialBar historyList={historyList} flash={flash} />
+        <AutomationSettings open={showAutomation} onClose={() => setShowAutomation(false)} />
         <div style={{ textAlign: 'center' }}>
           <div className="app-title">SnapCraft</div>
           <div className="app-subtitle">{t('app.subtitle')}</div>
@@ -555,7 +681,10 @@ export const EnhancedScreenshotApp = () => {
         </div>
 
         <div className="home-secondary">
-          <button className="home-sec-btn" onClick={() => openClipboardOcrWindow()} disabled={ocrBusy} title={t('ocr.clipTitle')}>📋 {t('ocr.clipboard')}</button>
+          <button className="home-sec-btn" onClick={() => startSilentClipOcrRef.current()} disabled={ocrBusy} title={t('ocr.clipTitle')}>📋 {t('ocr.clipboard')}</button>
+          <button className="home-sec-btn" onClick={() => openImportDialog()} title={t('import.openTitle')}>📂 {t('import.open')}</button>
+          <button className="home-sec-btn" onClick={() => { useTutorialSession.getState().startTutorial(); flash(t('tutorial.started'), 'info'); }} title={t('tutorial.makeTitle')}>📚 {t('tutorial.make')}</button>
+          <button className="home-sec-btn" onClick={() => setShowAutomation(true)} title={t('automation.title')}>⚙ {t('automation.title')}</button>
         </div>
 
         <div className="delay-bar" role="group" aria-label={t('home.delayLabel')}>

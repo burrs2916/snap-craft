@@ -100,3 +100,19 @@ _tmp_*/
 tests/test-*.mjs
 tests/smoke-*
 tests/PARITY_TEST_STRATEGY.md
+
+# Local scratch / working files (not part of the app or store submission)
+.cluster/
+.opencode/
+config/
+src/index.css.bak
+ADDON_SUBMISSION_FILL.md
+AI_SETTINGS_OPT-*.md
+MAC-TCC-*.md
+SELF_CAPTURE_*.md
+STORE_AUDIT-*.md
+STORE_CHAIN_AUDIT-*.md
+STORE_LAUNCH_AUDIT-*.md
+STORE_LISTING_*-FILL-*.md
+STORE_RECHECK-*.md
+TCC-FIX-STATUS-*.md

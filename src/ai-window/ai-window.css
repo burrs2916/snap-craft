@@ -14,6 +14,40 @@
   box-shadow: none;
 }
 
+/* 独立窗口布局：最左侧竖向标签栏(rail) + 右侧内容区(content)。
+   rail 固定宽度放 MUI 竖向 Tabs（文档/模型接入/智能体）；content 填满剩余宽度，
+   内部由 AIPanel 自行管理三栏与滚动。 */
+.aiwin-shell {
+  display: flex;
+  flex-direction: row;
+  width: 100%;
+  height: 100%;
+  background: var(--surface-solid, #fff);
+}
+
+.aiwin-rail {
+  flex: 0 0 140px;
+  min-height: 0;
+  border-right: 1px solid var(--border, rgba(0, 0, 0, 0.1));
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+}
+
+.aiwin-tabs {
+  flex: 0 0 auto;
+  min-height: 0;
+  width: 100%;
+}
+
+.aiwin-content {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  position: relative;
+  overflow: hidden;
+}
+
 /* 独立窗口里宽度可以更宽，给长文档/多截图成稿更舒适的空间 */
 .ai-panel-scroll {
   padding-right: 0;
@@ -84,36 +118,6 @@
    保留可钉住体验，但初始不遮挡主体聊天区 */
 .ai-stream-popup {
   z-index: 400;
-}
-
-/* ── AI 窗口标题栏（decorations:false 时由 AIPanel 头部充当）──
-   把抽屉头部升级为窗口级标题栏：更舒展的高度、底部细分隔线、不可选中。
-   拖动改用 mousedown → getCurrentWindow().startDragging()（data-tauri-drag-region
-   在 macOS 无边框窗口下常失效，与 PinWindow 一致改手动调用）。 */
-.ai-panel-head--win {
-  height: 46px;
-  padding: 0 14px;
-  border-bottom: 1px solid var(--border, #e3e3e8);
-  background: linear-gradient(180deg, var(--surface-solid, #fff) 0%, var(--surface, #fafafa) 100%);
-  user-select: none;
-  -webkit-user-select: none;
-  cursor: grab;
-}
-
-.ai-panel-head--win:active {
-  cursor: grabbing;
-}
-
-.ai-panel-head--win .ai-panel-title {
-  cursor: default;
-  font-weight: 600;
-  letter-spacing: 0.2px;
-}
-
-/* 深色主题下标题栏背景过渡（复用主题变量，无需改 tauri.conf） */
-:root.dark .ai-panel-head--win,
-.dark .ai-panel-head--win {
-  background: linear-gradient(180deg, #1c1c1e 0%, #161618 100%);
 }
 
 /* 实时联动状态点：绿色脉冲，表明本窗口正与主截图上下文同步 */

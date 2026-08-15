@@ -89,22 +89,28 @@ export async function readTempImage(filename: string): Promise<string> {
 export async function openAiWindow(
   ctx: AiContext | null,
   host: string = MAIN_WINDOW_LABEL,
+  tutorialIds?: string[],
 ): Promise<WebviewWindow | null> {
   try {
     const existing = await WebviewWindow.getByLabel(AI_WINDOW_LABEL);
     if (existing) {
-      if (currentAiHost === host) {
+      // 教程注入需求（tutorialIds）或宿主切换：销毁旧窗、按新参数重建，
+      // 确保 URL(?tutorialIds=) 生效（教程成稿需全新窗口承载自动生成）。
+      if (tutorialIds || currentAiHost !== host) {
+        await existing.close().catch(() => {});
+      } else {
         await existing.show();
         await existing.setFocus();
         if (ctx) void pushAiContext(ctx);
         return existing;
       }
-      // 宿主不同（main ↔ editor 切换）：销毁旧窗、按新宿主重建，确保工具/回写路由正确
-      await existing.close().catch(() => {});
     }
     currentAiHost = host;
-    const WIN_W = 980;
-    const WIN_H = 720;
+    // 窗口默认宽 > 1080：否则会落在 @container(max-width:1080px) 降级两栏
+    // （对话区被压到下方 38vh），用户始终看不到「左导航/中内容/右对话」完整三栏，
+    // 体感「不是完整窗口、功能局促」。给足余量：三栏最小宽 220+420+340+间距≈1040。
+    const WIN_W = 1140;
+    const WIN_H = 780;
     const GAP = 16;
     let x = 140;
     let y = 90;
@@ -150,7 +156,11 @@ export async function openAiWindow(
     }
     const win = new WebviewWindow(AI_WINDOW_LABEL, {
       title: 'SnapCraft AI',
-      url: `ai-panel.html?host=${encodeURIComponent(host)}`,
+      url: `ai-panel.html?host=${encodeURIComponent(host)}${
+        tutorialIds && tutorialIds.length
+          ? `&tutorialIds=${encodeURIComponent(tutorialIds.join(','))}`
+          : ''
+      }`,
       width: WIN_W,
       height: WIN_H,
       minWidth: 680,
@@ -158,9 +168,12 @@ export async function openAiWindow(
       x,
       y,
       resizable: true,
-      // 去掉原生标题栏：AI 面板自带头部（ai-panel-head--win）升级为窗口标题栏，
-      // 消除「原生 SnapCraft AI + AIPanel 头部」双层 header 的局促感；关闭由面板 ✕ 触发。
-      decorations: false,
+      // 与编辑器弹出框（openEditorWindow）保持一致：完整系统窗口（系统标题栏 + 边框，
+      // 可最小化/最大化/多屏拖动），解决「无边框自绘窗不是完整 windows、功能局促」的问题。
+      // 自绘标题栏（ai-panel-head--win）已在 AIPanel 侧按 windowChrome 分支移除，避免系统标题栏 + 自绘头部双层 header。
+      decorations: true,
+      minimizable: true,
+      maximizable: true,
     });
     // 崩溃兜底：AI 窗口被销毁（webview 崩溃 / 进程异常退出）时页面侧 beforeunload
     // 不会执行 → EVT_CLOSED 永不发出 → 宿主窗 aiOpen 卡 true（工具栏常亮、
