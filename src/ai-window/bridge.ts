@@ -106,6 +106,18 @@ export async function openAiWindow(
       }
     }
     currentAiHost = host;
+    // 用 localStorage（同源 webview 共享）传递 host / tutorialIds 给 AI 窗口，
+    // 替代原先 URL 查询串 `ai-panel.html?host=...`。运行时 WebView2 带 ?query 打开
+    // 独立窗口时，Windows 上偶发子资源(CSS/JS)解析异常、样式丢失；去查询串可规避。
+    try {
+      localStorage.setItem('snapcraft-ai-host', host);
+      localStorage.setItem(
+        'snapcraft-ai-tutorialIds',
+        tutorialIds && tutorialIds.length ? tutorialIds.join(',') : '',
+      );
+    } catch {
+      /* localStorage 不可用时退回默认行为 */
+    }
     // 窗口默认宽 > 1080：否则会落在 @container(max-width:1080px) 降级两栏
     // （对话区被压到下方 38vh），用户始终看不到「左导航/中内容/右对话」完整三栏，
     // 体感「不是完整窗口、功能局促」。给足余量：三栏最小宽 220+420+340+间距≈1040。
@@ -156,11 +168,8 @@ export async function openAiWindow(
     }
     const win = new WebviewWindow(AI_WINDOW_LABEL, {
       title: 'SnapCraft AI',
-      url: `ai-panel.html?host=${encodeURIComponent(host)}${
-        tutorialIds && tutorialIds.length
-          ? `&tutorialIds=${encodeURIComponent(tutorialIds.join(','))}`
-          : ''
-      }`,
+      url: 'ai-panel.html',
+      devtools: true, // 允许在 AI 窗口内右键 Inspect 调试（Windows 运行时窗口默认关闭）
       width: WIN_W,
       height: WIN_H,
       minWidth: 680,

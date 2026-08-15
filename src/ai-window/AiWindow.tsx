@@ -43,8 +43,10 @@ export default function AiWindow() {
   const remoteHostRef = useRef(new RemoteToolHost(null));
 
   // 教程捕获模式：主窗收集步骤后通过 URL ?tutorialIds= 注入，透传给 AIPanel 受控自动成稿
-  const tutorialIdsParam = new URLSearchParams(window.location.search).get('tutorialIds');
-  const tutorialIds = tutorialIdsParam ? tutorialIdsParam.split(',').filter(Boolean) : undefined;
+  // host / tutorialIds 由 bridge 经同源 localStorage 写入（替代 URL 查询串，规避
+  // Windows 运行时 WebView2 带 ?query 打开独立窗口时的子资源解析异常）。
+  const tutorialIdsRaw = localStorage.getItem('snapcraft-ai-tutorialIds');
+  const tutorialIds = tutorialIdsRaw ? tutorialIdsRaw.split(',').filter(Boolean) : undefined;
 
   // 挂载桥接：监听宿主窗口推送的上下文，挂载后主动请求一次最新上下文
   useEffect(() => {
@@ -53,7 +55,7 @@ export default function AiWindow() {
 
     // 从 URL ?host= 读取「是谁开的我」（main / editor-<id>），所有工具/回写/关闭事件
     // 定向投递到该宿主窗口，避免主窗与编辑窗同时监听导致工具被两边画布各执行一遍
-    const host = new URLSearchParams(window.location.search).get('host') || MAIN_WINDOW_LABEL;
+    const host = localStorage.getItem('snapcraft-ai-host') || MAIN_WINDOW_LABEL;
     setAiHost(host);
 
     setupAiBridge({
