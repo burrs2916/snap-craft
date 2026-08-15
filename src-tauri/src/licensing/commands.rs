@@ -39,7 +39,7 @@ pub async fn purchase_subscription(
         // purchase order_id; only a genuine "no entitlement" revokes.
         service.unlock_subscription(Some(order_id)).await?;
         service.sync_with_store(&app_handle).await;
-        service.status().await
+        Ok(service.status().await)
     }
     #[cfg(not(target_os = "windows"))]
     {
