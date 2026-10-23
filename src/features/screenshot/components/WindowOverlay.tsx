@@ -12,8 +12,6 @@ import { t, useI18n } from '../../../i18n';
  * 鼠标悬停高亮命中最上层窗口，点击 → emit 'window-picked' 带 windowId，
  * 主窗口再 invoke capture_window_by_id 截取该窗口。
  *
- * 这替换了之前「后端抓枚举列表第一个窗口」的假实现——那种做法用户根本无法选窗口。
- *
  * 坐标换算：窗口列表为全局物理像素；覆盖层内局部 CSS = (全局物理 - 虚拟桌面原点) / dpr。
  */
 

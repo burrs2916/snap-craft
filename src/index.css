@@ -176,8 +176,9 @@ body {
 /* ===== 截图按钮区域 ===== */
 .capture-actions {
   display: grid;
-  /* 四张卡片等宽：中英文文案长度不同也不会导致卡片大小不一 */
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  /* 三张卡片等宽：中英文文案长度不同也不会导致卡片大小不一；
+     桌面端 3 列居中（margin auto），与下方按钮排/延时条同轴 */
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 16px;
   justify-content: center;
   align-items: stretch;
@@ -280,12 +281,12 @@ body {
   min-height: 2.8em;
 }
 
-/* 窄窗口（如小屏 / 缩放）下四列过窄，改为 2×2 保持可读性与等宽 */
+/* 窄窗口（如小屏 / 缩放）下 3 列过窄，改为单列竖排保持可读性与等宽 */
 @media (max-width: 560px) {
 
   .capture-actions {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    max-width: 420px;
+    grid-template-columns: minmax(0, 1fr);
+    max-width: 360px;
   }
 }
 
@@ -3940,132 +3941,6 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
   pointer-events: none;
-}
-
-/* ===== 滚动长截图控制条（缩窗态）===== */
-.scroll-ctrl {
-  width: 100vw;
-  height: 100vh;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 12px 14px;
-  background: var(--surface-solid);
-  color: var(--text);
-  border-radius: 12px;
-  border: 1px solid var(--border);
-  user-select: none;
-  position: relative;
-  overflow: hidden;
-}
-
-.scroll-ctrl-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.scroll-ctrl-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--danger);
-  animation: scroll-pulse 1.4s ease-in-out infinite;
-}
-
-@keyframes scroll-pulse {
-
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.35; }
-}
-
-
-.scroll-ctrl-title {
-  font-size: 13px;
-  font-weight: 700;
-}
-
-.scroll-ctrl-count {
-  margin-left: auto;
-  font-size: 12px;
-  color: var(--text-sub);
-  font-variant-numeric: tabular-nums;
-}
-
-.scroll-ctrl-hint {
-  font-size: 11px;
-  color: var(--text-sub);
-  line-height: 1.5;
-}
-
-.scroll-ctrl-hint .kbd {
-  margin: 0 1px;
-}
-
-.scroll-ctrl-actions {
-  display: flex;
-  gap: 6px;
-  margin-top: auto;
-}
-
-.scroll-ctrl-btn {
-  flex: 1;
-  /* 中英文按钮文案长度不同（如 开始/取消 vs Start/Cancel），固定不换行 +
-     min-width:0 允许在 flex 行内收缩，避免英文文案过长时换行/把整行撑高，
-     滚动截图控制条在中英文下布局一致 */
-  min-width: 0;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  height: 30px;
-  border: 1px solid var(--border);
-  border-radius: 7px;
-  background: var(--surface);
-  color: var(--text);
-  font-size: 12px;
-  font-weight: 600;
-  cursor: pointer;
-  transition: background 0.15s, border-color 0.15s, opacity 0.15s;
-}
-
-.scroll-ctrl-btn:hover:not(:disabled) {
-  background: var(--surface-strong);
-}
-
-.scroll-ctrl-btn.primary {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: #fff;
-}
-
-.scroll-ctrl-btn.primary:hover:not(:disabled) {
-  background: var(--accent-press);
-}
-
-.scroll-ctrl-btn.ghost {
-  flex: 0 0 auto;
-  /* 中（取消）英（Cancel）统一最小宽度并居中，切换语言时尺寸稳定 */
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 72px;
-  padding: 0 12px;
-}
-
-.scroll-ctrl-btn:disabled {
-  opacity: 0.5;
-  cursor: default;
-}
-
-.scroll-ctrl-toast {
-  position: absolute;
-  left: 14px;
-  right: 14px;
-  bottom: 48px;
-  padding: 6px 10px;
-  font-size: 11px;
-  border-radius: 6px;
-  text-align: center;
 }
 
 /* ── AI 助手面板（右侧抽屉，非侵入） ───────────────────────────── */

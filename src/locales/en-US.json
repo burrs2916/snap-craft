@@ -21,11 +21,6 @@
       "label": "Window",
       "desc": "Capture a specific window",
       "aria": "Window capture"
-    },
-    "scroll": {
-      "label": "Scrolling Capture",
-      "desc": "Stitch by scrolling",
-      "aria": "Scrolling capture"
     }
   },
   "home": {
@@ -252,16 +247,6 @@
     "batchAiExportMd": "Export Markdown",
     "batchAiExportDocx": "Export Word"
   },
-  "scroll": {
-    "title": "Scrolling Capture",
-    "hintPrefix": "After scrolling, press",
-    "hintSuffix": "to capture the next frame",
-    "capture": "Capture Frame",
-    "captureBusy": "Capturing…",
-    "finish": "Finish & Stitch",
-    "cancel": "Cancel",
-    "frames": "{n} frame(s)"
-  },
   "result": {
     "title": "Capture Complete",
     "sub": "{w} × {h} · Copied",
@@ -353,13 +338,7 @@
     "doneCopied": "Screenshot captured & copied to clipboard",
     "granted": "Permission granted. You can start capturing.",
     "notGranted": "Still no permission detected. Please enable it in System Settings.",
-    "frameCaptured": "Captured 1 frame. Scroll then capture more.",
     "captureFailed": "Capture failed: {msg}",
-    "noFrames": "No frames captured",
-    "stitchGap": "Some adjacent frames didn't overlap; joined directly (possible gap).",
-    "stitched": "Stitched {n} frames into a long image",
-    "stitchFailed": "Stitch failed: {msg}",
-    "scrollCancelled": "Scrolling capture cancelled",
     "cancelled": "Screenshot cancelled",
     "openRegionFailed": "Cannot open region selector: {msg}",
     "openWindowFailed": "Cannot open window selector: {msg}",

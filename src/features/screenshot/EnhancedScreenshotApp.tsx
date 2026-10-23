@@ -12,7 +12,6 @@
 //   useBatchOperations → 批量操作（已有）
 //   useAiIntegration → AI 集成（已有）
 //   useScreenPermission → 权限管理（已有）
-//   useScrollCapture → 滚动长截图（已有）
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
@@ -30,7 +29,7 @@ import { useOcrPanel } from './hooks/useOcrPanel';
 import { useBatchOperations } from './hooks/useBatchOperations';
 import { useAiIntegration } from './hooks/useAiIntegration';
 import { useScreenPermission } from './hooks/useScreenPermission';
-import { useScrollCapture, type DisplayInfo } from './hooks/useScrollCapture';
+import type { DisplayInfo } from './hooks/useCapture';
 import { BatchBar, BatchOcrPanel, AiBatchPanel } from './components/BatchOperations';
 import { OcrPanel } from './components/OcrPanel';
 import { flog } from './utils/helpers';
@@ -142,7 +141,7 @@ export const EnhancedScreenshotApp = () => {
   const [lastShot, setLastShot] = useState<{ id: string; dataUrl: string; width: number; height: number } | null>(null);
   const resultBarTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // 多屏选择器状态（提升到组件级以打破 useCapture ↔ useScrollCapture 循环依赖）
+  // 多屏选择器状态（提升到组件级，由 useCapture 内部使用）
   const [showDisplayPicker, setShowDisplayPicker] = useState(false);
   const [showAutomation, setShowAutomation] = useState(false);
 
@@ -172,8 +171,7 @@ export const EnhancedScreenshotApp = () => {
     historySearch, setHistorySearch, addEntry, deleteEntry, clearAll,
   } = history;
 
-  // 截图捕获（pickerPurposeRef 与 useScrollCapture 共享）
-  const pickerPurposeRef = useRef<'shot' | 'scroll'>('shot');
+  // 截图捕获（滚动长截图已改走独立选区覆盖层，选屏器仅服务全屏截图）
 
   // 截图后回调：解码 → 入历史 → 自动复制 → 结果条
   const onCaptured = useCallback(
@@ -215,29 +213,12 @@ export const EnhancedScreenshotApp = () => {
   const perm = useScreenPermission({ platform, flash, t });
   const { permissionNeeded, permissionChecking, openScreenRecordingSettings, recheckPermission, ensureCapturePermission, setPermissionNeeded } = perm;
 
-  // ── 滚动长截图（依赖 perm，需在 capture 之前初始化） ──
-  // enterScrollMode 通过 ref 暴露给 useCapture，打破循环依赖
-  const enterScrollModeRef = useRef<(disp: DisplayInfo) => Promise<void>>(async () => {});
-  const scroll = useScrollCapture({
-    platform, flash, t, ensureCapturePermission, setPermissionNeeded,
-    onCaptured, setDisplays: () => {}, setShowDisplayPicker, pickerPurposeRef,
-  });
-  const {
-    scrolling, scrollFrames, scrollBusy, scrollingRef,
-    enterScrollMode, captureScrollFrame, restoreMainWindow,
-    finishScrollCapture, cancelScrollCapture, startScrollCapture,
-  } = scroll;
-  // 保持 ref 同步（scroll 每次渲染可能产生新闭包）
-  enterScrollModeRef.current = enterScrollMode;
-
-  // ── 截图捕获（依赖 perm + scroll.enterScrollMode via ref） ──
+  // ── 截图捕获（依赖 perm） ──
   const capture = useCapture({
     platform, isSandboxed, flash, t,
     ensureCapturePermission: () => perm.ensureCapturePermission(),
     setPermissionNeeded: (v) => perm.setPermissionNeeded(v),
     onCaptured,
-    enterScrollMode: (disp) => enterScrollModeRef.current(disp),
-    pickerPurposeRef,
     showDisplayPicker, setShowDisplayPicker,
   });
   const {
@@ -465,16 +446,6 @@ export const EnhancedScreenshotApp = () => {
     return () => { un.forEach((p) => p.then((fn) => fn()).catch(() => {})); };
   }, []);
 
-  // 滚动长截图：全局快捷键「捕获下一帧」
-  const captureScrollFrameRef = useRef(captureScrollFrame);
-  useEffect(() => { captureScrollFrameRef.current = captureScrollFrame; }, [captureScrollFrame]);
-  useEffect(() => {
-    const un = listen('capture-scroll-frame', () => {
-      if (scrollingRef.current) captureScrollFrameRef.current();
-    });
-    return () => { un.then((fn) => fn()); };
-  }, []);
-
   // ===== 区域/窗口覆盖层事件（Windows/Linux）=====
   useEffect(() => {
     const un: Promise<UnlistenFn>[] = [
@@ -609,32 +580,6 @@ export const EnhancedScreenshotApp = () => {
     );
   }
 
-  // ===== 滚动长截图控制条 =====
-  if (scrolling) {
-    return (
-      <div className="scroll-ctrl" data-tauri-drag-region>
-        <div className="scroll-ctrl-head">
-          <span className="scroll-ctrl-dot" />
-          <span className="scroll-ctrl-title">{t('scroll.title')}</span>
-          <span className="scroll-ctrl-count">{t('scroll.frames', { n: scrollFrames.length })}</span>
-        </div>
-        <div className="scroll-ctrl-hint">
-          {t('scroll.hintPrefix')} <kbd className="kbd">{modLabel}</kbd><kbd className="kbd">{shiftLabel}</kbd><kbd className="kbd">4</kbd> {t('scroll.hintSuffix')}
-        </div>
-        <div className="scroll-ctrl-actions">
-          <button className="scroll-ctrl-btn primary" onClick={captureScrollFrame} disabled={scrollBusy}>
-            {scrollBusy ? t('scroll.captureBusy') : t('scroll.capture')}
-          </button>
-          <button className="scroll-ctrl-btn" onClick={finishScrollCapture} disabled={scrollBusy || scrollFrames.length === 0}>{t('scroll.finish')}</button>
-          <button className="scroll-ctrl-btn ghost" onClick={cancelScrollCapture} disabled={scrollBusy}>{t('scroll.cancel')}</button>
-        </div>
-        {toast && (
-          <div className={`toast toast-${toastType} scroll-ctrl-toast`}><span className="toast-msg">{toast}</span></div>
-        )}
-      </div>
-    );
-  }
-
   // ===== 主页视图 =====
   return (
     <div className="screenshot-app">
@@ -668,16 +613,6 @@ export const EnhancedScreenshotApp = () => {
               </div>
             </div>
           ))}
-          <div className="capture-card" role="button" tabIndex={0} aria-label={t('capture.scroll.aria')}
-            onClick={startScrollCapture}
-            onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); startScrollCapture(); } }}>
-            <div className="capture-card-icon">📜</div>
-            <div className="capture-card-label">{t('capture.scroll.label')}</div>
-            <div className="capture-card-desc">
-              <div className="capture-card-keys"><kbd className="kbd">{modLabel}</kbd><kbd className="kbd">{shiftLabel}</kbd><kbd className="kbd">4</kbd></div>
-              <span className="capture-card-desc-text">{t('capture.scroll.desc')}</span>
-            </div>
-          </div>
         </div>
 
         <div className="home-secondary">

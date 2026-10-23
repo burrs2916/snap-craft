@@ -7,8 +7,18 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
-import type { DisplayInfo } from './useScrollCapture';
 import { flog } from '../utils/helpers';
+
+/** 显示器信息（macOS 逻辑点 / Windows 物理像素，与后端 list_displays 同单位） */
+export interface DisplayInfo {
+  id: number;
+  is_main: boolean;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  scale: number;
+}
 
 // ── 安全隐藏：截图前隐藏主窗口 ──
 // macOS 原生全屏（绿灯）会把窗口放进独立的 Space（专属全屏空间）。
@@ -63,11 +73,7 @@ export interface UseCaptureDeps {
   ensureCapturePermission: () => Promise<boolean>;
   setPermissionNeeded: (v: boolean) => void;
   onCaptured: (dataUrl: string) => Promise<void>;
-  /** 滚动长截图进入回调（多屏选择器选中后用途为 scroll 时调用） */
-  enterScrollMode?: (disp: DisplayInfo) => Promise<void>;
-  /** 选屏器用途 ref（与 useScrollCapture 共享，'shot' | 'scroll'） */
-  pickerPurposeRef: React.MutableRefObject<'shot' | 'scroll'>;
-  /** 多屏选择器可见状态（提升到父组件以打破与 useScrollCapture 的循环依赖） */
+  /** 多屏选择器可见状态（提升到父组件管理） */
   showDisplayPicker: boolean;
   setShowDisplayPicker: (v: boolean) => void;
 }
@@ -89,8 +95,8 @@ export interface UseCaptureReturn {
 export function useCapture(deps: UseCaptureDeps): UseCaptureReturn {
   const {
     platform, isSandboxed, flash, t,
-    ensureCapturePermission, setPermissionNeeded, onCaptured, enterScrollMode,
-    pickerPurposeRef, showDisplayPicker, setShowDisplayPicker,
+    ensureCapturePermission, setPermissionNeeded, onCaptured,
+    showDisplayPicker, setShowDisplayPicker,
   } = deps;
 
   const [busy, setBusy] = useState(false);
@@ -198,27 +204,17 @@ export function useCapture(deps: UseCaptureDeps): UseCaptureReturn {
     async (displayId: number | null) => {
       setShowDisplayPicker(false);
       if (displayId === null) {
-        // 取消也要复位用途：否则上一次滚动选屏的 'scroll' 残留，
-        // 下一次普通全屏截图会被误路由成滚动长截图。
-        pickerPurposeRef.current = 'shot';
         flog(`pickDisplay: 用户取消选屏`);
         flash(t('toast.cancelled'), 'success');
         return;
       }
       const picked = displays.find((d) => d.id === displayId);
       flog(
-        `pickDisplay: 用户选中显示器 id=${displayId} 用途=${pickerPurposeRef.current} ` +
+        `pickDisplay: 用户选中显示器 id=${displayId} ` +
         (picked
           ? `主屏=${picked.is_main} 逻辑=${picked.width}x${picked.height} scale=${picked.scale}`
           : `(未在列表找到该屏元数据)`)
       );
-      // 滚动长截图用途
-      if (pickerPurposeRef.current === 'scroll') {
-        pickerPurposeRef.current = 'shot';
-        const disp = displays.find((d) => d.id === displayId);
-        if (disp && enterScrollMode) await enterScrollMode(disp);
-        return;
-      }
       if (busyRef.current) return;
       busyRef.current = true;
       setBusy(true);
@@ -256,7 +252,7 @@ export function useCapture(deps: UseCaptureDeps): UseCaptureReturn {
         setBusy(false);
       }
     },
-    [onCaptured, flash, t, platform, setPermissionNeeded, ensureCapturePermission, runCountdown, displays, enterScrollMode],
+    [onCaptured, flash, t, platform, setPermissionNeeded, ensureCapturePermission, runCountdown, displays],
   );
 
   // 核心截图流程

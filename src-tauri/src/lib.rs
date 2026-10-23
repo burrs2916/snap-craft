@@ -29,7 +29,6 @@ fn shortcut_to_event(key: Code, mods: Modifiers) -> Option<&'static str> {
         Code::KeyS | Code::Digit1 => Some("capture-screen"),
         Code::Digit2 => Some("capture-region"),
         Code::Digit3 => Some("capture-window"),
-        Code::Digit4 => Some("capture-scroll-frame"),
         Code::KeyO => Some("import-image"),
         Code::KeyV => Some("clip-ocr"),
         _ => None,

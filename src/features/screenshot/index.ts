@@ -21,9 +21,10 @@ export { WindowOverlay } from './components/WindowOverlay';
 export { useAiIntegration } from './hooks/useAiIntegration';
 export type { AiIntegrationDeps } from './hooks/useAiIntegration';
 export { useBatchOperations } from './hooks/useBatchOperations';
+export { useCapture } from './hooks/useCapture';
+export type { DisplayInfo } from './hooks/useCapture';
 export { useOcrPanel } from './hooks/useOcrPanel';
 export { useScreenPermission } from './hooks/useScreenPermission';
-export { useScrollCapture } from './hooks/useScrollCapture';
 
 // ── Store ──
 export { useScreenshotStore } from './store/screenshotStore';
@@ -43,4 +44,3 @@ export type {
 export { clamp01, genAnnoId, normToPx, cropDataUrl, flog } from './utils/helpers';
 export { ocrReadingOrder, ocrHighlightParts, ocrExtractEntities } from './utils/ocrUtils';
 export type { OcrLayout, OcrExportFmt, OcrEntity } from './utils/ocrUtils';
-export { stitchFrames } from './utils/stitch';

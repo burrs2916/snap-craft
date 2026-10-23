@@ -21,11 +21,6 @@
       "label": "窗口截图",
       "desc": "指定窗口",
       "aria": "窗口截图"
-    },
-    "scroll": {
-      "label": "滚动长截图",
-      "desc": "滚动拼接",
-      "aria": "滚动长截图"
     }
   },
   "home": {
@@ -252,16 +247,6 @@
     "batchAiExportMd": "导出 Markdown",
     "batchAiExportDocx": "导出 Word"
   },
-  "scroll": {
-    "title": "滚动长截图",
-    "hintPrefix": "滚动页面后按",
-    "hintSuffix": "捕获下一帧",
-    "capture": "捕获本帧",
-    "captureBusy": "捕获中…",
-    "finish": "完成拼接",
-    "cancel": "取消",
-    "frames": "{n} 帧"
-  },
   "result": {
     "title": "截图完成",
     "sub": "{w} × {h} · 已复制",
@@ -353,13 +338,7 @@
     "doneCopied": "截图完成，已复制到剪贴板",
     "granted": "权限已授予，可以开始截图了",
     "notGranted": "仍未检测到权限，请确认已在系统设置中开启",
-    "frameCaptured": "已捕获 1 帧，继续滚动后再捕获",
     "captureFailed": "捕获失败：{msg}",
-    "noFrames": "未捕获任何帧",
-    "stitchGap": "部分相邻帧未检测到重叠，已直接相接（可能有断层）",
-    "stitched": "已拼接 {n} 帧为长图",
-    "stitchFailed": "拼接失败：{msg}",
-    "scrollCancelled": "已取消滚动截图",
     "cancelled": "已取消截图",
     "openRegionFailed": "无法打开区域选择：{msg}",
     "openWindowFailed": "无法打开窗口选择：{msg}",
